@@ -3,3 +3,9 @@ aiohttp
 pyrogram
 tgcrypto
 aiosqlite
+aiohttp
+aiosqlite
+pyrogram
+python-telegram-bot==21.6
+telegram
+tgcrypto
