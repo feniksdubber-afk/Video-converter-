@@ -3,6 +3,7 @@ import re
 from telegram import Update
 from telegram.ext import ContextTypes
 from utils.keyboards import main_menu_keyboard, cancel_keyboard
+from utils.sender import send_file
 from utils.ffmpeg_utils import trim_video, get_video_duration
 
 
@@ -106,12 +107,7 @@ async def handle_trim_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             out_name = f"{base}_trimmed.mp4"
 
             await status.edit_text("✅ Tayyor! Yuborilmoqda...")
-            with open(output_path, "rb") as f:
-                await update.message.reply_document(
-                    document=f,
-                    filename=out_name,
-                    caption=f"✅ Video muvaffaqiyatli kesildi!\n⏱ {start} → {parsed}",
-                )
+            await send_file(update.message, output_path, out_name, f"✅ Video muvaffaqiyatli kesildi!\n⏱ {start} → {parsed}")
             os.remove(output_path)
             await update.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
         else:

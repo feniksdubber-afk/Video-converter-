@@ -2,6 +2,7 @@ import os
 from telegram import Update
 from telegram.ext import ContextTypes
 from utils.keyboards import main_menu_keyboard, cancel_keyboard
+from utils.sender import send_file
 from utils.ffmpeg_utils import merge_subtitle
 from config import TEMP_DIR
 
@@ -65,12 +66,7 @@ async def handle_subtitle_file(update: Update, context: ContextTypes.DEFAULT_TYP
         out_name = f"{base}_subtitled.mp4"
 
         await status.edit_text("✅ Tayyor! Yuborilmoqda...")
-        with open(output_path, "rb") as f:
-            await update.message.reply_document(
-                document=f,
-                filename=out_name,
-                caption="✅ Subtitr muvaffaqiyatli birlashtirildi!",
-            )
+        await send_file(update.message, output_path, out_name, "✅ Subtitr muvaffaqiyatli birlashtirildi!")
         os.remove(output_path)
         await update.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
     else:

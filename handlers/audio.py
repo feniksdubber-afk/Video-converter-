@@ -3,6 +3,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from utils.keyboards import audio_format_keyboard, main_menu_keyboard
 from utils.ffmpeg_utils import remove_audio, video_to_audio
+from utils.sender import send_file
 
 
 async def show_remove_audio_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -24,19 +25,12 @@ async def show_remove_audio_menu(update: Update, context: ContextTypes.DEFAULT_T
         out_name = f"{base}_no_audio.mp4"
 
         await query.message.reply_text("✅ Tayyor! Yuborilmoqda...")
-        with open(output_path, "rb") as f:
-            await query.message.reply_document(
-                document=f,
-                filename=out_name,
-                caption="✅ Ovoz muvaffaqiyatli o'chirildi!",
-            )
+        await send_file(query.message, output_path, out_name, "✅ Ovoz muvaffaqiyatli o'chirildi!")
         os.remove(output_path)
         await query.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
     else:
         await query.message.reply_text(
-            f"❌ Xato:\n`{err}`",
-            reply_markup=main_menu_keyboard(),
-            parse_mode="Markdown",
+            f"❌ Xato:\n`{err}`", reply_markup=main_menu_keyboard(), parse_mode="Markdown"
         )
 
 
@@ -45,8 +39,7 @@ async def show_video_to_audio_menu(update: Update, context: ContextTypes.DEFAULT
     await query.answer()
     context.user_data["state"] = "video_to_audio"
     await query.edit_message_text(
-        "🎵 *Videoni Audioga Aylantirish*\n\n"
-        "Audio formatini tanlang:",
+        "🎵 *Videoni Audioga Aylantirish*\n\nAudio formatini tanlang:",
         reply_markup=audio_format_keyboard(),
         parse_mode="Markdown",
     )
@@ -62,8 +55,7 @@ async def handle_audio_format(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     await query.edit_message_text(
-        f"⏳ *{fmt.upper()} formatiga o'tkazilmoqda...*\n\nKuting...",
-        parse_mode="Markdown",
+        f"⏳ *{fmt.upper()} formatiga o'tkazilmoqda...*\n\nKuting...", parse_mode="Markdown"
     )
 
     ok, output_path, err = video_to_audio(video_path, fmt)
@@ -74,17 +66,10 @@ async def handle_audio_format(update: Update, context: ContextTypes.DEFAULT_TYPE
         out_name = f"{base}.{fmt}"
 
         await query.message.reply_text("✅ Tayyor! Yuborilmoqda...")
-        with open(output_path, "rb") as f:
-            await query.message.reply_document(
-                document=f,
-                filename=out_name,
-                caption=f"✅ Audio muvaffaqiyatli ajratildi! ({fmt.upper()})",
-            )
+        await send_file(query.message, output_path, out_name, f"✅ Audio ajratildi! ({fmt.upper()})")
         os.remove(output_path)
         await query.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
     else:
         await query.message.reply_text(
-            f"❌ Xato:\n`{err}`",
-            reply_markup=main_menu_keyboard(),
-            parse_mode="Markdown",
+            f"❌ Xato:\n`{err}`", reply_markup=main_menu_keyboard(), parse_mode="Markdown"
         )
