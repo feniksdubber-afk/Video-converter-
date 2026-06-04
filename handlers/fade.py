@@ -85,7 +85,7 @@ async def handle_fade_choice(
         "-threads", threads,
         "-vf", vf,
         "-af", af,
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "23",
         "-c:a", "aac", "-b:a", "128k",
         "-movflags", "+faststart",
         output_path,

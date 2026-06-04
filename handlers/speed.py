@@ -89,7 +89,7 @@ async def handle_speed_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
         "-threads", threads,
         "-vf", vf,
         "-af", af,
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "23",
         "-c:a", "aac", "-b:a", "128k",
         "-movflags", "+faststart",
         output_path,

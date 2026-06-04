@@ -194,7 +194,7 @@ async def handle_sample_from(update: Update, context: ContextTypes.DEFAULT_TYPE,
         "-ss", str(start_sec),
         "-i", video_path,
         "-t", str(sample_dur),
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "23",
         "-c:a", "aac", "-b:a", "128k",
         "-movflags", "+faststart",
         output_path,
@@ -250,7 +250,7 @@ async def handle_sample_manual_text(update: Update, context: ContextTypes.DEFAUL
     args = [
         "-ss", str(sec), "-i", video_path,
         "-t", str(sample_dur),
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "23",
         "-c:a", "aac", "-movflags", "+faststart",
         output_path,
     ]

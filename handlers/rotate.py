@@ -66,7 +66,7 @@ async def handle_rotate_choice(update: Update, context: ContextTypes.DEFAULT_TYP
         "-i", video_path,
         "-threads", threads,
     ] + vf_args + [
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "23",
         "-c:a", "copy",
         "-movflags", "+faststart",
         output_path,

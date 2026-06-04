@@ -196,7 +196,7 @@ async def handle_watermark_size(
         "-i", video_path,
         "-threads", threads,
         "-vf", drawtext,
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "23",
         "-c:a", "copy",
         "-movflags", "+faststart",
         output_path,

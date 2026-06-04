@@ -132,7 +132,7 @@ async def handle_crop_custom_text(update: Update, context: ContextTypes.DEFAULT_
     args = [
         "-i", video_path, "-threads", threads,
         "-vf", vf,
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "23",
         "-c:a", "copy", "-movflags", "+faststart",
         output_path,
     ]
@@ -162,7 +162,7 @@ async def _do_crop(query, context, video_path: str, vf: str, label: str, suffix:
     args = [
         "-i", video_path, "-threads", threads,
         "-vf", vf,
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "23",
         "-c:a", "copy", "-movflags", "+faststart",
         output_path,
     ]
