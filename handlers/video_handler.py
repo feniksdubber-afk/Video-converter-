@@ -112,32 +112,32 @@ async def _download_via_pyrogram(file_id: str, file_size: int, local_path: str, 
             except Exception:
                 pass
 
+    spinners = ["⬇️", "⏬", "⬇️", "📥"]
+    spinner_state = [0]
+
     async def file_watcher():
-        """Fayl hajmini kuzatib progress ko'rsatadi (progress callback ishlamasa backup sifatida)"""
-        last_shown = [0]
+        """Har 5 sekundda fayl hajmini o'lchaб progress ko'rsatadi"""
         while True:
-            await asyncio.sleep(3)
+            await asyncio.sleep(5)
             try:
-                if not os.path.exists(local_path):
-                    continue
-                cur = os.path.getsize(local_path)
+                cur = os.path.getsize(local_path) if os.path.exists(local_path) else 0
+                cur_mb = cur / 1024 / 1024
                 if file_size and file_size > 0:
                     percent = min(int(cur / file_size * 100), 99)
-                else:
-                    percent = 0
-                cur_mb = cur / 1024 / 1024
-                if percent - last_shown[0] >= 3:
-                    last_shown[0] = percent
                     bar = _progress_bar(percent)
-                    try:
-                        await status_msg.edit_text(
-                            f"⬇️ *Yuklanmoqda...*\n\n"
-                            f"{bar} `{percent}%`\n"
-                            f"`{cur_mb:.1f}` / `{total_mb:.1f}` MB",
-                            parse_mode="Markdown",
-                        )
-                    except Exception:
-                        pass
+                    text = (
+                        f"⬇️ *Yuklanmoqda...*\n\n"
+                        f"{bar} `{percent}%`\n"
+                        f"`{cur_mb:.1f}` / `{total_mb:.1f}` MB"
+                    )
+                else:
+                    icon = spinners[spinner_state[0] % len(spinners)]
+                    spinner_state[0] += 1
+                    text = f"{icon} *Yuklanmoqda...* `{cur_mb:.1f}` MB"
+                try:
+                    await status_msg.edit_text(text, parse_mode="Markdown")
+                except Exception:
+                    pass
             except Exception:
                 break
 
