@@ -51,7 +51,7 @@ async def handle_rename_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data["state"] = None
     status = await update.message.reply_text("📤 Yuborilmoqda...")
 
-    await send_file(update.message, video_path, out_name, f"✅ Yangi nom: `{out_name}`")
+    await send_file(update.message, video_path, out_name, f"✅ Yangi nom: `{out_name}`", context=context)
     await status.delete()
     await update.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
 
@@ -215,7 +215,7 @@ async def handle_sample_from(update: Update, context: ContextTypes.DEFAULT_TYPE,
         base = os.path.splitext(video_name)[0]
         out_name = f"{base}_sample_{start_sec}s.mp4"
         await status_msg.edit_text("✅ Tayyor! Yuborilmoqda...")
-        await send_file(query.message, output_path, out_name, f"🎬 Namuna ({sample_dur}s)")
+        await send_file(query.message, output_path, out_name, f"🎬 Namuna ({sample_dur}s)", context=context)
         os.remove(output_path)
         await query.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
     else:
@@ -262,7 +262,7 @@ async def handle_sample_manual_text(update: Update, context: ContextTypes.DEFAUL
         base = os.path.splitext(video_name)[0]
         out_name = f"{base}_sample.mp4"
         await status.edit_text("✅ Tayyor! Yuborilmoqda...")
-        await send_file(update.message, output_path, out_name, f"🎬 Namuna ({sample_dur}s)")
+        await send_file(update.message, output_path, out_name, f"🎬 Namuna ({sample_dur}s)", context=context)
         os.remove(output_path)
         await update.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
     else:
@@ -336,7 +336,7 @@ async def handle_split_go(update: Update, context: ContextTypes.DEFAULT_TYPE, ch
         r = sp.run(args, capture_output=True, timeout=600)
         if r.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
             out_name = f"{base}_part{part:02d}.mp4"
-            await send_file(query.message, output_path, out_name, f"✂️ Bo'lak {part}/{total_parts}")
+            await send_file(query.message, output_path, out_name, f"✂️ Bo'lak {part}/{total_parts}", context=context)
             os.remove(output_path)
             sent += 1
             await status_msg.edit_text(
@@ -498,7 +498,7 @@ async def handle_merge_go(update: Update, context: ContextTypes.DEFAULT_TYPE):
         base = os.path.splitext(video_name)[0]
         out_name = f"{base}_merged.mp4"
         await status_msg.edit_text("✅ Tayyor! Yuborilmoqda...")
-        await send_file(query.message, output_path, out_name, f"✅ {len(all_videos)} ta video birlashtirildi!")
+        await send_file(query.message, output_path, out_name, f"✅ {len(all_videos)} ta video birlashtirildi!", context=context)
         try:
             os.remove(output_path)
         except Exception:
@@ -606,7 +606,7 @@ async def handle_vid_aud_merge_received(update: Update, context: ContextTypes.DE
         base = os.path.splitext(video_name)[0]
         out_name = f"{base}_with_audio.mp4"
         await status.edit_text("✅ Tayyor! Yuborilmoqda...")
-        await send_file(msg, output_path, out_name, "✅ Video + Audio birlashtirildi!")
+        await send_file(msg, output_path, out_name, "✅ Video + Audio birlashtirildi!", context=context)
         try:
             os.remove(output_path)
         except Exception:

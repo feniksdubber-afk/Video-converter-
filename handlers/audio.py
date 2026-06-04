@@ -25,7 +25,7 @@ async def show_remove_audio_menu(update: Update, context: ContextTypes.DEFAULT_T
         out_name = f"{base}_no_audio.mp4"
 
         await query.message.reply_text("✅ Tayyor! Yuborilmoqda...")
-        await send_file(query.message, output_path, out_name, "✅ Ovoz muvaffaqiyatli o'chirildi!")
+        await send_file(query.message, output_path, out_name, "✅ Ovoz muvaffaqiyatli o'chirildi!", context=context)
         os.remove(output_path)
         await query.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
     else:
@@ -66,7 +66,7 @@ async def handle_audio_format(update: Update, context: ContextTypes.DEFAULT_TYPE
         out_name = f"{base}.{fmt}"
 
         await query.message.reply_text("✅ Tayyor! Yuborilmoqda...")
-        await send_file(query.message, output_path, out_name, f"✅ Audio ajratildi! ({fmt.upper()})")
+        await send_file(query.message, output_path, out_name, f"✅ Audio ajratildi! ({fmt.upper()})", context=context)
         os.remove(output_path)
         await query.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
     else:

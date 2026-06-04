@@ -56,7 +56,7 @@ async def handle_compress_quality(update: Update, context: ContextTypes.DEFAULT_
             f"📤 Yuborilmoqda...",
             parse_mode="Markdown",
         )
-        await send_file(query.message, output_path, out_name, f"✅ Siqildi! ({percent:.1f}% kam)")
+        await send_file(query.message, output_path, out_name, f"✅ Siqildi! ({percent:.1f}% kam)", context=context)
         os.remove(output_path)
         await query.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
     else:

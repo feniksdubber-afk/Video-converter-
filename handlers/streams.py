@@ -130,7 +130,7 @@ async def handle_remove_stream(update: Update, context: ContextTypes.DEFAULT_TYP
         out_name = f"{base}_stream{stream_idx}_removed.mkv"
 
         await status_msg.edit_text(f"✅ *#{stream_idx} stream o'chirildi!*\n\n📤 Yuborilmoqda...", parse_mode="Markdown")
-        await send_file(query.message, output_path, out_name, f"✅ #{stream_idx} stream o'chirildi!")
+        await send_file(query.message, output_path, out_name, f"✅ #{stream_idx} stream o'chirildi!", context=context)
         os.remove(output_path)
         await query.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
     except Exception as e:
@@ -217,7 +217,7 @@ async def handle_extract_stream(update: Update, context: ContextTypes.DEFAULT_TY
             f"📤 Yuborilmoqda...",
             parse_mode="Markdown",
         )
-        await send_file(query.message, output_path, out_name, f"✅ #{stream_idx} {stype} stream!")
+        await send_file(query.message, output_path, out_name, f"✅ #{stream_idx} {stype} stream!", context=context)
         os.remove(output_path)
         await query.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
     except Exception as e:

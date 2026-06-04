@@ -107,7 +107,7 @@ async def handle_trim_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             out_name = f"{base}_trimmed.mp4"
 
             await status.edit_text("✅ Tayyor! Yuborilmoqda...")
-            await send_file(update.message, output_path, out_name, f"✅ Video muvaffaqiyatli kesildi!\n⏱ {start} → {parsed}")
+            await send_file(update.message, output_path, out_name, f"✅ Video muvaffaqiyatli kesildi!\n⏱ {start} → {parsed}", context=context)
             os.remove(output_path)
             await update.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
         else:

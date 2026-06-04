@@ -58,7 +58,7 @@ async def handle_format_choice(update: Update, context: ContextTypes.DEFAULT_TYP
             f"✅ *Tayyor!* `{fmt.upper()}` formatiga o'tkazildi.\n\n📤 Yuborilmoqda...",
             parse_mode="Markdown",
         )
-        await send_file(query.message, output_path, out_name, f"✅ {fmt.upper()} formatiga o'tkazildi!")
+        await send_file(query.message, output_path, out_name, f"✅ {fmt.upper()} formatiga o'tkazildi!", context=context)
         os.remove(output_path)
         await query.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
     else:
@@ -97,7 +97,7 @@ async def handle_resolution_choice(update: Update, context: ContextTypes.DEFAULT
             f"✅ *Tayyor!* `{label}` o'lchamiga o'zgartirildi.\n\n📤 Yuborilmoqda...",
             parse_mode="Markdown",
         )
-        await send_file(query.message, output_path, out_name, f"✅ {label} o'lchamiga o'zgartirildi!")
+        await send_file(query.message, output_path, out_name, f"✅ {label} o'lchamiga o'zgartirildi!", context=context)
         os.remove(output_path)
         await query.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
     else:

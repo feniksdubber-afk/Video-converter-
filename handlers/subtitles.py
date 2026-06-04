@@ -66,7 +66,7 @@ async def handle_subtitle_file(update: Update, context: ContextTypes.DEFAULT_TYP
         out_name = f"{base}_subtitled.mp4"
 
         await status.edit_text("✅ Tayyor! Yuborilmoqda...")
-        await send_file(update.message, output_path, out_name, "✅ Subtitr muvaffaqiyatli birlashtirildi!")
+        await send_file(update.message, output_path, out_name, "✅ Subtitr muvaffaqiyatli birlashtirildi!", context=context)
         os.remove(output_path)
         await update.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
     else:
