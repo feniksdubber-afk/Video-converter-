@@ -1,5 +1,6 @@
 import os
 import asyncio
+import subprocess
 import aiohttp
 from telegram import Message
 from handlers.video_handler import get_pyrogram_client
@@ -24,9 +25,74 @@ def _fmt_size(b: int) -> str:
     return f"{b:.1f} GB"
 
 
+def _get_video_meta(file_path: str) -> dict:
+    """Video davomiyligi, eni, balandligini qaytaradi."""
+    meta = {"duration": 0, "width": 0, "height": 0}
+    try:
+        r = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1",
+                file_path,
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        for line in r.stdout.strip().split("\n"):
+            if "=" in line:
+                key, val = line.split("=", 1)
+                key = key.strip()
+                val = val.strip()
+                if key == "duration":
+                    try:
+                        meta["duration"] = int(float(val))
+                    except Exception:
+                        pass
+                elif key == "width":
+                    try:
+                        meta["width"] = int(val)
+                    except Exception:
+                        pass
+                elif key == "height":
+                    try:
+                        meta["height"] = int(val)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return meta
+
+
+def _make_thumb(file_path: str, duration: int) -> str | None:
+    """Video o'rtasidan thumbnail (JPEG) oladi. Muvaffaqiyatli bo'lsa path qaytaradi."""
+    try:
+        from config import TEMP_DIR
+        import uuid
+        thumb_path = os.path.join(TEMP_DIR, f"thumb_{uuid.uuid4().hex}.jpg")
+        seek = max(1, duration // 4) if duration > 4 else 1
+        r = subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-ss", str(seek),
+                "-i", file_path,
+                "-frames:v", "1",
+                "-vf", "scale=320:-1",
+                "-q:v", "5",
+                thumb_path,
+            ],
+            capture_output=True, timeout=30,
+        )
+        if r.returncode == 0 and os.path.exists(thumb_path):
+            return thumb_path
+    except Exception:
+        pass
+    return None
+
+
 async def _upload_to_gofile(file_path: str) -> str:
     """Gofile.io ga yuklaydi va download link qaytaradi."""
-    # Avval eng yaqin serverni olamiz
     async with aiohttp.ClientSession() as session:
         async with session.get("https://api.gofile.io/servers") as r:
             data = await r.json()
@@ -49,16 +115,25 @@ async def send_file(
     file_path: str,
     filename: str,
     caption: str = "",
-    context=None,  # user_settings uchun
+    context=None,
 ):
     file_size = os.path.getsize(file_path)
     ext = os.path.splitext(filename)[1].lower()
+    is_video = ext in VIDEO_EXTENSIONS
+    is_audio = ext in AUDIO_EXTENSIONS
 
-    # Upload mode ni aniqlash
     upload_mode = "document"
     if context is not None:
         from utils.user_settings import get as get_setting
         upload_mode = get_setting(context, "upload_mode")
+
+    # Video metadata va thumbnail olish
+    meta = {}
+    thumb_path = None
+    if is_video:
+        meta = _get_video_meta(file_path)
+        if meta.get("duration", 0) > 0:
+            thumb_path = _make_thumb(file_path, meta["duration"])
 
     # ─── 2 GB dan katta → Gofile.io ───────────────────────────────────────
     if file_size > PYROGRAM_LIMIT:
@@ -84,20 +159,41 @@ async def send_file(
                 f"Faylni boshqa usulda olishga harakat qiling.",
                 parse_mode="Markdown",
             )
+        finally:
+            if thumb_path and os.path.exists(thumb_path):
+                os.remove(thumb_path)
         return
 
-    # ─── 50 MB gacha → PTB (tez, progress shart emas) ─────────────────────
+    # ─── 50 MB gacha → PTB ────────────────────────────────────────────────
     if file_size <= TELEGRAM_LIMIT:
-        with open(file_path, "rb") as f:
-            if upload_mode == "video" and ext in VIDEO_EXTENSIONS:
-                await message.reply_video(video=f, filename=filename, caption=caption)
-            elif upload_mode == "audio" and ext in AUDIO_EXTENSIONS:
-                await message.reply_audio(audio=f, filename=filename, caption=caption)
-            else:
-                await message.reply_document(document=f, filename=filename, caption=caption)
+        try:
+            with open(file_path, "rb") as f:
+                if upload_mode == "video" and is_video:
+                    thumb_file = open(thumb_path, "rb") if thumb_path else None
+                    try:
+                        await message.reply_video(
+                            video=f,
+                            filename=filename,
+                            caption=caption,
+                            duration=meta.get("duration", 0) or None,
+                            width=meta.get("width", 0) or None,
+                            height=meta.get("height", 0) or None,
+                            thumbnail=thumb_file,
+                            supports_streaming=True,
+                        )
+                    finally:
+                        if thumb_file:
+                            thumb_file.close()
+                elif upload_mode == "audio" and is_audio:
+                    await message.reply_audio(audio=f, filename=filename, caption=caption)
+                else:
+                    await message.reply_document(document=f, filename=filename, caption=caption)
+        finally:
+            if thumb_path and os.path.exists(thumb_path):
+                os.remove(thumb_path)
         return
 
-    # ─── 50 MB – 2 GB → Pyrogram MTProto, progress bilan ──────────────────
+    # ─── 50 MB – 2 GB → Pyrogram MTProto, progress bilan ─────────────────
     status_msg = await message.reply_text("📤 Yuborilmoqda... 0%")
     client = await get_pyrogram_client()
 
@@ -122,31 +218,39 @@ async def send_file(
             except Exception:
                 pass
 
-    # Upload mode ga qarab yuborish usulini tanlaymiz
-    if upload_mode == "video" and ext in VIDEO_EXTENSIONS:
-        await client.send_video(
-            chat_id=message.chat_id,
-            video=file_path,
-            file_name=filename,
-            caption=caption,
-            progress=progress,
-        )
-    elif upload_mode == "audio" and ext in AUDIO_EXTENSIONS:
-        await client.send_audio(
-            chat_id=message.chat_id,
-            audio=file_path,
-            file_name=filename,
-            caption=caption,
-            progress=progress,
-        )
-    else:
-        await client.send_document(
-            chat_id=message.chat_id,
-            document=file_path,
-            file_name=filename,
-            caption=caption,
-            progress=progress,
-        )
+    try:
+        if upload_mode == "video" and is_video:
+            await client.send_video(
+                chat_id=message.chat_id,
+                video=file_path,
+                file_name=filename,
+                caption=caption,
+                duration=meta.get("duration", 0) or None,
+                width=meta.get("width", 0) or None,
+                height=meta.get("height", 0) or None,
+                thumb=thumb_path,
+                supports_streaming=True,
+                progress=progress,
+            )
+        elif upload_mode == "audio" and is_audio:
+            await client.send_audio(
+                chat_id=message.chat_id,
+                audio=file_path,
+                file_name=filename,
+                caption=caption,
+                progress=progress,
+            )
+        else:
+            await client.send_document(
+                chat_id=message.chat_id,
+                document=file_path,
+                file_name=filename,
+                caption=caption,
+                progress=progress,
+            )
+    finally:
+        if thumb_path and os.path.exists(thumb_path):
+            os.remove(thumb_path)
 
     try:
         await status_msg.edit_text(
