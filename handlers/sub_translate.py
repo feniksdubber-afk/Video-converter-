@@ -97,8 +97,8 @@ async def handle_sub_translate_lang(update: Update, context: ContextTypes.DEFAUL
     context.user_data["state"] = None
 
     await query.edit_message_text(
-        f"⏳ *{lang_name}* tiliga tarjima qilinmoqda...\n\n"
-        "Bu bir necha daqiqa olishi mumkin.",
+        f"🌐 *{lang_name}* tiliga tarjima qilinmoqda...\n\n"
+        f"{_progress_bar(0)} `0%`",
         parse_mode="Markdown",
     )
 
@@ -106,14 +106,25 @@ async def handle_sub_translate_lang(update: Update, context: ContextTypes.DEFAUL
         with open(sub_path, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
 
+        status_msg = query.message
+
         if ext == ".srt":
-            translated = await _translate_srt(content, lang_code)
+            translated = await _translate_srt(content, lang_code, status_msg, lang_name)
         elif ext in (".ass", ".ssa"):
-            translated = await _translate_ass(content, lang_code)
+            translated = await _translate_ass(content, lang_code, status_msg, lang_name)
         elif ext == ".vtt":
-            translated = await _translate_vtt(content, lang_code)
+            translated = await _translate_vtt(content, lang_code, status_msg, lang_name)
         else:
             translated = content
+
+        try:
+            await status_msg.edit_text(
+                f"🌐 *{lang_name}* tiliga tarjima qilinmoqda...\n\n"
+                f"{_progress_bar(100)} `100%` ✅",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
 
         base = os.path.splitext(file_name)[0]
         out_name = f"{base}_{lang_code}{ext}"
@@ -151,16 +162,28 @@ async def handle_sub_translate_lang(update: Update, context: ContextTypes.DEFAUL
 
 # ── Internal translation helpers ─────────────────────────────────────────────
 
-async def _translate_batch(texts: list[str], lang_code: str) -> list[str]:
-    """Translate list of strings using batch API calls (much faster)."""
+def _progress_bar(percent: int, length: int = 12) -> str:
+    filled = int(length * percent / 100)
+    bar = "█" * filled + "░" * (length - filled)
+    return f"[{bar}]"
+
+
+async def _translate_batch(
+    texts: list[str],
+    lang_code: str,
+    status_msg=None,
+    lang_name: str = "",
+) -> list[str]:
+    """Translate list of strings using batch API calls with live progress bar."""
     from deep_translator import GoogleTranslator
     results = []
-    batch_size = 50  # GoogleTranslator batch limit
+    batch_size = 50
+    total = len(texts)
+    done = 0
 
-    for i in range(0, len(texts), batch_size):
+    for i in range(0, total, batch_size):
         batch = texts[i:i + batch_size]
 
-        # Separate empty strings (no need to translate)
         non_empty_indices = [j for j, t in enumerate(batch) if t.strip()]
         non_empty_texts = [batch[j].strip() for j in non_empty_indices]
 
@@ -168,25 +191,38 @@ async def _translate_batch(texts: list[str], lang_code: str) -> list[str]:
         if non_empty_texts:
             try:
                 translator = GoogleTranslator(source="auto", target=lang_code)
-                # translate_batch sends all texts in ONE request
                 translated_list = translator.translate_batch(non_empty_texts)
                 for j, tr in zip(non_empty_indices, translated_list):
                     translated_map[j] = tr or batch[j]
             except Exception:
-                # Fallback: keep originals if batch fails
                 for j in non_empty_indices:
                     translated_map[j] = batch[j]
 
         for j, text in enumerate(batch):
             results.append(translated_map.get(j, text))
 
-        if i + batch_size < len(texts):
+        done += len(batch)
+        percent = min(int(done / total * 100), 99)
+
+        if status_msg:
+            try:
+                bar = _progress_bar(percent)
+                await status_msg.edit_text(
+                    f"🌐 *{lang_name}* tiliga tarjima qilinmoqda...\n\n"
+                    f"{bar} `{percent}%`\n\n"
+                    f"_{done}/{total} satr_",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+
+        if i + batch_size < total:
             await asyncio.sleep(0.3)
 
     return results
 
 
-async def _translate_srt(content: str, lang_code: str) -> str:
+async def _translate_srt(content: str, lang_code: str, status_msg=None, lang_name: str = "") -> str:
     blocks = re.split(r"\n\s*\n", content.strip())
     texts = []
     has_text = []
@@ -201,7 +237,7 @@ async def _translate_srt(content: str, lang_code: str) -> str:
             has_text.append(False)
 
     to_translate = [t for t, h in zip(texts, has_text) if h]
-    translated = await _translate_batch(to_translate, lang_code)
+    translated = await _translate_batch(to_translate, lang_code, status_msg, lang_name)
 
     t_iter = iter(translated)
     result_blocks = []
@@ -216,7 +252,7 @@ async def _translate_srt(content: str, lang_code: str) -> str:
     return "\n\n".join(result_blocks) + "\n"
 
 
-async def _translate_ass(content: str, lang_code: str) -> str:
+async def _translate_ass(content: str, lang_code: str, status_msg=None, lang_name: str = "") -> str:
     lines = content.split("\n")
     texts = []
     line_indices = []
@@ -234,7 +270,7 @@ async def _translate_ass(content: str, lang_code: str) -> str:
         else:
             line_indices.append(None)
 
-    translated = await _translate_batch(texts, lang_code)
+    translated = await _translate_batch(texts, lang_code, status_msg, lang_name)
     t_iter = iter(translated)
 
     result_lines = list(lines)
@@ -252,7 +288,7 @@ async def _translate_ass(content: str, lang_code: str) -> str:
     return "\n".join(result_lines)
 
 
-async def _translate_vtt(content: str, lang_code: str) -> str:
+async def _translate_vtt(content: str, lang_code: str, status_msg=None, lang_name: str = "") -> str:
     lines = content.split("\n")
     texts = []
     text_groups = []
@@ -273,7 +309,7 @@ async def _translate_vtt(content: str, lang_code: str) -> str:
         else:
             i += 1
 
-    translated = await _translate_batch(texts, lang_code)
+    translated = await _translate_batch(texts, lang_code, status_msg, lang_name)
     t_iter = iter(translated)
 
     result_lines = list(lines)
