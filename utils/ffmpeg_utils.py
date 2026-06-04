@@ -346,18 +346,62 @@ def take_manual_shot(input_path: str, timestamp: str) -> tuple[bool, str, str]:
     return ok, output_path, err
 
 
-def merge_subtitle(video_path: str, subtitle_path: str) -> tuple[bool, str, str]:
+def softsub_video(video_path: str, subtitle_path: str) -> tuple[bool, str, str]:
+    """Subtitle ni video stream sifatida birlashtiradi (qayta kodlash yo'q) → MKV."""
+    output_path = make_temp_path("mkv")
+    sub_ext = os.path.splitext(subtitle_path)[1].lower()
+    sub_codec = "copy" if sub_ext in (".ass", ".ssa") else "srt"
+    args = [
+        "-i", video_path,
+        "-i", subtitle_path,
+        "-map", "0",
+        "-map", "1",
+        "-c", "copy",
+        "-c:s", sub_codec,
+        output_path,
+    ]
+    ok, err = run_ffmpeg(args)
+    return ok, output_path, err
+
+
+async def hardsub_video_async(
+    video_path: str,
+    subtitle_path: str,
+    font_size: int,
+    status_msg,
+    is_ass: bool = False,
+) -> tuple[bool, str, str]:
+    """Subtitle ni video kadrlariga yoqib qo'yadi (hardsub) → MP4."""
     output_path = make_temp_path("mp4")
     threads = _thread_count()
     escaped = subtitle_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+
+    if is_ass:
+        vf = f"subtitles='{escaped}'"
+    else:
+        force_style = (
+            f"FontSize={font_size},"
+            "Fontname=Arial,"
+            "PrimaryColour=&H00FFFFFF,"
+            "OutlineColour=&H00000000,"
+            "Outline=2,"
+            "Shadow=1,"
+            "MarginV=20"
+        )
+        vf = f"subtitles='{escaped}':force_style='{force_style}'"
+
     args = [
         "-i", video_path,
         "-threads", threads,
-        "-vf", f"subtitles='{escaped}'",
+        "-vf", vf,
         "-c:v", "libx264", "-preset", "medium", "-crf", "23",
         "-c:a", "copy",
         "-movflags", "+faststart",
         output_path,
     ]
-    ok, err = run_ffmpeg(args)
+    ok, err = await run_ffmpeg_async(
+        args, status_msg,
+        label="Hardsub qo'shilmoqda",
+        input_path=video_path,
+    )
     return ok, output_path, err

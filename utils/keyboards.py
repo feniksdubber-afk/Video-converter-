@@ -36,7 +36,10 @@ def main_menu_keyboard():
         ],
         # ── Subtitles ─────────────────────────────────────────────
         [
-            InlineKeyboardButton("📝 Subtitr Qo'shish",  callback_data="subtitle"),
+            InlineKeyboardButton("📝 Soft Sub",           callback_data="subtitle"),
+            InlineKeyboardButton("🔥 Hardsub",            callback_data="hardsub"),
+        ],
+        [
             InlineKeyboardButton("📤 Subtitr Extractor", callback_data="subtitle_extractor"),
         ],
         # ── Streams ───────────────────────────────────────────────
