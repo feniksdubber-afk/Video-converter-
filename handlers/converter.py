@@ -2,7 +2,7 @@ import os
 from telegram import Update
 from telegram.ext import ContextTypes
 from utils.keyboards import format_keyboard, resolution_keyboard, main_menu_keyboard
-from utils.ffmpeg_utils import convert_video, change_resolution, get_video_info
+from utils.ffmpeg_utils import convert_video_async, change_resolution_async, get_video_info
 from utils.sender import send_file
 
 
@@ -41,25 +41,31 @@ async def handle_format_choice(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("❌ Video topilmadi. Iltimos qaytadan video yuboring.")
         return
 
-    await query.edit_message_text(
-        f"⏳ *{fmt.upper()} formatiga o'tkazilmoqda...*\n\nKuting...", parse_mode="Markdown"
+    status_msg = await query.message.reply_text(
+        f"⚙️ *{fmt.upper()} formatiga o'tkazilmoqda...*\n\n`[░░░░░░░░░░░░]` `0%`",
+        parse_mode="Markdown",
     )
+    await query.edit_message_text(f"⏳ Konvertatsiya boshlandi → {fmt.upper()}...")
 
-    ok, output_path, err = convert_video(video_path, fmt)
+    ok, output_path, err = await convert_video_async(video_path, fmt, status_msg)
 
     if ok and os.path.exists(output_path):
         video_name = context.user_data.get("video_name", "video")
         base = os.path.splitext(video_name)[0]
         out_name = f"{base}_converted.{fmt}"
 
-        await query.message.reply_text("✅ Tayyor! Yuborilmoqda...")
+        await status_msg.edit_text(
+            f"✅ *Tayyor!* `{fmt.upper()}` formatiga o'tkazildi.\n\n📤 Yuborilmoqda...",
+            parse_mode="Markdown",
+        )
         await send_file(query.message, output_path, out_name, f"✅ {fmt.upper()} formatiga o'tkazildi!")
         os.remove(output_path)
         await query.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
     else:
-        await query.message.reply_text(
-            f"❌ Konvertatsiyada xato:\n`{err}`", reply_markup=main_menu_keyboard(), parse_mode="Markdown"
+        await status_msg.edit_text(
+            f"❌ Konvertatsiyada xato:\n`{err}`", parse_mode="Markdown"
         )
+        await query.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
 
 
 async def handle_resolution_choice(update: Update, context: ContextTypes.DEFAULT_TYPE, height: int):
@@ -74,22 +80,28 @@ async def handle_resolution_choice(update: Update, context: ContextTypes.DEFAULT
     res_labels = {2160: "4K (2160p)", 1080: "1080p", 720: "720p", 480: "480p", 360: "360p", 240: "240p"}
     label = res_labels.get(height, f"{height}p")
 
-    await query.edit_message_text(
-        f"⏳ *{label} o'lchamiga o'zgartirilmoqda...*\n\nKuting...", parse_mode="Markdown"
+    status_msg = await query.message.reply_text(
+        f"⚙️ *{label} o'lchamiga o'zgartirilmoqda...*\n\n`[░░░░░░░░░░░░]` `0%`",
+        parse_mode="Markdown",
     )
+    await query.edit_message_text(f"⏳ O'lcham o'zgartirilmoqda → {label}...")
 
-    ok, output_path, err = change_resolution(video_path, height)
+    ok, output_path, err = await change_resolution_async(video_path, height, status_msg)
 
     if ok and os.path.exists(output_path):
         video_name = context.user_data.get("video_name", "video")
         base = os.path.splitext(video_name)[0]
         out_name = f"{base}_{height}p.mp4"
 
-        await query.message.reply_text("✅ Tayyor! Yuborilmoqda...")
+        await status_msg.edit_text(
+            f"✅ *Tayyor!* `{label}` o'lchamiga o'zgartirildi.\n\n📤 Yuborilmoqda...",
+            parse_mode="Markdown",
+        )
         await send_file(query.message, output_path, out_name, f"✅ {label} o'lchamiga o'zgartirildi!")
         os.remove(output_path)
         await query.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
     else:
-        await query.message.reply_text(
-            f"❌ Xato:\n`{err}`", reply_markup=main_menu_keyboard(), parse_mode="Markdown"
+        await status_msg.edit_text(
+            f"❌ Xato:\n`{err}`", parse_mode="Markdown"
         )
+        await query.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())

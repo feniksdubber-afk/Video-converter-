@@ -1,6 +1,5 @@
 import os
 import asyncio
-import aiohttp
 from telegram import Update
 from telegram.ext import ContextTypes
 from utils.keyboards import main_menu_keyboard
@@ -8,6 +7,7 @@ from config import TEMP_DIR, BOT_TOKEN, API_ID, API_HASH
 from pyrogram import Client
 
 _pyrogram_client = None
+
 
 async def get_pyrogram_client() -> Client:
     global _pyrogram_client
@@ -21,6 +21,11 @@ async def get_pyrogram_client() -> Client:
         )
         await _pyrogram_client.start()
     return _pyrogram_client
+
+
+def _progress_bar(percent: int, length: int = 12) -> str:
+    filled = int(length * percent / 100)
+    return "[" + "█" * filled + "░" * (length - filled) + "]"
 
 
 async def video_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -49,18 +54,19 @@ async def video_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("❌ Fayl juda katta (2 GB dan ortiq).")
         return
 
-    status_msg = await message.reply_text("⏳ Video yuklanmoqda...")
+    status_msg = await message.reply_text("⏳ Video yuklanmoqda... 0%")
 
     try:
         ext = os.path.splitext(file_name)[1].lstrip(".").lower() or "mp4"
         local_path = os.path.join(TEMP_DIR, f"{file.file_unique_id}.{ext}")
 
         if file.file_size and file.file_size <= 20 * 1024 * 1024:
-            # 20MB gacha — oddiy usul
+            # 20MB gacha — PTB oddiy usuli
+            await status_msg.edit_text("⬇️ *Yuklanmoqda...*\n\n`[████████████]` `100%`\n_(kichik fayl)_", parse_mode="Markdown")
             tg_file = await file.get_file()
             await tg_file.download_to_drive(local_path)
         else:
-            # 20MB dan katta — Pyrogram MTProto orqali
+            # 20MB dan katta — Pyrogram MTProto + progress
             await _download_via_pyrogram(file.file_id, file.file_size, local_path, status_msg)
 
         context.user_data["video_path"] = local_path
@@ -84,28 +90,34 @@ async def video_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _download_via_pyrogram(file_id: str, file_size: int, local_path: str, status_msg):
     client = await get_pyrogram_client()
-    total_mb = (file_size or 0) // 1024 // 1024
-    last_reported = -1
+    total_mb = (file_size or 0) / 1024 / 1024
+    last_percent = [0]
 
-    def progress(current, total):
-        nonlocal last_reported
+    async def progress(current, total):
         if total == 0:
             return
-        percent = int(current / total * 100)
-        if percent - last_reported >= 5:
-            last_reported = percent
-            cur_mb = current // 1024 // 1024
-            asyncio.get_event_loop().call_soon_threadsafe(
-                asyncio.ensure_future,
-                _safe_edit(status_msg, f"🚀 Yuklanmoqda... {percent}%\n({cur_mb} / {total_mb} MB)")
-            )
+        percent = min(int(current / total * 100), 99)
+        if percent - last_percent[0] >= 5:
+            last_percent[0] = percent
+            cur_mb = current / 1024 / 1024
+            bar = _progress_bar(percent)
+            try:
+                await status_msg.edit_text(
+                    f"⬇️ *Yuklanmoqda...*\n\n"
+                    f"{bar} `{percent}%`\n"
+                    f"`{cur_mb:.1f}` / `{total_mb:.1f}` MB",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
 
     await client.download_media(file_id, file_name=local_path, progress=progress)
 
-
-async def _safe_edit(msg, text):
     try:
-        await msg.edit_text(text)
+        await status_msg.edit_text(
+            f"⬇️ *Yuklanmoqda...*\n\n{_progress_bar(100)} `100%`",
+            parse_mode="Markdown",
+        )
     except Exception:
         pass
 
