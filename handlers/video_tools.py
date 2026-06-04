@@ -551,8 +551,13 @@ async def handle_vid_aud_merge_received(update: Update, context: ContextTypes.DE
     audio_path = make_temp_path(ext)
 
     status = await msg.reply_text("⬇️ Audio yuklanmoqda...")
-    tg_file = await doc.get_file()
-    await tg_file.download_to_drive(audio_path)
+    if doc.file_size and doc.file_size > 20 * 1024 * 1024:
+        from handlers.video_handler import get_pyrogram_client
+        client = await get_pyrogram_client()
+        await client.download_media(doc.file_id, file_name=audio_path)
+    else:
+        tg_file = await doc.get_file()
+        await tg_file.download_to_drive(audio_path)
 
     video_path = context.user_data.get("video_path")
     output_path = make_temp_path("mp4")

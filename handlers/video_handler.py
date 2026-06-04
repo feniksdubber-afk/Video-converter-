@@ -89,6 +89,7 @@ async def video_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _download_via_pyrogram(file_id: str, file_size: int, local_path: str, status_msg):
+    import asyncio
     client = await get_pyrogram_client()
     total_mb = (file_size or 0) / 1024 / 1024
     last_percent = [0]
@@ -111,7 +112,44 @@ async def _download_via_pyrogram(file_id: str, file_size: int, local_path: str, 
             except Exception:
                 pass
 
-    await client.download_media(file_id, file_name=local_path, progress=progress)
+    async def file_watcher():
+        """Fayl hajmini kuzatib progress ko'rsatadi (progress callback ishlamasa backup sifatida)"""
+        last_shown = [0]
+        while True:
+            await asyncio.sleep(3)
+            try:
+                if not os.path.exists(local_path):
+                    continue
+                cur = os.path.getsize(local_path)
+                if file_size and file_size > 0:
+                    percent = min(int(cur / file_size * 100), 99)
+                else:
+                    percent = 0
+                cur_mb = cur / 1024 / 1024
+                if percent - last_shown[0] >= 3:
+                    last_shown[0] = percent
+                    bar = _progress_bar(percent)
+                    try:
+                        await status_msg.edit_text(
+                            f"⬇️ *Yuklanmoqda...*\n\n"
+                            f"{bar} `{percent}%`\n"
+                            f"`{cur_mb:.1f}` / `{total_mb:.1f}` MB",
+                            parse_mode="Markdown",
+                        )
+                    except Exception:
+                        pass
+            except Exception:
+                break
+
+    watcher_task = asyncio.create_task(file_watcher())
+    try:
+        await client.download_media(file_id, file_name=local_path, progress=progress)
+    finally:
+        watcher_task.cancel()
+        try:
+            await watcher_task
+        except asyncio.CancelledError:
+            pass
 
     try:
         await status_msg.edit_text(
