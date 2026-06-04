@@ -151,26 +151,38 @@ async def handle_sub_translate_lang(update: Update, context: ContextTypes.DEFAUL
 
 # ── Internal translation helpers ─────────────────────────────────────────────
 
-def _make_translator(lang_code: str):
-    from deep_translator import GoogleTranslator
-    return GoogleTranslator(source="auto", target=lang_code)
-
-
 async def _translate_batch(texts: list[str], lang_code: str) -> list[str]:
-    """Translate list of strings with small delay between batches."""
-    translator = _make_translator(lang_code)
+    """Translate list of strings using batch API calls (much faster)."""
+    from deep_translator import GoogleTranslator
     results = []
-    batch_size = 30
+    batch_size = 50  # GoogleTranslator batch limit
+
     for i in range(0, len(texts), batch_size):
         batch = texts[i:i + batch_size]
-        for text in batch:
+
+        # Separate empty strings (no need to translate)
+        non_empty_indices = [j for j, t in enumerate(batch) if t.strip()]
+        non_empty_texts = [batch[j].strip() for j in non_empty_indices]
+
+        translated_map = {}
+        if non_empty_texts:
             try:
-                result = translator.translate(text.strip()) if text.strip() else text
-                results.append(result or text)
+                translator = GoogleTranslator(source="auto", target=lang_code)
+                # translate_batch sends all texts in ONE request
+                translated_list = translator.translate_batch(non_empty_texts)
+                for j, tr in zip(non_empty_indices, translated_list):
+                    translated_map[j] = tr or batch[j]
             except Exception:
-                results.append(text)
+                # Fallback: keep originals if batch fails
+                for j in non_empty_indices:
+                    translated_map[j] = batch[j]
+
+        for j, text in enumerate(batch):
+            results.append(translated_map.get(j, text))
+
         if i + batch_size < len(texts):
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
+
     return results
 
 
