@@ -363,8 +363,7 @@ async def handle_split_set_dur(update: Update, context: ContextTypes.DEFAULT_TYP
 async def handle_split_dur_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text.isdigit() and 10 <= int(text) <= 3600:
-        from utils.user_settings import set_
-        set_(context, "split_duration", int(text))
+        context.user_data.setdefault("settings", {})["split_duration"] = int(text)
         context.user_data["state"] = None
         await update.message.reply_text(
             f"✅ Bo'lak uzunligi `{text}` soniyaga o'rnatildi.",

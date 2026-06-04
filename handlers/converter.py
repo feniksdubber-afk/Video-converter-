@@ -81,22 +81,16 @@ async def handle_convert_as_video(update: Update, context: ContextTypes.DEFAULT_
     video_name = context.user_data.get("video_name", "video")
     await query.edit_message_text("⏳ Video sifatida yuborilmoqda...")
 
-    original_mode = None
+    settings = context.user_data.setdefault("settings", {})
+    original_mode = settings.get("upload_mode", "document")
     try:
-        from utils.user_settings import get as get_setting, set_ as set_setting
-        original_mode = get_setting(context, "upload_mode")
-        set_setting(context, "upload_mode", "video")
+        settings["upload_mode"] = "video"
         await send_file(query.message, video_path, video_name, "✅ Video sifatida yuborildi!", context=context)
-        set_setting(context, "upload_mode", original_mode)
     except Exception as e:
-        if original_mode is not None:
-            try:
-                from utils.user_settings import set_ as set_setting
-                set_setting(context, "upload_mode", original_mode)
-            except Exception:
-                pass
         await query.message.reply_text(f"❌ Xato:\n`{e}`", parse_mode="Markdown")
         return
+    finally:
+        settings["upload_mode"] = original_mode
 
     await query.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
 
@@ -114,22 +108,16 @@ async def handle_convert_as_file(update: Update, context: ContextTypes.DEFAULT_T
     video_name = context.user_data.get("video_name", "video")
     await query.edit_message_text("⏳ Fayl sifatida yuborilmoqda...")
 
-    original_mode = None
+    settings = context.user_data.setdefault("settings", {})
+    original_mode = settings.get("upload_mode", "document")
     try:
-        from utils.user_settings import get as get_setting, set_ as set_setting
-        original_mode = get_setting(context, "upload_mode")
-        set_setting(context, "upload_mode", "document")
+        settings["upload_mode"] = "document"
         await send_file(query.message, video_path, video_name, "✅ Fayl sifatida yuborildi!", context=context)
-        set_setting(context, "upload_mode", original_mode)
     except Exception as e:
-        if original_mode is not None:
-            try:
-                from utils.user_settings import set_ as set_setting
-                set_setting(context, "upload_mode", original_mode)
-            except Exception:
-                pass
         await query.message.reply_text(f"❌ Xato:\n`{e}`", parse_mode="Markdown")
         return
+    finally:
+        settings["upload_mode"] = original_mode
 
     await query.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
 
