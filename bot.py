@@ -282,14 +282,26 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if state == "subtitle_wait":
         await handle_subtitle_file(update, context)
+        return
     elif state == "hardsub_wait":
         await handle_hardsub_file(update, context)
+        return
     elif state == "sub_translate_wait":
         await handle_sub_translate_file(update, context)
+        return
     elif state == "sub_converter_wait":
         await handle_sub_converter_file(update, context)
-    else:
-        await video_received(update, context)
+        return
+
+    # Subtitle fayl to'g'ridan-to'g'ri yuborilgan bo'lsa
+    doc = update.message.document
+    if doc and doc.file_name:
+        ext = os.path.splitext(doc.file_name)[1].lower()
+        if ext in (".srt", ".ass", ".ssa", ".vtt"):
+            await _handle_subtitle_direct(update, context)
+            return
+
+    await video_received(update, context)
 
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -297,6 +309,26 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await ensure_loaded(user_id, context)
     if context.user_data.get("state") == "settings_thumb":
         await handle_settings_photo(update, context)
+
+
+async def _handle_subtitle_direct(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """SRT/ASS/VTT fayl to'g'ridan-to'g'ri yuborilganda menyu ko'rsatadi."""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    doc = update.message.document
+    ext = os.path.splitext(doc.file_name or "")[1].lower()
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🌐 Tarjima qilish", callback_data="sub_translate"),
+            InlineKeyboardButton("🔄 Format o'zgartirish", callback_data="sub_converter"),
+        ],
+        [InlineKeyboardButton("❌ Bekor qilish", callback_data="cancel")],
+    ])
+    await update.message.reply_text(
+        f"📄 *{ext.upper()}* subtitr fayl aniqlandi!\n\n"
+        "Nima qilmoqchisiz?",
+        reply_markup=keyboard,
+        parse_mode="Markdown",
+    )
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
