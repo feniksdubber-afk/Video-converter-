@@ -41,6 +41,10 @@ def main_menu_keyboard():
         ],
         [
             InlineKeyboardButton("📤 Subtitr Extractor", callback_data="subtitle_extractor"),
+            InlineKeyboardButton("🔄 Sub Konvertor",     callback_data="sub_converter"),
+        ],
+        [
+            InlineKeyboardButton("🌐 Sub Tarjimon",      callback_data="sub_translate"),
         ],
         # ── Streams ───────────────────────────────────────────────
         [
