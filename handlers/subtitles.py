@@ -3,8 +3,10 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from utils.keyboards import main_menu_keyboard, cancel_keyboard
 from utils.sender import send_file
-from utils.ffmpeg_utils import merge_subtitle
+from utils.ffmpeg_utils import softsub_video
 from config import TEMP_DIR
+
+SUPPORTED_FORMATS = {".srt", ".ass", ".ssa", ".vtt"}
 
 
 async def show_subtitle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -12,9 +14,13 @@ async def show_subtitle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
     context.user_data["state"] = "subtitle_wait"
     await query.edit_message_text(
-        "📝 *Subtitr Birlashtirish*\n\n"
-        "Iltimos `.srt` formatidagi subtitr faylini yuboring.\n\n"
-        "⚠️ Faqat SRT format qo'llab-quvvatlanadi",
+        "📝 *Soft Sub — Subtitr Birlashtirish*\n\n"
+        "Subtitr faylini yuboring:\n"
+        "• `.srt` — oddiy subtitr\n"
+        "• `.ass` / `.ssa` — stilizatsiyalangan\n"
+        "• `.vtt` — WebVTT\n\n"
+        "✅ Video qayta kodlanmaydi — tez ishlaydi\n"
+        "📦 Natija: *MKV* format (multi-stream uchun eng mos)",
         reply_markup=cancel_keyboard(),
         parse_mode="Markdown",
     )
@@ -24,16 +30,18 @@ async def handle_subtitle_file(update: Update, context: ContextTypes.DEFAULT_TYP
     doc = update.message.document
     if not doc:
         await update.message.reply_text(
-            "❌ Fayl topilmadi. Iltimos SRT faylni yuboring.",
+            "❌ Fayl topilmadi. Iltimos subtitr faylini yuboring.",
             reply_markup=cancel_keyboard(),
         )
         return
 
     file_name = doc.file_name or ""
-    if not file_name.lower().endswith(".srt"):
+    ext = os.path.splitext(file_name)[1].lower()
+    if ext not in SUPPORTED_FORMATS:
         await update.message.reply_text(
-            "❌ Noto'g'ri format. Faqat `.srt` fayl qabul qilinadi.",
+            "❌ Noto'g'ri format. `.srt`, `.ass`, `.ssa`, `.vtt` qabul qilinadi.",
             reply_markup=cancel_keyboard(),
+            parse_mode="Markdown",
         )
         return
 
@@ -45,34 +53,31 @@ async def handle_subtitle_file(update: Update, context: ContextTypes.DEFAULT_TYP
 
     status = await update.message.reply_text("⏳ Subtitr yuklanmoqda...")
 
-    srt_path = os.path.join(TEMP_DIR, f"{doc.file_unique_id}.srt")
+    sub_path = os.path.join(TEMP_DIR, f"softsub_{doc.file_unique_id}{ext}")
     tg_file = await doc.get_file()
-    await tg_file.download_to_drive(srt_path)
+    await tg_file.download_to_drive(sub_path)
 
     context.user_data["state"] = None
-    await status.edit_text(
-        "⏳ *Subtitr video bilan birlashtirilmoqda...*\n\nKuting...",
-        parse_mode="Markdown",
-    )
+    await status.edit_text("⏳ *Subtitr stream sifatida birlashtirilmoqda...*", parse_mode="Markdown")
 
-    ok, output_path, err = merge_subtitle(video_path, srt_path)
+    ok, output_path, err = softsub_video(video_path, sub_path)
 
-    if os.path.exists(srt_path):
-        os.remove(srt_path)
+    if os.path.exists(sub_path):
+        os.remove(sub_path)
 
     if ok and os.path.exists(output_path):
         video_name = context.user_data.get("video_name", "video")
         base = os.path.splitext(video_name)[0]
-        out_name = f"{base}_subtitled.mp4"
-
+        out_name = f"{base}_softsub.mkv"
         await status.edit_text("✅ Tayyor! Yuborilmoqda...")
-        await send_file(update.message, output_path, out_name, "✅ Subtitr muvaffaqiyatli birlashtirildi!", context=context)
+        await send_file(update.message, output_path, out_name,
+                        "✅ Soft sub muvaffaqiyatli birlashtirildi!", context=context)
         os.remove(output_path)
         await update.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
     else:
         await status.edit_text(
             f"❌ Subtitr birlashtirishda xato:\n`{err}`\n\n"
-            "SRT fayl to'g'ri formatda ekanligini tekshiring.",
+            "Fayl to'g'ri formatda ekanligini tekshiring.",
             parse_mode="Markdown",
         )
         await update.message.reply_text("Qaytadan?", reply_markup=main_menu_keyboard())
