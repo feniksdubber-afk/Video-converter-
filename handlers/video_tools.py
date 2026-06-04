@@ -470,35 +470,48 @@ async def handle_merge_go(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f.write(f"file '{p}'\n")
 
     output_path = make_temp_path("mp4")
-    status_msg = await query.message.reply_text("⏳ Birlashtirilmoqda...")
+    status_msg = await query.message.reply_text(
+        f"⚙️ *{len(all_videos)} ta video birlashtirilmoqda...*\n\n`[░░░░░░░░░░░░]` `0%`",
+        parse_mode="Markdown",
+    )
     await query.edit_message_text(f"⏳ {len(all_videos)} ta video birlashtirilmoqda...")
 
-    import subprocess as sp
-    args = [
-        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+    ffmpeg_args = [
+        "-f", "concat", "-safe", "0",
         "-i", list_path,
         "-c", "copy",
         "-movflags", "+faststart",
         output_path,
     ]
-    r = sp.run(args, capture_output=True, text=True, timeout=1800)
-    os.remove(list_path)
+    ok, err = await run_ffmpeg_async(
+        ffmpeg_args, status_msg,
+        label=f"{len(all_videos)} ta video birlashtirilmoqda",
+        input_path=all_videos[0],
+    )
+    try:
+        os.remove(list_path)
+    except Exception:
+        pass
 
-    if r.returncode == 0 and os.path.exists(output_path):
+    if ok and os.path.exists(output_path):
         video_name = context.user_data.get("video_name", "video")
         base = os.path.splitext(video_name)[0]
         out_name = f"{base}_merged.mp4"
         await status_msg.edit_text("✅ Tayyor! Yuborilmoqda...")
         await send_file(query.message, output_path, out_name, f"✅ {len(all_videos)} ta video birlashtirildi!")
-        os.remove(output_path)
-        # Queueni tozalash
+        try:
+            os.remove(output_path)
+        except Exception:
+            pass
         for p in queue:
-            try: os.remove(p)
-            except: pass
+            try:
+                os.remove(p)
+            except Exception:
+                pass
         context.user_data["merge_queue"] = []
         await query.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
     else:
-        await status_msg.edit_text(f"❌ Xato:\n`{r.stderr[-800:]}`", parse_mode="Markdown")
+        await status_msg.edit_text(f"❌ Xato:\n`{err[-800:]}`", parse_mode="Markdown")
         await query.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
 
 
@@ -562,11 +575,12 @@ async def handle_vid_aud_merge_received(update: Update, context: ContextTypes.DE
     video_path = context.user_data.get("video_path")
     output_path = make_temp_path("mp4")
 
-    await status.edit_text("⚙️ Birlashtirilmoqda...")
+    await status.edit_text(
+        "⚙️ *Birlashtirilmoqda...*\n\n`[░░░░░░░░░░░░]` `0%`",
+        parse_mode="Markdown",
+    )
 
-    import subprocess as sp
-    args = [
-        "ffmpeg", "-y",
+    ffmpeg_args = [
         "-i", video_path,
         "-i", audio_path,
         "-c:v", "copy",
@@ -576,20 +590,30 @@ async def handle_vid_aud_merge_received(update: Update, context: ContextTypes.DE
         "-movflags", "+faststart",
         output_path,
     ]
-    r = sp.run(args, capture_output=True, text=True, timeout=600)
-    os.remove(audio_path)
+    ok, err = await run_ffmpeg_async(
+        ffmpeg_args, status,
+        label="Video + Audio birlashtirilmoqda",
+        input_path=video_path,
+    )
+    try:
+        os.remove(audio_path)
+    except Exception:
+        pass
     context.user_data["state"] = None
 
-    if r.returncode == 0 and os.path.exists(output_path):
+    if ok and os.path.exists(output_path):
         video_name = context.user_data.get("video_name", "video")
         base = os.path.splitext(video_name)[0]
         out_name = f"{base}_with_audio.mp4"
         await status.edit_text("✅ Tayyor! Yuborilmoqda...")
         await send_file(msg, output_path, out_name, "✅ Video + Audio birlashtirildi!")
-        os.remove(output_path)
+        try:
+            os.remove(output_path)
+        except Exception:
+            pass
         await msg.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
     else:
-        await status.edit_text(f"❌ Xato:\n`{r.stderr[-800:]}`", parse_mode="Markdown")
+        await status.edit_text(f"❌ Xato:\n`{err[-800:]}`", parse_mode="Markdown")
         await msg.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
     return True
 
