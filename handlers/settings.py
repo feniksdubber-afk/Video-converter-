@@ -13,7 +13,7 @@ def _settings_keyboard(context):
     keyboard = [
         [InlineKeyboardButton(f"📤 Upload rejimi: {upload_label}", callback_data="cfg_upload_cycle")],
         [InlineKeyboardButton(
-            f"✏️ Fayl nomini o'zgartirish: {'✅ Yoqiq' if rename else '❌ O'chiq'}",
+            f"✏️ Fayl nomini o'zgartirish: {'✅ Yoqiq' if rename else '❌ Óchiq'}",
             callback_data="cfg_rename_toggle",
         )],
         [InlineKeyboardButton("🖼 Custom Thumbnail o'rnatish", callback_data="cfg_thumb_set")],
