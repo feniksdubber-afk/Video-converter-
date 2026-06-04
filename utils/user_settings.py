@@ -34,10 +34,11 @@ def summary(context) -> str:
     split = s.get("split_duration", DEFAULTS["split_duration"])
 
     upload_label = {"document": "📄 Dokument", "video": "🎬 Video", "audio": "🎵 Audio"}.get(upload, upload)
+    rename_label = "✅ Yoqiq" if rename else "❌ O'chiq"
     return (
         f"⚙️ *Joriy sozlamalar:*\n\n"
         f"📤 Upload rejimi: {upload_label}\n"
-        f"✏️ Fayl nomini o'zgartirish: {'✅ Yoqiq' if rename else '❌ O'chiq'}\n"
+        f"✏️ Fayl nomini o'zgartirish: {rename_label}\n"
         f"🖼 Custom thumbnail: {thumb}\n"
         f"🎬 Sample davomiyligi: `{sample}` soniya\n"
         f"✂️ Split davomiyligi: `{split}` soniya\n"
