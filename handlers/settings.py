@@ -1,7 +1,7 @@
 import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from utils.user_settings import get, set_, reset, summary
+from utils.user_settings import ensure_loaded, get, set_, reset, summary
 from utils.keyboards import main_menu_keyboard
 
 
@@ -13,20 +13,22 @@ def _settings_keyboard(context):
     keyboard = [
         [InlineKeyboardButton(f"📤 Upload rejimi: {upload_label}", callback_data="cfg_upload_cycle")],
         [InlineKeyboardButton(
-            f"✏️ Fayl nomini o'zgartirish: {'✅ Yoqiq' if rename else '❌ Óchiq'}",
+            f"✏️ Fayl nomini o'zgartirish: {'✅ Yoqiq' if rename else '❌ O\'chiq'}",
             callback_data="cfg_rename_toggle",
         )],
-        [InlineKeyboardButton("🖼 Custom Thumbnail o'rnatish", callback_data="cfg_thumb_set")],
-        [InlineKeyboardButton("🖼 Custom Thumbnail o'chirish", callback_data="cfg_thumb_clear")],
-        [InlineKeyboardButton("🎬 Sample davomiyligi", callback_data="cfg_sample_dur")],
-        [InlineKeyboardButton("✂️ Split davomiyligi", callback_data="cfg_split_dur")],
-        [InlineKeyboardButton("🔄 Sozlamalarni tiklash", callback_data="cfg_reset")],
-        [InlineKeyboardButton("❌ Yopish", callback_data="cfg_close")],
+        [InlineKeyboardButton("🖼 Custom Thumbnail o'rnatish",  callback_data="cfg_thumb_set")],
+        [InlineKeyboardButton("🖼 Custom Thumbnail o'chirish",  callback_data="cfg_thumb_clear")],
+        [InlineKeyboardButton("🎬 Sample davomiyligi",          callback_data="cfg_sample_dur")],
+        [InlineKeyboardButton("✂️ Split davomiyligi",           callback_data="cfg_split_dur")],
+        [InlineKeyboardButton("🔄 Sozlamalarni tiklash",        callback_data="cfg_reset")],
+        [InlineKeyboardButton("❌ Yopish",                      callback_data="cfg_close")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
 
 async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = (update.message or update.callback_query).from_user.id
+    await ensure_loaded(user_id, context)
     text = summary(context)
     if update.message:
         await update.message.reply_text(text, reply_markup=_settings_keyboard(context), parse_mode="Markdown")
@@ -38,19 +40,21 @@ async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    user_id = query.from_user.id
+    await ensure_loaded(user_id, context)
     data = query.data
 
     if data == "cfg_upload_cycle":
         modes = ["document", "video", "audio"]
         current = get(context, "upload_mode")
         next_mode = modes[(modes.index(current) + 1) % len(modes)]
-        set_(context, "upload_mode", next_mode)
+        await set_(user_id, context, "upload_mode", next_mode)
         await query.answer(f"Upload rejimi: {next_mode}")
         await query.edit_message_text(summary(context), reply_markup=_settings_keyboard(context), parse_mode="Markdown")
 
     elif data == "cfg_rename_toggle":
         current = get(context, "rename_file")
-        set_(context, "rename_file", not current)
+        await set_(user_id, context, "rename_file", not current)
         await query.answer("O'zgartirildi")
         await query.edit_message_text(summary(context), reply_markup=_settings_keyboard(context), parse_mode="Markdown")
 
@@ -64,7 +68,7 @@ async def handle_settings_callback(update: Update, context: ContextTypes.DEFAULT
         )
 
     elif data == "cfg_thumb_clear":
-        set_(context, "custom_thumbnail", None)
+        await set_(user_id, context, "custom_thumbnail", None)
         await query.answer("Thumbnail o'chirildi")
         await query.edit_message_text(summary(context), reply_markup=_settings_keyboard(context), parse_mode="Markdown")
 
@@ -87,8 +91,8 @@ async def handle_settings_callback(update: Update, context: ContextTypes.DEFAULT
         )
 
     elif data == "cfg_reset":
-        reset(context)
-        await query.answer("Sozlamalar tiklandi")
+        await reset(user_id, context)
+        await query.answer("Sozlamalar tiklandi ✅")
         await query.edit_message_text(summary(context), reply_markup=_settings_keyboard(context), parse_mode="Markdown")
 
     elif data == "cfg_close":
@@ -100,12 +104,14 @@ async def handle_settings_callback(update: Update, context: ContextTypes.DEFAULT
 
 
 async def handle_settings_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    await ensure_loaded(user_id, context)
     state = context.user_data.get("state")
     text = update.message.text.strip()
 
     if state == "settings_sample_dur":
         if text.isdigit() and 5 <= int(text) <= 300:
-            set_(context, "sample_duration", int(text))
+            await set_(user_id, context, "sample_duration", int(text))
             context.user_data["state"] = None
             await update.message.reply_text(
                 f"✅ Sample davomiyligi `{text}` soniyaga o'rnatildi.",
@@ -117,7 +123,7 @@ async def handle_settings_text(update: Update, context: ContextTypes.DEFAULT_TYP
 
     elif state == "settings_split_dur":
         if text.isdigit() and 10 <= int(text) <= 3600:
-            set_(context, "split_duration", int(text))
+            await set_(user_id, context, "split_duration", int(text))
             context.user_data["state"] = None
             await update.message.reply_text(
                 f"✅ Split davomiyligi `{text}` soniyaga o'rnatildi.",
@@ -131,10 +137,13 @@ async def handle_settings_text(update: Update, context: ContextTypes.DEFAULT_TYP
 async def handle_settings_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Custom thumbnail uchun rasm qabul qilish."""
     if context.user_data.get("state") != "settings_thumb":
-        return False  # bu handler uchun emas
+        return False
+
+    user_id = update.message.from_user.id
+    await ensure_loaded(user_id, context)
 
     photo = update.message.photo[-1] if update.message.photo else None
-    doc = update.message.document
+    doc   = update.message.document
 
     file_id = None
     if photo:
@@ -143,7 +152,7 @@ async def handle_settings_photo(update: Update, context: ContextTypes.DEFAULT_TY
         file_id = doc.file_id
 
     if file_id:
-        set_(context, "custom_thumbnail", file_id)
+        await set_(user_id, context, "custom_thumbnail", file_id)
         context.user_data["state"] = None
         await update.message.reply_text(
             "✅ Custom thumbnail o'rnatildi! Keyingi fayllar uchun ishlatiladi.",

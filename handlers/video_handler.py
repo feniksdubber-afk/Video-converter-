@@ -39,9 +39,14 @@ async def video_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif message.document:
         doc = message.document
         mime = doc.mime_type or ""
-        if not (mime.startswith("video/") or doc.file_name and
-                any(doc.file_name.lower().endswith(ext) for ext in
-                    [".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".m4v", ".ts", ".wmv"])):
+        VIDEO_EXTS = [
+            ".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".m4v",
+            ".ts", ".wmv", ".mpeg", ".mpg", ".3gp", ".3g2", ".ogv",
+            ".rm", ".rmvb", ".divx", ".vob", ".mts", ".m2ts", ".f4v",
+            ".asf", ".amv", ".mxf", ".roq", ".nsv", ".yuv", ".dv",
+        ]
+        if not (mime.startswith("video/") or (doc.file_name and
+                any(doc.file_name.lower().endswith(ext) for ext in VIDEO_EXTS))):
             await message.reply_text("❌ Bu fayl video emas. Iltimos video fayl yuboring.")
             return
         file = doc
