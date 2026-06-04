@@ -1,6 +1,8 @@
 import subprocess
 import os
 import uuid
+import asyncio
+import re
 from config import TEMP_DIR
 
 
@@ -22,6 +24,91 @@ def run_ffmpeg(args: list[str], timeout: int = 1800) -> tuple[bool, str]:
         return False, "FFmpeg topilmadi."
     except Exception as e:
         return False, str(e)
+
+
+async def run_ffmpeg_async(
+    args: list[str],
+    status_msg,
+    label: str = "Ishlanmoqda",
+    input_path: str = None,
+    timeout: int = 1800,
+) -> tuple[bool, str]:
+    """FFmpeg ni async + progress foizi bilan ishlatadi."""
+    cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-nostats"] + args
+    duration_sec = 0.0
+    if input_path:
+        duration_sec = get_video_duration(input_path)
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        last_percent = -1
+        stderr_chunks = []
+
+        async def read_stderr():
+            async for line in proc.stderr:
+                stderr_chunks.append(line.decode(errors="replace"))
+
+        asyncio.ensure_future(read_stderr())
+
+        current_time = 0.0
+        async for raw_line in proc.stdout:
+            line = raw_line.decode(errors="replace").strip()
+
+            # out_time_ms=123456789  yoki  out_time=00:01:23.45
+            m = re.search(r"out_time_ms=(\d+)", line)
+            if m:
+                current_time = int(m.group(1)) / 1_000_000  # microseconds → seconds
+            elif re.search(r"out_time=(\d+):(\d+):([\d.]+)", line):
+                mt = re.search(r"out_time=(\d+):(\d+):([\d.]+)", line)
+                h, mn, s = mt.group(1), mt.group(2), mt.group(3)
+                current_time = int(h) * 3600 + int(mn) * 60 + float(s)
+
+            if duration_sec > 0:
+                percent = min(int(current_time / duration_sec * 100), 99)
+                if percent - last_percent >= 5:
+                    last_percent = percent
+                    bar = _progress_bar(percent)
+                    try:
+                        await status_msg.edit_text(
+                            f"⚙️ *{label}...*\n\n{bar} `{percent}%`",
+                            parse_mode="Markdown",
+                        )
+                    except Exception:
+                        pass
+
+        await proc.wait()
+        stderr_text = "".join(stderr_chunks)
+
+        if proc.returncode != 0:
+            return False, stderr_text[-2000:] if stderr_text else "Noma'lum xato"
+
+        # 100% tugadi
+        try:
+            await status_msg.edit_text(
+                f"⚙️ *{label}...*\n\n{_progress_bar(100)} `100%`",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
+        return True, ""
+
+    except asyncio.TimeoutError:
+        return False, "Vaqt tugadi"
+    except FileNotFoundError:
+        return False, "FFmpeg topilmadi."
+    except Exception as e:
+        return False, str(e)
+
+
+def _progress_bar(percent: int, length: int = 12) -> str:
+    filled = int(length * percent / 100)
+    bar = "█" * filled + "░" * (length - filled)
+    return f"[{bar}]"
 
 
 def get_video_duration(input_path: str) -> float:
@@ -59,18 +146,16 @@ def make_temp_path(ext: str) -> str:
 
 
 def _thread_count() -> str:
-    """CPU core sonini aniqlash."""
     try:
         import multiprocessing
         return str(multiprocessing.cpu_count())
     except Exception:
-        return "0"  # 0 = FFmpeg o'zi tanlaydi
+        return "0"
 
 
 def convert_video(input_path: str, output_format: str) -> tuple[bool, str, str]:
     output_path = make_temp_path(output_format)
     threads = _thread_count()
-
     codec_map = {
         "mp4":  ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
                  "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart"],
@@ -92,6 +177,50 @@ def convert_video(input_path: str, output_format: str) -> tuple[bool, str, str]:
     return ok, output_path, err
 
 
+async def convert_video_async(input_path: str, output_format: str, status_msg) -> tuple[bool, str, str]:
+    output_path = make_temp_path(output_format)
+    threads = _thread_count()
+    codec_map = {
+        "mp4":  ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                 "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart"],
+        "mkv":  ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-c:a", "aac"],
+        "avi":  ["-c:v", "libxvid", "-q:v", "5", "-c:a", "libmp3lame", "-q:a", "4"],
+        "mov":  ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                 "-c:a", "aac", "-movflags", "+faststart"],
+        "webm": ["-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8", "-c:a", "libopus"],
+        "flv":  ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-c:a", "aac"],
+    }
+    extra = codec_map.get(output_format, ["-c:v", "libx264", "-preset", "ultrafast",
+                                           "-crf", "23", "-c:a", "aac"])
+    args = ["-i", input_path, "-threads", threads] + extra + [output_path]
+    ok, err = await run_ffmpeg_async(
+        args, status_msg,
+        label=f"{output_format.upper()} formatiga o'tkazilmoqda",
+        input_path=input_path,
+    )
+    return ok, output_path, err
+
+
+async def change_resolution_async(input_path: str, height: int, status_msg) -> tuple[bool, str, str]:
+    output_path = make_temp_path("mp4")
+    threads = _thread_count()
+    args = [
+        "-i", input_path,
+        "-threads", threads,
+        "-vf", f"scale=-2:{height}",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        output_path,
+    ]
+    ok, err = await run_ffmpeg_async(
+        args, status_msg,
+        label=f"{height}p o'lchamiga o'zgartirilmoqda",
+        input_path=input_path,
+    )
+    return ok, output_path, err
+
+
 def change_resolution(input_path: str, height: int) -> tuple[bool, str, str]:
     output_path = make_temp_path("mp4")
     threads = _thread_count()
@@ -108,10 +237,31 @@ def change_resolution(input_path: str, height: int) -> tuple[bool, str, str]:
     return ok, output_path, err
 
 
+async def compress_video_async(input_path: str, quality: str, status_msg) -> tuple[bool, str, str]:
+    output_path = make_temp_path("mp4")
+    threads = _thread_count()
+    crf_map = {"high": "23", "medium": "28", "low": "35"}
+    crf = crf_map.get(quality, "28")
+    labels = {"high": "Yuqori sifatda siqilmoqda", "medium": "O'rtacha sifatda siqilmoqda", "low": "Past sifatda siqilmoqda"}
+    args = [
+        "-i", input_path,
+        "-threads", threads,
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", crf,
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        output_path,
+    ]
+    ok, err = await run_ffmpeg_async(
+        args, status_msg,
+        label=labels.get(quality, "Siqilmoqda"),
+        input_path=input_path,
+    )
+    return ok, output_path, err
+
+
 def compress_video(input_path: str, quality: str) -> tuple[bool, str, str]:
     output_path = make_temp_path("mp4")
     threads = _thread_count()
-    # ultrafast bilan tezlik, crf bilan sifat balansi
     crf_map = {"high": "23", "medium": "28", "low": "35"}
     crf = crf_map.get(quality, "28")
     args = [
@@ -128,11 +278,10 @@ def compress_video(input_path: str, quality: str) -> tuple[bool, str, str]:
 
 def trim_video(input_path: str, start: str, end: str) -> tuple[bool, str, str]:
     output_path = make_temp_path("mp4")
-    # -ss oldida qo'yish = keyframe dan kesish (juda tez, copy codec)
     args = [
         "-ss", start, "-to", end,
         "-i", input_path,
-        "-c", "copy",  # re-encode qilmaydi — millisaniyada tugaydi
+        "-c", "copy",
         "-movflags", "+faststart",
         output_path,
     ]
@@ -167,11 +316,9 @@ def take_screenshots(input_path: str, count: int) -> tuple[bool, list[str], str]
     duration = get_video_duration(input_path)
     if duration <= 0:
         return False, [], "Video davomiyligini aniqlab bo'lmadi"
-
     paths = []
     interval = duration / (count + 1)
     err_msg = ""
-
     for i in range(count):
         timestamp = interval * (i + 1)
         output_path = make_temp_path("jpg")
@@ -185,7 +332,6 @@ def take_screenshots(input_path: str, count: int) -> tuple[bool, list[str], str]
             paths.append(output_path)
         else:
             err_msg = err
-
     return len(paths) > 0, paths, err_msg
 
 
