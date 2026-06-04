@@ -21,6 +21,12 @@ from handlers.audio import show_remove_audio_menu, show_video_to_audio_menu, han
 from handlers.screenshots import show_screenshots_menu, handle_screenshots_count, show_manual_shot_menu, handle_manual_shot_text
 from handlers.subtitles import show_subtitle_menu, handle_subtitle_file
 from handlers.hardsub import show_hardsub_menu, handle_hardsub_file, handle_hardsub_size
+from handlers.sub_translate import (
+    show_sub_translate_menu, handle_sub_translate_file, handle_sub_translate_lang,
+)
+from handlers.sub_converter import (
+    show_sub_converter_menu, handle_sub_converter_file, handle_sub_converter_format,
+)
 from handlers.subtitle_extractor import (
     show_subtitle_extractor_menu,
     handle_subext_pick, handle_subext_format, handle_subext_all,
@@ -108,6 +114,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "hardsub":            await show_hardsub_menu(update, context)
     elif data.startswith("hs_size_"):  await handle_hardsub_size(update, context, data[8:])
     elif data == "subtitle_extractor": await show_subtitle_extractor_menu(update, context)
+    elif data == "sub_translate":      await show_sub_translate_menu(update, context)
+    elif data.startswith("subtrans_"): await handle_sub_translate_lang(update, context, data[9:])
+    elif data == "sub_converter":      await show_sub_converter_menu(update, context)
+    elif data.startswith("subconv_"):  await handle_sub_converter_format(update, context, data[8:])
     elif data == "subext_all":         await handle_subext_all(update, context)
     elif data.startswith("subext_pick_"):
         await handle_subext_pick(update, context, int(data.split("_")[-1]))
@@ -274,6 +284,10 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_subtitle_file(update, context)
     elif state == "hardsub_wait":
         await handle_hardsub_file(update, context)
+    elif state == "sub_translate_wait":
+        await handle_sub_translate_file(update, context)
+    elif state == "sub_converter_wait":
+        await handle_sub_converter_file(update, context)
     else:
         await video_received(update, context)
 
