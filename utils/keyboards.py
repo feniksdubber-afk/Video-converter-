@@ -5,7 +5,7 @@ def main_menu_keyboard():
     keyboard = [
         [
             InlineKeyboardButton("🎬 Video Konvertor", callback_data="convert"),
-            InlineKeyboardButton("📐 Siqish / Optimallashtirish", callback_data="compress"),
+            InlineKeyboardButton("📐 Siqish", callback_data="compress"),
         ],
         [
             InlineKeyboardButton("✂️ Video Kesish", callback_data="trim"),
@@ -17,9 +17,29 @@ def main_menu_keyboard():
         ],
         [
             InlineKeyboardButton("🖼 Qo'lda Skrinsot", callback_data="manual_shot"),
-            InlineKeyboardButton("📝 Subtitr Birlashtirish", callback_data="subtitle"),
+            InlineKeyboardButton("📝 Subtitr", callback_data="subtitle"),
         ],
         [
+            InlineKeyboardButton("🎞 Stream Remover", callback_data="stream_remover"),
+            InlineKeyboardButton("📦 Stream Extractor", callback_data="stream_extractor"),
+        ],
+        [
+            InlineKeyboardButton("🖼 Thumbnail", callback_data="thumbnail"),
+            InlineKeyboardButton("📋 Media Info", callback_data="media_info"),
+        ],
+        [
+            InlineKeyboardButton("✏️ Rename", callback_data="rename"),
+            InlineKeyboardButton("🎬 Sample", callback_data="generate_sample"),
+        ],
+        [
+            InlineKeyboardButton("✂️ Splitter", callback_data="splitter"),
+            InlineKeyboardButton("➕ Merger", callback_data="merger"),
+        ],
+        [
+            InlineKeyboardButton("🎵 Video+Audio", callback_data="vid_aud_merge"),
+        ],
+        [
+            InlineKeyboardButton("⚙️ Sozlamalar", callback_data="settings"),
             InlineKeyboardButton("❌ Bekor qilish", callback_data="cancel"),
         ],
     ]
