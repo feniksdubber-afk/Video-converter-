@@ -431,10 +431,32 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
+def _cleanup_temp_dir():
+    """24 soatdan eski vaqtinchalik fayllarni o'chiradi (bot restart da)."""
+    from config import TEMP_DIR
+    import time
+    now = time.time()
+    removed = 0
+    try:
+        for fname in os.listdir(TEMP_DIR):
+            fpath = os.path.join(TEMP_DIR, fname)
+            try:
+                if os.path.isfile(fpath) and now - os.path.getmtime(fpath) > 86400:
+                    os.remove(fpath)
+                    removed += 1
+            except Exception:
+                pass
+    except Exception:
+        pass
+    if removed:
+        logger.info(f"🧹 TEMP_DIR: {removed} ta eski fayl o'chirildi.")
+
+
 async def _post_init(app):
     """Bot ishga tushganda SQLite bazasini initsializatsiya qiladi."""
     await init_db()
     logger.info("✅ SQLite DB tayyor.")
+    _cleanup_temp_dir()
 
 
 def main():
