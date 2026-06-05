@@ -29,6 +29,12 @@ def _progress_bar(percent: int, length: int = 12) -> str:
 
 async def video_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
+
+    # ── Batch rejimi ──────────────────────────────────────────────────────────
+    from handlers.batch import batch_file_received
+    if await batch_file_received(update, context):
+        return
+
     file = None
     file_name = "video"
 
