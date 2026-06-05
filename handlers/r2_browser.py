@@ -34,7 +34,8 @@ def _list_keyboard(page: int, total: int) -> InlineKeyboardMarkup:
 async def _get_file_list_ui(query, context, page: int):
     """Ro'yxatni yangilash va ko'rsatish funksiyasi."""
     all_items = await list_files(max_keys=200)
-    context.user_data["r2_files"] = all_items
+    if context is not None:
+        context.user_data["r2_files"] = all_items
     total = len(all_items)
 
     if total == 0:
@@ -122,6 +123,11 @@ async def r2_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["r2_rename_key"] = files[idx]["key"]
         await query.edit_message_text("✏️ Yangi nom kiriting:", parse_mode="Markdown")
         await query.answer()
+
+async def _show_r2_list_cb(query, context=None, page: int = 0):
+    """Callback query orqali R2 fayl ro'yxatini ko'rsatish."""
+    text, kb = await _get_file_list_ui(query, context, page)
+    await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
 
 async def r2_rename_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     old_key = context.user_data.get("r2_rename_key")
