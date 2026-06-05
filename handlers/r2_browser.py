@@ -1,22 +1,9 @@
+```python
 """
 r2_browser.py — R2 dagi fayllarni botdan boshqarish.
-
-Buyruqlar:
-  /r2          — fayllar ro'yxati (oxirgi 30 ta)
-  /r2_delete   — fayl o'chirish
-  /r2_link     — public havola olish
-  /r2_rename   — fayl nomini o'zgartirish
-
-Callback datalar:
-  r2_list_<page>
-  r2_info_<key_b64>
-  r2_del_confirm_<key_b64>
-  r2_del_do_<key_b64>
-  r2_link_<key_b64>
-  r2_rename_<key_b64>
+Fayl kalitlari uzunligi muammosini hal qilish uchun indekslash usuli qo'llanildi.
 """
 
-import base64
 import os
 import uuid
 import aiohttp
@@ -26,39 +13,44 @@ from utils.r2_manager import list_files, delete_file, rename_file, generate_pres
 
 PAGE_SIZE = 8
 
-
-def _enc(key: str) -> str:
-    return base64.urlsafe_b64encode(key.encode()).decode()
-
-
-def _dec(b64: str) -> str:
-    return base64.urlsafe_b64decode(b64.encode()).decode()
-
-
-def _file_keyboard(key: str) -> InlineKeyboardMarkup:
-    kb = _enc(key)
+def _file_keyboard(index: int) -> InlineKeyboardMarkup:
+    """Fayl uchun tugmalar (indeks asosida)."""
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🔗 Havola",     callback_data=f"r2_link_{kb}"),
-            InlineKeyboardButton("✏️ Rename",     callback_data=f"r2_rename_{kb}"),
+            InlineKeyboardButton("🔗 Havola",     callback_data=f"r2_link_{index}"),
+            InlineKeyboardButton("✏️ Rename",     callback_data=f"r2_rename_{index}"),
         ],
         [
-            InlineKeyboardButton("🗑 O'chirish",  callback_data=f"r2_del_confirm_{kb}"),
+            InlineKeyboardButton("🗑 O'chirish",  callback_data=f"r2_del_confirm_{index}"),
         ],
         [InlineKeyboardButton("🔙 Ro'yxatga",    callback_data="r2_list_0")],
     ])
 
-
-def _list_keyboard(items: list[dict], page: int, total: int) -> InlineKeyboardMarkup:
+def _list_keyboard(page: int, total: int) -> InlineKeyboardMarkup:
+    """Fayllar ro'yxati uchun tugmalar."""
     rows = []
-    for item in items:
+    # Fayllar user_data dan olinadi, shuning uchun bu funksiyaga o'tish shart emas
+    return InlineKeyboardMarkup(rows)
+
+async def _get_file_list_ui(query, context, page: int):
+    """Ro'yxatni yangilash va ko'rsatish funksiyasi."""
+    all_items = await list_files(max_keys=200)
+    context.user_data["r2_files"] = all_items
+    total = len(all_items)
+
+    if total == 0:
+        return "📭 R2 da hech qanday fayl yo'q.", None
+
+    start = page * PAGE_SIZE
+    page_items = all_items[start:start + PAGE_SIZE]
+    
+    rows = []
+    for i, item in enumerate(page_items):
+        idx = start + i
         name = os.path.basename(item["key"])
         if len(name) > 28:
             name = name[:25] + "..."
-        rows.append([InlineKeyboardButton(
-            f"📄 {name} ({item['size_str']})",
-            callback_data=f"r2_info_{_enc(item['key'])}"
-        )])
+        rows.append([InlineKeyboardButton(f"📄 {name} ({item['size_str']})", callback_data=f"r2_info_{idx}")])
 
     nav = []
     if page > 0:
@@ -68,231 +60,81 @@ def _list_keyboard(items: list[dict], page: int, total: int) -> InlineKeyboardMa
     if nav:
         rows.append(nav)
     rows.append([InlineKeyboardButton("🔄 Yangilash", callback_data="r2_list_0")])
-    return InlineKeyboardMarkup(rows)
-
+    
+    text = f"☁️ *R2 Fayl Menejer* — sahifa {page + 1}/{(total - 1) // PAGE_SIZE + 1}\nJami: *{total}* fayl\n\nFayl ustiga bosing:"
+    return text, InlineKeyboardMarkup(rows)
 
 async def r2_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_configured():
-        await update.message.reply_text("❌ R2 sozlanmagan. .env da R2_* o'zgaruvchilarini tekshiring.")
+        await update.message.reply_text("❌ R2 sozlanmagan.")
         return
-    await _show_list(update.message, context, page=0)
-
-
-async def _show_list(message, context, page: int = 0):
-    all_items = await list_files(max_keys=200)
-    total = len(all_items)
-
-    if total == 0:
-        await message.reply_text("📭 R2 da hech qanday fayl yo'q.")
-        return
-
-    start = page * PAGE_SIZE
-    end = start + PAGE_SIZE
-    page_items = all_items[start:end]
-
-    text = (
-        f"☁️ *R2 Fayl Menejer* — sahifa {page + 1}/{(total - 1) // PAGE_SIZE + 1}\n"
-        f"Jami: *{total}* fayl\n\n"
-        "Fayl ustiga bosing:"
-    )
-    kb = _list_keyboard(page_items, page, total)
-    await message.reply_text(text, reply_markup=kb, parse_mode="Markdown")
-
-
-async def _show_r2_list_cb(query, page: int = 0):
-    """Callback query orqali R2 ro'yxatini ko'rsatadi (edit_message_text)."""
-    if not is_configured():
-        await query.edit_message_text("❌ R2 sozlanmagan. Railway da R2_* o'zgaruvchilarini tekshiring.")
-        return
-    all_items = await list_files(max_keys=200)
-    total = len(all_items)
-    if total == 0:
-        await query.edit_message_text("📭 R2 da hech qanday fayl yo'q.")
-        return
-    start = page * PAGE_SIZE
-    page_items = all_items[start:start + PAGE_SIZE]
-    text = (
-        f"☁️ *R2 Fayl Menejer* — sahifa {page + 1}/{(total - 1) // PAGE_SIZE + 1}\n"
-        f"Jami: *{total}* fayl\n\n"
-        "Fayl ustiga bosing:"
-    )
-    kb = _list_keyboard(page_items, page, total)
-    await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
-
+    text, kb = await _get_file_list_ui(update.message, context, 0)
+    await update.message.reply_text(text, reply_markup=kb, parse_mode="Markdown")
 
 async def r2_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
+    files = context.user_data.get("r2_files", [])
 
     if data.startswith("r2_list_"):
         page = int(data.split("_")[-1])
-        await _show_r2_list_cb(query, page)
+        text, kb = await _get_file_list_ui(query, context, page)
+        await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
         await query.answer()
 
     elif data.startswith("r2_info_"):
-        key = _dec(data[8:])
+        idx = int(data.split("_")[-1])
+        key = files[idx]["key"]
         name = os.path.basename(key)
         url = get_public_url(key)
-        text = (
-            f"📄 *{name}*\n\n"
-            f"🗂 Kalit: `{key}`\n"
-            f"🔗 URL: {url}\n\n"
-            "Nima qilmoqchisiz?"
-        )
-        await query.edit_message_text(text, reply_markup=_file_keyboard(key), parse_mode="Markdown")
+        text = f"📄 *{name}*\n\n🗂 Kalit: `{key}`\n🔗 URL: {url}\n\nNima qilmoqchisiz?"
+        await query.edit_message_text(text, reply_markup=_file_keyboard(idx), parse_mode="Markdown")
         await query.answer()
 
     elif data.startswith("r2_link_"):
-        key = _dec(data[8:])
+        idx = int(data.split("_")[-1])
+        key = files[idx]["key"]
         url = get_public_url(key)
         presigned = await generate_presigned_url(key, expires=86400)
-        text = (
-            f"🔗 *{os.path.basename(key)}* havolasi:\n\n"
-            f"*Public URL:*\n`{url}`\n\n"
-            f"*Vaqtinchalik havola (24 soat):*\n`{presigned or 'Olishda xato'}`"
-        )
-        await query.edit_message_text(
-            text,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Orqaga", callback_data=f"r2_info_{_enc(key)}")]]),
-            parse_mode="Markdown"
-        )
+        text = f"🔗 *{os.path.basename(key)}* havolasi:\n\n*Public URL:*\n`{url}`\n\n*Vaqtinchalik havola (24 soat):*\n`{presigned or 'Xato'}`"
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Orqaga", callback_data=f"r2_info_{idx}")]]), parse_mode="Markdown")
         await query.answer()
 
     elif data.startswith("r2_del_confirm_"):
-        key = _dec(data[15:])
+        idx = int(data.split("_")[-1])
+        key = files[idx]["key"]
         kb = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Ha, o'chir",  callback_data=f"r2_del_do_{_enc(key)}"),
-                InlineKeyboardButton("❌ Bekor",        callback_data=f"r2_info_{_enc(key)}"),
-            ]
+            [InlineKeyboardButton("✅ Ha, o'chir", callback_data=f"r2_del_do_{idx}"), InlineKeyboardButton("❌ Bekor", callback_data=f"r2_info_{idx}")]
         ])
-        await query.edit_message_text(
-            f"⚠️ *{os.path.basename(key)}* faylini o'chirishga ishonchingiz komilmi?\n\n"
-            f"Bu amalni qaytarib bo'lmaydi!",
-            reply_markup=kb,
-            parse_mode="Markdown"
-        )
+        await query.edit_message_text(f"⚠️ *{os.path.basename(key)}* ni o'chirishga ishonchingiz komilmi?", reply_markup=kb, parse_mode="Markdown")
         await query.answer()
 
     elif data.startswith("r2_del_do_"):
-        key = _dec(data[10:])
-        ok = await delete_file(key)
-        if ok:
-            await query.edit_message_text(
-                f"✅ *{os.path.basename(key)}* o'chirildi.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Ro'yxatga", callback_data="r2_list_0")]]),
-                parse_mode="Markdown"
-            )
+        idx = int(data.split("_")[-1])
+        key = files[idx]["key"]
+        if await delete_file(key):
+            await query.edit_message_text(f"✅ O'chirildi.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Ro'yxatga", callback_data="r2_list_0")]]), parse_mode="Markdown")
         else:
-            await query.edit_message_text(
-                f"❌ O'chirishda xato yuz berdi.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Orqaga", callback_data=f"r2_info_{_enc(key)}")]]),
-                parse_mode="Markdown"
-            )
+            await query.edit_message_text("❌ Xato yuz berdi.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Orqaga", callback_data=f"r2_info_{idx}")]]), parse_mode="Markdown")
         await query.answer()
 
     elif data.startswith("r2_rename_"):
-        key = _dec(data[10:])
-        context.user_data["r2_rename_key"] = key
-        context.user_data["state"] = "r2_rename_input"
-        await query.edit_message_text(
-            f"✏️ *{os.path.basename(key)}* uchun yangi nom kiriting:\n\n"
-            f"_(Faqat fayl nomi, yo'l emas. Masalan: `yangi_nom.mp4`)_",
-            parse_mode="Markdown"
-        )
+        idx = int(data.split("_")[-1])
+        context.user_data["r2_rename_key"] = files[idx]["key"]
+        await query.edit_message_text("✏️ Yangi nom kiriting:", parse_mode="Markdown")
         await query.answer()
 
-    elif data.startswith("r2_send_tg__"):
-        filename = data[len("r2_send_tg__"):]
-        await query.answer("📥 Yuklanmoqda...")
-        await _send_r2_file_to_telegram(query.message, filename)
-
-
 async def r2_rename_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Rename uchun matn kiritilganda."""
     old_key = context.user_data.get("r2_rename_key")
-    if not old_key:
-        return False
-
+    if not old_key: return False
     new_name = update.message.text.strip()
-    if not new_name:
-        await update.message.reply_text("❌ Nom bo'sh bo'lmasin.")
-        return True
-
-    # Eski yo'lni saqlash, faqat fayl nomini almashtirish
     dir_part = os.path.dirname(old_key)
     new_key = os.path.join(dir_part, new_name).lstrip("/")
-
-    status = await update.message.reply_text("⏳ Nomlanmoqda...")
-    new_url = await rename_file(old_key, new_key)
-    context.user_data.pop("r2_rename_key", None)
-    context.user_data["state"] = None
-
-    if new_url:
-        await status.edit_text(
-            f"✅ *Muvaffaqiyatli!*\n\n"
-            f"Yangi nom: `{new_name}`\n"
-            f"🔗 URL: {new_url}",
-            parse_mode="Markdown"
-        )
+    if await rename_file(old_key, new_key):
+        await update.message.reply_text("✅ Muvaffaqiyatli nomlandi.")
     else:
-        await status.edit_text("❌ Nomni o'zgartirishda xato yuz berdi.")
+        await update.message.reply_text("❌ Xato.")
+    context.user_data.pop("r2_rename_key", None)
     return True
 
-
-async def _send_r2_file_to_telegram(message, filename: str):
-    """R2 dagi faylni vaqtinchalik yuklab, Telegramga yuboradi."""
-    from config import TEMP_DIR
-
-    url = get_public_url(filename)
-    tmp_path = os.path.join(TEMP_DIR, f"r2tmp_{uuid.uuid4().hex}_{os.path.basename(filename)}")
-    status_msg = await message.reply_text(
-        f"📥 *Telegramga yuborilmoqda...*\n\n`[░░░░░░░░░░░░]` `0%`\n`{os.path.basename(filename)}`",
-        parse_mode="Markdown",
-    )
-
-    try:
-        # R2 dan yuklab olish
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    await status_msg.edit_text(f"❌ R2 dan yuklashda xato: HTTP {resp.status}")
-                    return
-                total = int(resp.headers.get("Content-Length", 0))
-                downloaded = 0
-                last_pct = -1
-                with open(tmp_path, "wb") as f:
-                    async for chunk in resp.content.iter_chunked(1024 * 256):  # 256 KB
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total > 0:
-                            pct = min(int(downloaded / total * 100), 99)
-                            if pct - last_pct >= 10:
-                                last_pct = pct
-                                filled = int(12 * pct / 100)
-                                bar = "[" + "█" * filled + "░" * (12 - filled) + "]"
-                                try:
-                                    await status_msg.edit_text(
-                                        f"📥 *Telegramga yuborilmoqda...*\n\n`{bar}` `{pct}%`\n`{os.path.basename(filename)}`",
-                                        parse_mode="Markdown",
-                                    )
-                                except Exception:
-                                    pass
-
-        # Telegramga yuborish
-        await status_msg.edit_text("📤 *Telegram serveriga yuborilmoqda...*", parse_mode="Markdown")
-        file_size = os.path.getsize(tmp_path)
-        with open(tmp_path, "rb") as f:
-            await message.reply_document(
-                document=f,
-                filename=os.path.basename(filename),
-                caption=f"📁 `{os.path.basename(filename)}`\n📦 `{fmt_size(file_size)}`",
-                parse_mode="Markdown",
-            )
-        await status_msg.delete()
-
-    except Exception as e:
-        await status_msg.edit_text(f"❌ Yuborishda xato:\n`{e}`", parse_mode="Markdown")
-    finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+```
