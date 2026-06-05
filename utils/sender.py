@@ -130,31 +130,23 @@ async def send_file(
     # Video metadata va thumbnail olish
     meta = {}
     thumb_path = None
-    custom_thumb_tmp = None  # faqat yuklab olingan bo'lsa, keyin o'chiriladi
+    custom_thumb_tmp = None
 
     if is_video:
         meta = _get_video_meta(file_path)
 
-        # 1. Custom thumbnail (foydalanuvchi o'rnatgan)
+        # 1. Custom thumbnail — disk yo'li sifatida saqlanган
         if context is not None:
-            from utils.user_settings import get as get_setting
-            custom_file_id = get_setting(context, "custom_thumbnail")
-            if custom_file_id:
-                try:
-                    import uuid
-                    from telegram import Bot
-                    from config import BOT_TOKEN
-                    bot = Bot(token=BOT_TOKEN)
-                    tg_file = await bot.get_file(custom_file_id)
-                    custom_thumb_tmp = os.path.join(TEMP_DIR, f"cthumb_{uuid.uuid4().hex}.jpg")
-                    await tg_file.download_to_drive(custom_thumb_tmp)
-                    thumb_path = custom_thumb_tmp
-                except Exception:
-                    custom_thumb_tmp = None
+            from utils.user_settings import ensure_loaded as _ensure, get as get_setting
+            await _ensure(context.user_data.get("_user_id", 0), context)
+            custom_path = get_setting(context, "custom_thumbnail")
+            if custom_path and isinstance(custom_path, str) and os.path.exists(custom_path):
+                thumb_path = custom_path
 
-        # 2. Agar custom yo'q bo'lsa — videoning o'zidan auto thumbnail
+        # 2. Custom yo'q bo'lsa — videoning o'zidan auto thumbnail
         if not thumb_path and meta.get("duration", 0) > 0:
             thumb_path = _make_thumb(file_path, meta["duration"])
+            custom_thumb_tmp = thumb_path  # auto thumb — o'chiriladi
 
     # ─── 2 GB dan katta → Gofile.io ───────────────────────────────────────
     if file_size > PYROGRAM_LIMIT:
@@ -182,7 +174,7 @@ async def send_file(
             )
         finally:
             if thumb_path and os.path.exists(thumb_path):
-                os.remove(thumb_path)
+                if custom_thumb_tmp and os.path.exists(custom_thumb_tmp): os.remove(custom_thumb_tmp)
         return
 
     # ─── 50 MB gacha → PTB ────────────────────────────────────────────────
@@ -211,7 +203,7 @@ async def send_file(
                     await message.reply_document(document=f, filename=filename, caption=caption)
         finally:
             if thumb_path and os.path.exists(thumb_path):
-                os.remove(thumb_path)
+                if custom_thumb_tmp and os.path.exists(custom_thumb_tmp): os.remove(custom_thumb_tmp)
         return
 
     # ─── 50 MB – 2 GB → Pyrogram MTProto, progress bilan ─────────────────
@@ -271,7 +263,7 @@ async def send_file(
             )
     finally:
         if thumb_path and os.path.exists(thumb_path):
-            os.remove(thumb_path)
+            if custom_thumb_tmp and os.path.exists(custom_thumb_tmp): os.remove(custom_thumb_tmp)
 
     try:
         await status_msg.edit_text(
