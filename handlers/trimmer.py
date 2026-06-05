@@ -4,7 +4,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from utils.keyboards import main_menu_keyboard, cancel_keyboard
 from utils.sender import send_file
-from utils.ffmpeg_utils import trim_video, get_video_duration
+from utils.ffmpeg_utils import trim_video_async, get_video_duration
 
 
 def _format_duration(seconds: float) -> str:
@@ -99,7 +99,7 @@ async def handle_trim_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
         )
 
-        ok, output_path, err = trim_video(video_path, start, parsed)
+        ok, output_path, err = await trim_video_async(video_path, start, parsed, status_msg=status)
 
         if ok and os.path.exists(output_path):
             video_name = context.user_data.get("video_name", "video")

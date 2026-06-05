@@ -500,16 +500,62 @@ async def handle_batch_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # R2 ga yuklash
                 from utils.r2_manager import upload_file as r2_upload_file, is_configured as r2_is_configured
                 if r2_is_configured():
+                    r2_file_size = os.path.getsize(current_path) if os.path.exists(current_path) else 0
+
+                    def _r2_bar(pct: int, length: int = 12) -> str:
+                        filled = int(length * pct / 100)
+                        return "[" + "█" * filled + "░" * (length - filled) + "]"
+
+                    def _r2_fmt(b: int) -> str:
+                        for u in ["B", "KB", "MB", "GB"]:
+                            if b < 1024:
+                                return f"{b:.1f} {u}"
+                            b /= 1024
+                        return f"{b:.1f} GB"
+
                     try:
                         await status_msg.edit_text(
                             f"☁️ *{file_num}/{total_files}* — `{current_name}`\n"
-                            f"📤 Cloudflare R2 ga yuklanmoqda...",
+                            f"`[░░░░░░░░░░░░]` `0%`\n"
+                            f"`0` / `{_r2_fmt(r2_file_size)}`",
                             parse_mode="Markdown"
                         )
                     except Exception:
                         pass
-                    object_key = f"batch/{current_name}"
-                    r2_url = await r2_upload_file(current_path, object_key)
+
+                    r2_last_pct = [-1]
+
+                    async def _r2_progress(uploaded, total, pct):
+                        if pct - r2_last_pct[0] < 5:
+                            return
+                        r2_last_pct[0] = pct
+                        bar = _r2_bar(pct)
+                        try:
+                            await status_msg.edit_text(
+                                f"☁️ *{file_num}/{total_files}* — `{current_name}`\n"
+                                f"`{bar}` `{pct}%`\n"
+                                f"`{_r2_fmt(uploaded)}` / `{_r2_fmt(total)}`",
+                                parse_mode="Markdown"
+                            )
+                        except Exception:
+                            pass
+
+                    from utils.ffmpeg_utils import sanitize_filename as _sanitize
+                    safe_name = _sanitize(current_name)
+                    object_key = f"batch/{safe_name}"
+                    r2_url = await r2_upload_file(current_path, object_key, progress_cb=_r2_progress)
+
+                    # Yuklash tugagach 100% ko'rsat
+                    try:
+                        await status_msg.edit_text(
+                            f"☁️ *{file_num}/{total_files}* — `{current_name}`\n"
+                            f"`[████████████]` `100%`\n"
+                            f"`{_r2_fmt(r2_file_size)}` / `{_r2_fmt(r2_file_size)}`",
+                            parse_mode="Markdown"
+                        )
+                    except Exception:
+                        pass
+
                     # R2 URL ni yuborish
                     await query.message.reply_text(
                         f"☁️ *R2 yuklandi:* `{current_name}`\n\n"
@@ -523,13 +569,98 @@ async def handle_batch_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
 
             # Natijani yuborish (telegram)
-            await status_msg.edit_text(
-                f"📤 *{file_num}/{total_files}* — `{current_name}`\n"
-                f"✅ Qayta ishlandi, yuborilmoqda...",
-                parse_mode="Markdown"
-            )
-            await send_file(query.message, current_path, current_name,
-                            f"✅ {file_num}/{total_files} | {current_name}", context=context)
+            from config import TEMP_DIR
+            from utils.ffmpeg_utils import downscale_for_telegram_async, get_video_resolution
+            current_file_size = os.path.getsize(current_path) if os.path.exists(current_path) else 0
+            PYROGRAM_LIMIT = 2 * 1024 * 1024 * 1024  # 2 GB
+
+            if current_file_size <= PYROGRAM_LIMIT:
+                # Hajm mos — to'g'ridan-to'g'ri yuborish
+                try:
+                    await status_msg.edit_text(
+                        f"📤 *{file_num}/{total_files}* — `{current_name}`\n"
+                        f"✅ Qayta ishlandi, yuborilmoqda...",
+                        parse_mode="Markdown"
+                    )
+                except Exception:
+                    pass
+                await send_file(query.message, current_path, current_name,
+                                f"✅ {file_num}/{total_files} | {current_name}", context=context)
+            else:
+                # Hajm 2 GB dan katta — sifatni pasaytirish kerak
+                # R2 ga asl sifatda yuklanadi (yuqorida allaqachon bajarilgan)
+                # Telegram uchun: 720p → 540p → 480p tartibida sinash
+
+                _w, _h = get_video_resolution(current_path)
+                # Faqat joriy sifatdan pastroq qadamlarni sinash
+                _candidates = [h for h in (720, 540, 480) if _h == 0 or h < _h]
+
+                _tg_sent = False
+                _ds_path = None
+
+                for _target_h in _candidates:
+                    try:
+                        await status_msg.edit_text(
+                            f"📐 *{file_num}/{total_files}* — `{current_name}`\n"
+                            f"⚠️ Hajm 2 GB dan katta. {_target_h}p sifat sinab ko'rilmoqda...",
+                            parse_mode="Markdown"
+                        )
+                    except Exception:
+                        pass
+
+                    _ok_ds, _ds_path, _ds_err = await downscale_for_telegram_async(
+                        current_path, _target_h, status_msg
+                    )
+                    if not _ok_ds or not os.path.exists(_ds_path):
+                        continue
+
+                    _ds_size = os.path.getsize(_ds_path)
+                    if _ds_size <= PYROGRAM_LIMIT:
+                        # Mos! Telegram ga shu sifatda yuborish
+                        _base = os.path.splitext(current_name)[0]
+                        _ext = os.path.splitext(current_name)[1] or ".mp4"
+                        _tg_name = f"{_base}_{_target_h}p{_ext}"
+                        try:
+                            await status_msg.edit_text(
+                                f"📤 *{file_num}/{total_files}* — `{_tg_name}`\n"
+                                f"✅ {_target_h}p ({_ds_size / 1024**3:.2f} GB) — yuborilmoqda...",
+                                parse_mode="Markdown"
+                            )
+                        except Exception:
+                            pass
+                        await send_file(
+                            query.message, _ds_path, _tg_name,
+                            f"✅ {file_num}/{total_files} | {_tg_name}\n"
+                            f"📐 Sifat {_target_h}p ga tushirildi (asl sifat ☁️ R2 da)",
+                            context=context,
+                        )
+                        os.remove(_ds_path)
+                        _ds_path = None
+                        _tg_sent = True
+                        break
+                    else:
+                        # Bu sifat ham 2 GB dan katta — keyingisini sinash
+                        os.remove(_ds_path)
+                        _ds_path = None
+
+                if _ds_path and os.path.exists(_ds_path):
+                    os.remove(_ds_path)
+
+                if not _tg_sent:
+                    # Hech qaysi sifat Telegram uchun mos kelmadi
+                    _reason = (
+                        "Joriy sifat allaqachon eng past" if not _candidates
+                        else "480p da ham 2 GB dan katta"
+                    )
+                    try:
+                        await status_msg.edit_text(
+                            f"✅ *{file_num}/{total_files}* — `{current_name}`\n"
+                            f"☁️ R2 ga yuklandi.\n"
+                            f"⚠️ Telegram ga yuborib bo'lmadi: {_reason}",
+                            parse_mode="Markdown"
+                        )
+                    except Exception:
+                        pass
 
             # Vaqtinchalik fayllarni tozalash
             if os.path.exists(current_path):

@@ -3,7 +3,7 @@ import re
 from telegram import Update, InputMediaPhoto
 from telegram.ext import ContextTypes
 from utils.keyboards import screenshots_count_keyboard, main_menu_keyboard, cancel_keyboard
-from utils.ffmpeg_utils import take_screenshots, take_manual_shot
+from utils.ffmpeg_utils import take_screenshots_async, take_manual_shot_async
 
 
 async def show_screenshots_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -34,7 +34,7 @@ async def handle_screenshots_count(update: Update, context: ContextTypes.DEFAULT
         parse_mode="Markdown",
     )
 
-    ok, paths, err = take_screenshots(video_path, count)
+    ok, paths, err = await take_screenshots_async(video_path, count, status_msg=query.message)
 
     if ok and paths:
         await query.message.reply_text(f"✅ {len(paths)} ta skrinsot olindi! Yuborilmoqda...")
@@ -117,7 +117,7 @@ async def handle_manual_shot_text(update: Update, context: ContextTypes.DEFAULT_
         parse_mode="Markdown",
     )
 
-    ok, output_path, err = take_manual_shot(video_path, parsed)
+    ok, output_path, err = await take_manual_shot_async(video_path, parsed)
 
     if ok and os.path.exists(output_path):
         with open(output_path, "rb") as f:

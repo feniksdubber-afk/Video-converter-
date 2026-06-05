@@ -3,7 +3,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from utils.keyboards import main_menu_keyboard, cancel_keyboard
 from utils.sender import send_file
-from utils.ffmpeg_utils import softsub_video
+from utils.ffmpeg_utils import softsub_video_async
 from config import TEMP_DIR
 
 SUPPORTED_FORMATS = {".srt", ".ass", ".ssa", ".vtt"}
@@ -60,7 +60,7 @@ async def handle_subtitle_file(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data["state"] = None
     await status.edit_text("⏳ *Subtitr stream sifatida birlashtirilmoqda...*", parse_mode="Markdown")
 
-    ok, output_path, err = softsub_video(video_path, sub_path)
+    ok, output_path, err = await softsub_video_async(video_path, sub_path, status_msg=status)
 
     if os.path.exists(sub_path):
         os.remove(sub_path)

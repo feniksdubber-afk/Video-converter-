@@ -184,6 +184,31 @@ async def r2_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("✏️ Yangi nom kiriting:", parse_mode="HTML")
         await query.answer()
 
+    elif data.startswith("r2_send_tg__"):
+        # sender.py da saqlangan short_key orqali faylni Telegram ga yuborish
+        from utils.sender import _r2_pending, PYROGRAM_LIMIT
+        short_key = data[len("r2_send_tg__"):]
+        entry = _r2_pending.get(short_key)
+        if not entry:
+            await query.answer("❌ Fayl topilmadi yoki muddati o'tgan. Qaytadan yuklang.", show_alert=True)
+            return
+        await query.answer("📤 Yuborilmoqda...")
+        filename = entry["filename"]
+        file_path = entry.get("file_path", "")
+        url = entry["url"]
+        # Agar local fayl mavjud bo'lsa — Pyrogram orqali yubor
+        if file_path and os.path.exists(file_path):
+            file_size = os.path.getsize(file_path)
+            from utils.sender import send_file
+            await send_file(query.message, file_path, filename, f"📥 {filename}", context=context)
+        else:
+            # Local fayl yo'q — faqat havola yuboramiz
+            await query.message.reply_text(
+                f"⚠️ Fayl serverda saqlanmagan (ehtimol o'chirilgan).\n\n"
+                f"🔗 R2 havolasi:\n`{url}`",
+                parse_mode="Markdown",
+            )
+
 async def _show_r2_list_cb(query, context=None, page: int = 0):
     """Callback query orqali R2 fayl ro'yxatini ko'rsatish."""
     text, kb = await _get_file_list_ui(query, context, page)
