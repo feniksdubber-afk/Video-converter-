@@ -4,3 +4,4 @@ tgcrypto
 aiosqlite
 aiohttp
 deep-translator
+boto3

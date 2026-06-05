@@ -6,7 +6,7 @@ from telegram.ext import (
     CallbackQueryHandler, filters, ContextTypes,
 )
 
-from config import BOT_TOKEN
+from config import BOT_TOKEN, LOCAL_BOT_API_URL
 from utils.db import init_db
 from utils.user_settings import ensure_loaded
 from utils.post_action import handle_pa_send, handle_pa_continue, handle_pa_switch
@@ -70,6 +70,7 @@ from handlers.batch import (
     handle_batch_use_template, handle_batch_delete_template,
     handle_batch_clear_files, handle_batch_run,
 )
+from handlers.r2_browser import r2_command, r2_callback, r2_rename_text
 from utils.keyboards import main_menu_keyboard
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -261,6 +262,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("batch_use_"):    await handle_batch_use_template(update, context, int(data[10:]))
     elif data.startswith("batch_del_"):    await handle_batch_delete_template(update, context, int(data[10:]))
 
+    # ── R2 Fayl Menejer ──────────────────────────────────────────────────────
+    elif data.startswith("r2_"):           await r2_callback(update, context)
+
     else:
         await query.answer("Noma'lum buyruq", show_alert=True)
 
@@ -283,6 +287,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "watermark_text":      handle_watermark_text,
         "crop_custom":         handle_crop_custom_text,
     }
+
+    # R2 rename matn
+    if state == "r2_rename_input":
+        await r2_rename_text(update, context)
+        return
 
     # Batch shablon nomi kiritish
     if state == "batch_save_name":
@@ -384,6 +393,9 @@ def main():
     app = (
         Application.builder()
         .token(BOT_TOKEN)
+        .base_url(LOCAL_BOT_API_URL)
+        .base_file_url(LOCAL_BOT_API_URL.replace("/bot", "/file/bot"))
+        .local_mode(True)
         .post_init(_post_init)
         .build()
     )
@@ -391,6 +403,7 @@ def main():
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("help", help_handler))
     app.add_handler(CommandHandler("settings", show_settings))
+    app.add_handler(CommandHandler("r2", r2_command))
 
     app.add_handler(MessageHandler(filters.VIDEO, document_handler))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
