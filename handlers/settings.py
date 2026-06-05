@@ -145,14 +145,30 @@ async def handle_settings_photo(update: Update, context: ContextTypes.DEFAULT_TY
     photo = update.message.photo[-1] if update.message.photo else None
     doc   = update.message.document
 
-    file_id = None
+    tg_file = None
     if photo:
-        file_id = photo.file_id
+        tg_file = await photo.get_file()
     elif doc and doc.mime_type and doc.mime_type.startswith("image/"):
-        file_id = doc.file_id
+        tg_file = await doc.get_file()
 
-    if file_id:
-        await set_(user_id, context, "custom_thumbnail", file_id)
+    if tg_file:
+        import uuid
+        # Rasmni darhol diskka saqlaymiz (file_id eskirib qolishi mumkin)
+        thumb_dir = os.path.join(TEMP_DIR, "thumbnails")
+        os.makedirs(thumb_dir, exist_ok=True)
+
+        # Oldingi thumbnailni o'chirish
+        old_path = get(context, "custom_thumbnail")
+        if old_path and isinstance(old_path, str) and os.path.exists(old_path):
+            try:
+                os.remove(old_path)
+            except Exception:
+                pass
+
+        thumb_path = os.path.join(thumb_dir, f"thumb_{user_id}_{uuid.uuid4().hex}.jpg")
+        await tg_file.download_to_drive(thumb_path)
+
+        await set_(user_id, context, "custom_thumbnail", thumb_path)
         context.user_data["state"] = None
         await update.message.reply_text(
             "✅ Custom thumbnail o'rnatildi! Keyingi fayllar uchun ishlatiladi.",
