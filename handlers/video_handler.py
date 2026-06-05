@@ -1,5 +1,4 @@
 import os
-import asyncio
 from telegram import Update
 from telegram.ext import ContextTypes
 from utils.keyboards import main_menu_keyboard
@@ -78,7 +77,6 @@ async def video_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["video_name"] = file_name
         context.user_data["state"] = None
 
-        # Tarixni yangi boshlash
         from utils.video_history import init_history
         init_history(context, local_path, file_name)
 
@@ -98,67 +96,34 @@ async def video_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _download_via_pyrogram(file_id: str, file_size: int, local_path: str, status_msg):
-    import asyncio
     client = await get_pyrogram_client()
     total_mb = (file_size or 0) / 1024 / 1024
     last_percent = [0]
+    last_text = [""]
 
     async def progress(current, total):
         if total == 0:
             return
         percent = min(int(current / total * 100), 99)
-        if percent - last_percent[0] >= 5:
-            last_percent[0] = percent
-            cur_mb = current / 1024 / 1024
-            bar = _progress_bar(percent)
-            try:
-                await status_msg.edit_text(
-                    f"⬇️ *Yuklanmoqda...*\n\n"
-                    f"{bar} `{percent}%`\n"
-                    f"`{cur_mb:.1f}` / `{total_mb:.1f}` MB",
-                    parse_mode="Markdown",
-                )
-            except Exception:
-                pass
-
-    spinners = ["⬇️", "⏬", "⬇️", "📥"]
-    spinner_state = [0]
-
-    async def file_watcher():
-        """Har 5 sekundda fayl hajmini o'lchaб progress ko'rsatadi"""
-        while True:
-            await asyncio.sleep(5)
-            try:
-                cur = os.path.getsize(local_path) if os.path.exists(local_path) else 0
-                cur_mb = cur / 1024 / 1024
-                if file_size and file_size > 0:
-                    percent = min(int(cur / file_size * 100), 99)
-                    bar = _progress_bar(percent)
-                    text = (
-                        f"⬇️ *Yuklanmoqda...*\n\n"
-                        f"{bar} `{percent}%`\n"
-                        f"`{cur_mb:.1f}` / `{total_mb:.1f}` MB"
-                    )
-                else:
-                    icon = spinners[spinner_state[0] % len(spinners)]
-                    spinner_state[0] += 1
-                    text = f"{icon} *Yuklanmoqda...* `{cur_mb:.1f}` MB"
-                try:
-                    await status_msg.edit_text(text, parse_mode="Markdown")
-                except Exception:
-                    pass
-            except Exception:
-                break
-
-    watcher_task = asyncio.create_task(file_watcher())
-    try:
-        await client.download_media(file_id, file_name=local_path, progress=progress)
-    finally:
-        watcher_task.cancel()
+        if percent - last_percent[0] < 5:
+            return
+        last_percent[0] = percent
+        cur_mb = current / 1024 / 1024
+        bar = _progress_bar(percent)
+        text = (
+            f"⬇️ *Yuklanmoqda...*\n\n"
+            f"{bar} `{percent}%`\n"
+            f"`{cur_mb:.1f}` / `{total_mb:.1f}` MB"
+        )
+        if text == last_text[0]:
+            return
+        last_text[0] = text
         try:
-            await watcher_task
-        except asyncio.CancelledError:
+            await status_msg.edit_text(text, parse_mode="Markdown")
+        except Exception:
             pass
+
+    await client.download_media(file_id, file_name=local_path, progress=progress)
 
     try:
         await status_msg.edit_text(
