@@ -201,16 +201,24 @@ async def handle_remove_confirm(update: Update, context: ContextTypes.DEFAULT_TY
 
         removed_labels = ", ".join(f"#{i}" for i in sorted(selected))
         await status_msg.edit_text(
-            f"✅ *Streamlar o'chirildi:* `{removed_labels}`\n\n📤 Yuborilmoqda...",
+            f"✅ *Streamlar o'chirildi:* `{removed_labels}`",
             parse_mode="Markdown",
         )
-        await send_file(query.message, output_path, out_name,
-                        f"✅ {len(selected)} ta stream o'chirildi!", context=context)
-        os.remove(output_path)
+
+        # Tarixga qo'sh, eski faylni o'chir
+        from utils.video_history import push_version
+        old_path = context.user_data.get("video_path")
+        push_version(context, output_path, out_name, f"🎞 Stream removed ({len(selected)} ta)")
+        if old_path and os.path.exists(old_path) and old_path != output_path:
+            os.remove(old_path)
+
         context.user_data["remove_selected"] = set()
-        await query.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
+
+        from utils.post_action import ask_post_action
+        await ask_post_action(status_msg, context, f"{len(selected)} ta stream o'chirildi")
     except Exception as e:
         await status_msg.edit_text(f"❌ Xato:\n`{e}`", parse_mode="Markdown")
+        from utils.keyboards import main_menu_keyboard
         await query.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
 
 

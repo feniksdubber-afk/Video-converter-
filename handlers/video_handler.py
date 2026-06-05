@@ -78,6 +78,10 @@ async def video_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["video_name"] = file_name
         context.user_data["state"] = None
 
+        # Tarixni yangi boshlash
+        from utils.video_history import init_history
+        init_history(context, local_path, file_name)
+
         await status_msg.edit_text(
             f"✅ *Video qabul qilindi!*\n\n"
             f"📁 Fayl: `{file_name}`\n"
