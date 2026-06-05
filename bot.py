@@ -9,6 +9,7 @@ from telegram.ext import (
 from config import BOT_TOKEN
 from utils.db import init_db
 from utils.user_settings import ensure_loaded
+from utils.post_action import handle_pa_send, handle_pa_continue, handle_pa_switch
 from handlers.start import start_handler, help_handler
 from handlers.video_handler import video_received
 from handlers.converter import (
@@ -76,6 +77,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Sozlamalarni keshga yuklash (birinchi marta)
     user_id = query.from_user.id
     await ensure_loaded(user_id, context)
+
+    # ── Post-action (yuborish / davom etish / versiya tanlash) ──
+    if data == "pa_send":              await handle_pa_send(update, context);    return
+    if data == "pa_continue":          await handle_pa_continue(update, context); return
+    if data.startswith("pa_switch_"):  await handle_pa_switch(update, context, int(data[10:])); return
 
     # ── Umumiy ──────────────────────────────────────────────
     if data == "cancel":
