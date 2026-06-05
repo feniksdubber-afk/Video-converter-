@@ -4,6 +4,7 @@ Fayl kalitlari uzunligi muammosini hal qilish uchun indekslash usuli qo'llanildi
 """
 
 import os
+import html
 import uuid
 import aiohttp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -28,7 +29,6 @@ def _file_keyboard(index: int) -> InlineKeyboardMarkup:
 def _list_keyboard(page: int, total: int) -> InlineKeyboardMarkup:
     """Fayllar ro'yxati uchun tugmalar."""
     rows = []
-    # Fayllar user_data dan olinadi, shuning uchun bu funksiyaga o'tish shart emas
     return InlineKeyboardMarkup(rows)
 
 async def _get_file_list_ui(query, context, page: int):
@@ -43,7 +43,7 @@ async def _get_file_list_ui(query, context, page: int):
 
     start = page * PAGE_SIZE
     page_items = all_items[start:start + PAGE_SIZE]
-    
+
     rows = []
     for i, item in enumerate(page_items):
         idx = start + i
@@ -60,8 +60,12 @@ async def _get_file_list_ui(query, context, page: int):
     if nav:
         rows.append(nav)
     rows.append([InlineKeyboardButton("🔄 Yangilash", callback_data="r2_list_0")])
-    
-    text = f"☁️ *R2 Fayl Menejer* — sahifa {page + 1}/{(total - 1) // PAGE_SIZE + 1}\nJami: *{total}* fayl\n\nFayl ustiga bosing:"
+
+    text = (
+        f"☁️ <b>R2 Fayl Menejer</b> — sahifa {page + 1}/{(total - 1) // PAGE_SIZE + 1}\n"
+        f"Jami: <b>{total}</b> fayl\n\n"
+        f"Fayl ustiga bosing:"
+    )
     return text, InlineKeyboardMarkup(rows)
 
 async def r2_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -69,7 +73,7 @@ async def r2_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ R2 sozlanmagan.")
         return
     text, kb = await _get_file_list_ui(update.message, context, 0)
-    await update.message.reply_text(text, reply_markup=kb, parse_mode="Markdown")
+    await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
 
 async def r2_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -79,7 +83,7 @@ async def r2_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("r2_list_"):
         page = int(data.split("_")[-1])
         text, kb = await _get_file_list_ui(query, context, page)
-        await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
+        await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
         await query.answer()
 
     elif data.startswith("r2_info_"):
@@ -93,8 +97,13 @@ async def r2_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         key = files[idx]["key"]
         name = os.path.basename(key)
         url = get_public_url(key)
-        text = f"📄 *{name}*\n\n🗂 Kalit: `{key}`\n🔗 URL: {url}\n\nNima qilmoqchisiz?"
-        await query.edit_message_text(text, reply_markup=_file_keyboard(idx), parse_mode="Markdown")
+        text = (
+            f"📄 <b>{html.escape(name)}</b>\n\n"
+            f"🗂 Kalit: <code>{html.escape(key)}</code>\n"
+            f"🔗 URL: {html.escape(url)}\n\n"
+            f"Nima qilmoqchisiz?"
+        )
+        await query.edit_message_text(text, reply_markup=_file_keyboard(idx), parse_mode="HTML")
         await query.answer()
 
     elif data.startswith("r2_link_"):
@@ -108,8 +117,16 @@ async def r2_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         key = files[idx]["key"]
         url = get_public_url(key)
         presigned = await generate_presigned_url(key, expires=86400)
-        text = f"🔗 *{os.path.basename(key)}* havolasi:\n\n*Public URL:*\n`{url}`\n\n*Vaqtinchalik havola (24 soat):*\n`{presigned or 'Xato'}`"
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Orqaga", callback_data=f"r2_info_{idx}")]]), parse_mode="Markdown")
+        text = (
+            f"🔗 <b>{html.escape(os.path.basename(key))}</b> havolasi:\n\n"
+            f"<b>Public URL:</b>\n<code>{html.escape(url)}</code>\n\n"
+            f"<b>Vaqtinchalik havola (24 soat):</b>\n<code>{html.escape(presigned or 'Xato')}</code>"
+        )
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Orqaga", callback_data=f"r2_info_{idx}")]]),
+            parse_mode="HTML"
+        )
         await query.answer()
 
     elif data.startswith("r2_del_confirm_"):
@@ -122,9 +139,14 @@ async def r2_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         key = files[idx]["key"]
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Ha, o'chir", callback_data=f"r2_del_do_{idx}"), InlineKeyboardButton("❌ Bekor", callback_data=f"r2_info_{idx}")]
+            [InlineKeyboardButton("✅ Ha, o'chir", callback_data=f"r2_del_do_{idx}"),
+             InlineKeyboardButton("❌ Bekor", callback_data=f"r2_info_{idx}")]
         ])
-        await query.edit_message_text(f"⚠️ *{os.path.basename(key)}* ni o'chirishga ishonchingiz komilmi?", reply_markup=kb, parse_mode="Markdown")
+        await query.edit_message_text(
+            f"⚠️ <b>{html.escape(os.path.basename(key))}</b> ni o'chirishga ishonchingiz komilmi?",
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
         await query.answer()
 
     elif data.startswith("r2_del_do_"):
@@ -137,9 +159,17 @@ async def r2_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         key = files[idx]["key"]
         if await delete_file(key):
-            await query.edit_message_text(f"✅ O'chirildi.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Ro'yxatga", callback_data="r2_list_0")]]), parse_mode="Markdown")
+            await query.edit_message_text(
+                "✅ O'chirildi.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Ro'yxatga", callback_data="r2_list_0")]]),
+                parse_mode="HTML"
+            )
         else:
-            await query.edit_message_text("❌ Xato yuz berdi.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Orqaga", callback_data=f"r2_info_{idx}")]]), parse_mode="Markdown")
+            await query.edit_message_text(
+                "❌ Xato yuz berdi.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Orqaga", callback_data=f"r2_info_{idx}")]]),
+                parse_mode="HTML"
+            )
         await query.answer()
 
     elif data.startswith("r2_rename_"):
@@ -151,13 +181,13 @@ async def r2_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("❌ Fayl topilmadi, ro'yxatni yangilang")
             return
         context.user_data["r2_rename_key"] = files[idx]["key"]
-        await query.edit_message_text("✏️ Yangi nom kiriting:", parse_mode="Markdown")
+        await query.edit_message_text("✏️ Yangi nom kiriting:", parse_mode="HTML")
         await query.answer()
 
 async def _show_r2_list_cb(query, context=None, page: int = 0):
     """Callback query orqali R2 fayl ro'yxatini ko'rsatish."""
     text, kb = await _get_file_list_ui(query, context, page)
-    await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
+    await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
 
 async def r2_rename_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     old_key = context.user_data.get("r2_rename_key")
