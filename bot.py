@@ -406,11 +406,31 @@ async def _handle_subtitle_direct(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error("Xato yuz berdi:", exc_info=context.error)
-    if isinstance(update, Update) and update.effective_message:
-        await update.effective_message.reply_text(
-            "⚠️ Kutilmagan xato yuz berdi. /start bosing."
+    from telegram.error import Conflict, NetworkError, TimedOut
+    err = context.error
+
+    if isinstance(err, Conflict):
+        logger.critical(
+            "❌ CONFLICT: Boshqa bot instance ishlamoqda! "
+            "Faqat bitta instance bo'lishi kerak. Bot to'xtatilmoqda..."
         )
+        # Boshqa instance bilan to'qnashuv — qayta urinishning ma'nosi yo'q
+        import os, signal
+        os.kill(os.getpid(), signal.SIGTERM)
+        return
+
+    if isinstance(err, (NetworkError, TimedOut)):
+        logger.warning("Tarmoq xatosi (vaqtinchalik): %s", err)
+        return
+
+    logger.error("Xato yuz berdi:", exc_info=err)
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "⚠️ Kutilmagan xato yuz berdi. /start bosing."
+            )
+        except Exception:
+            pass
 
 
 async def _post_init(app):
@@ -454,7 +474,10 @@ def main():
     app.add_error_handler(error_handler)
 
     logger.info("Bot ishga tushmoqda...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,
+    )
 
 
 if __name__ == "__main__":
