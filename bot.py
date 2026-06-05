@@ -76,6 +76,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Sozlamalarni keshga yuklash (birinchi marta)
     user_id = query.from_user.id
+    context.user_data["_user_id"] = user_id
     await ensure_loaded(user_id, context)
 
     # ── Post-action (yuborish / davom etish / versiya tanlash) ──
