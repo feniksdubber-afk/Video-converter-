@@ -302,9 +302,6 @@ async def send_file(
             os.remove(custom_thumb_tmp)
 
     try:
-        await status_msg.edit_text(
-            f"📤 *Yuborilmoqda...*\n\n{_progress_bar(100)} `100%`",
-            parse_mode="Markdown",
-        )
+        await status_msg.delete()
     except Exception:
         pass

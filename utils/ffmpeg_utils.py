@@ -39,6 +39,7 @@ async def run_ffmpeg_async(
     if input_path:
         duration_sec = get_video_duration(input_path)
 
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -53,35 +54,45 @@ async def run_ffmpeg_async(
             async for line in proc.stderr:
                 stderr_chunks.append(line.decode(errors="replace"))
 
-        asyncio.ensure_future(read_stderr())
+        stderr_task = asyncio.ensure_future(read_stderr())
 
         current_time = 0.0
-        async for raw_line in proc.stdout:
-            line = raw_line.decode(errors="replace").strip()
 
-            # out_time_ms=123456789  yoki  out_time=00:01:23.45
-            m = re.search(r"out_time_ms=(\d+)", line)
-            if m:
-                current_time = int(m.group(1)) / 1_000_000  # microseconds → seconds
-            elif re.search(r"out_time=(\d+):(\d+):([\d.]+)", line):
-                mt = re.search(r"out_time=(\d+):(\d+):([\d.]+)", line)
-                h, mn, s = mt.group(1), mt.group(2), mt.group(3)
-                current_time = int(h) * 3600 + int(mn) * 60 + float(s)
+        async def _read_stdout():
+            nonlocal current_time, last_percent
+            async for raw_line in proc.stdout:
+                line = raw_line.decode(errors="replace").strip()
 
-            if duration_sec > 0:
-                percent = min(int(current_time / duration_sec * 100), 99)
-                if percent - last_percent >= 5:
-                    last_percent = percent
-                    bar = _progress_bar(percent)
-                    try:
-                        await status_msg.edit_text(
-                            f"⚙️ *{label}...*\n\n{bar} `{percent}%`",
-                            parse_mode="Markdown",
-                        )
-                    except Exception:
-                        pass
+                m = re.search(r"out_time_ms=(\d+)", line)
+                if m:
+                    current_time = int(m.group(1)) / 1_000_000
+                elif re.search(r"out_time=(\d+):(\d+):([\d.]+)", line):
+                    mt = re.search(r"out_time=(\d+):(\d+):([\d.]+)", line)
+                    h, mn, s = mt.group(1), mt.group(2), mt.group(3)
+                    current_time = int(h) * 3600 + int(mn) * 60 + float(s)
 
-        await proc.wait()
+                if duration_sec > 0:
+                    percent = min(int(current_time / duration_sec * 100), 99)
+                    if percent - last_percent >= 5:
+                        last_percent = percent
+                        bar = _progress_bar(percent)
+                        try:
+                            await status_msg.edit_text(
+                                f"⚙️ *{label}...*\n\n{bar} `{percent}%`",
+                                parse_mode="Markdown",
+                            )
+                        except Exception:
+                            pass
+
+        try:
+            await asyncio.wait_for(_read_stdout(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return False, f"Vaqt tugadi ({timeout // 60} daqiqa)"
+
+        await asyncio.wait_for(proc.wait(), timeout=30)
+        await stderr_task
         stderr_text = "".join(stderr_chunks)
 
         if proc.returncode != 0:
@@ -97,11 +108,15 @@ async def run_ffmpeg_async(
             pass
         return True, ""
 
-    except asyncio.TimeoutError:
-        return False, "Vaqt tugadi"
     except FileNotFoundError:
         return False, "FFmpeg topilmadi."
     except Exception as e:
+        if proc is not None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
         return False, str(e)
 
 

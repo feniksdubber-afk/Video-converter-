@@ -12,6 +12,8 @@ Funksiyalar:
 
 import os
 import math
+import asyncio
+import functools
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
@@ -61,7 +63,7 @@ def fmt_size(b: int) -> str:
 
 async def upload_file(local_path: str, object_key: str | None = None, progress_cb=None) -> str:
     """
-    Faylni R2 ga yuklaydi.
+    Faylni R2 ga yuklaydi (async, event loop bloklanmaydi).
     object_key ko'rsatilmasa — fayl nomidan olinadi.
     Qaytaradi: public URL (str)
     """
@@ -70,80 +72,92 @@ async def upload_file(local_path: str, object_key: str | None = None, progress_c
 
     file_size = os.path.getsize(local_path)
     uploaded = [0]
+    loop = asyncio.get_event_loop()
 
     def _callback(bytes_transferred):
         uploaded[0] += bytes_transferred
         if progress_cb:
-            import asyncio
             pct = min(int(uploaded[0] / file_size * 100), 99) if file_size else 0
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.ensure_future(progress_cb(uploaded[0], file_size, pct))
-            except Exception:
-                pass
+            asyncio.run_coroutine_threadsafe(
+                progress_cb(uploaded[0], file_size, pct), loop
+            )
 
-    c = _client()
-    c.upload_file(
-        local_path,
-        R2_BUCKET,
-        object_key,
-        Callback=_callback if progress_cb else None,
-    )
+    def _do_upload():
+        c = _client()
+        c.upload_file(
+            local_path,
+            R2_BUCKET,
+            object_key,
+            Callback=_callback if progress_cb else None,
+        )
+
+    await asyncio.get_event_loop().run_in_executor(None, _do_upload)
     return get_public_url(object_key)
 
 
 async def delete_file(object_key: str) -> bool:
-    try:
-        _client().delete_object(Bucket=R2_BUCKET, Key=object_key)
-        return True
-    except ClientError:
-        return False
+    def _do():
+        try:
+            _client().delete_object(Bucket=R2_BUCKET, Key=object_key)
+            return True
+        except ClientError:
+            return False
+
+    return await asyncio.get_event_loop().run_in_executor(None, _do)
 
 
 async def list_files(prefix: str = "", max_keys: int = 50) -> list[dict]:
-    try:
-        c = _client()
-        kwargs = {"Bucket": R2_BUCKET, "MaxKeys": max_keys}
-        if prefix:
-            kwargs["Prefix"] = prefix
-        resp = c.list_objects_v2(**kwargs)
-        items = []
-        for obj in resp.get("Contents", []):
-            items.append({
-                "key": obj["Key"],
-                "size": obj["Size"],
-                "size_str": fmt_size(obj["Size"]),
-                "last_modified": obj["LastModified"],
-                "url": get_public_url(obj["Key"]),
-            })
-        return items
-    except ClientError:
-        return []
+    def _do():
+        try:
+            c = _client()
+            kwargs = {"Bucket": R2_BUCKET, "MaxKeys": max_keys}
+            if prefix:
+                kwargs["Prefix"] = prefix
+            resp = c.list_objects_v2(**kwargs)
+            items = []
+            for obj in resp.get("Contents", []):
+                items.append({
+                    "key": obj["Key"],
+                    "size": obj["Size"],
+                    "size_str": fmt_size(obj["Size"]),
+                    "last_modified": obj["LastModified"],
+                    "url": get_public_url(obj["Key"]),
+                })
+            return items
+        except ClientError:
+            return []
+
+    return await asyncio.get_event_loop().run_in_executor(None, _do)
 
 
 async def rename_file(old_key: str, new_key: str) -> str | None:
     """Faylni nusxalab, eskisini o'chiradi. Yangi URL qaytaradi."""
-    try:
-        c = _client()
-        c.copy_object(
-            Bucket=R2_BUCKET,
-            CopySource={"Bucket": R2_BUCKET, "Key": old_key},
-            Key=new_key,
-        )
-        c.delete_object(Bucket=R2_BUCKET, Key=old_key)
-        return get_public_url(new_key)
-    except ClientError:
-        return None
+    def _do():
+        try:
+            c = _client()
+            c.copy_object(
+                Bucket=R2_BUCKET,
+                CopySource={"Bucket": R2_BUCKET, "Key": old_key},
+                Key=new_key,
+            )
+            c.delete_object(Bucket=R2_BUCKET, Key=old_key)
+            return get_public_url(new_key)
+        except ClientError:
+            return None
+
+    return await asyncio.get_event_loop().run_in_executor(None, _do)
 
 
 async def generate_presigned_url(object_key: str, expires: int = 3600) -> str | None:
-    try:
-        url = _client().generate_presigned_url(
-            "get_object",
-            Params={"Bucket": R2_BUCKET, "Key": object_key},
-            ExpiresIn=expires,
-        )
-        return url
-    except ClientError:
-        return None
+    def _do():
+        try:
+            url = _client().generate_presigned_url(
+                "get_object",
+                Params={"Bucket": R2_BUCKET, "Key": object_key},
+                ExpiresIn=expires,
+            )
+            return url
+        except ClientError:
+            return None
+
+    return await asyncio.get_event_loop().run_in_executor(None, _do)
