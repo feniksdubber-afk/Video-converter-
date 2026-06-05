@@ -5,8 +5,10 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 API_ID    = int(os.environ.get("TELEGRAM_API_ID") or os.environ.get("API_ID", "0"))
 API_HASH  = os.environ.get("TELEGRAM_API_HASH") or os.environ.get("API_HASH", "")
 
-# Local Bot API — points to the telegram-bot-api server running on port 8080
-LOCAL_BOT_API_URL = os.environ.get("LOCAL_BOT_API_URL", "http://localhost:8080/bot")
+# Local Bot API — Railway da: http://local-bot-api.railway.internal:8081/bot
+# Replit da: http://localhost:8080/bot
+# Bo'sh qoldirilsa → standart Telegram API ishlatiladi (50 MB limit)
+LOCAL_BOT_API_URL = os.environ.get("LOCAL_BOT_API_URL", "").strip()
 
 MAX_FILE_SIZE_MB = 2000
 TEMP_DIR = "/tmp/videobot"

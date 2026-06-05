@@ -390,15 +390,22 @@ def main():
     if not BOT_TOKEN:
         raise ValueError("TELEGRAM_BOT_TOKEN topilmadi!")
 
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .base_url(LOCAL_BOT_API_URL)
-        .base_file_url(LOCAL_BOT_API_URL.replace("/bot", "/file/bot"))
-        .local_mode(True)
-        .post_init(_post_init)
-        .build()
-    )
+    builder = Application.builder().token(BOT_TOKEN).post_init(_post_init)
+
+    if LOCAL_BOT_API_URL:
+        # Local Bot API server mavjud (Replit yoki Railway internal)
+        logger.info(f"🔗 Local Bot API: {LOCAL_BOT_API_URL}")
+        builder = (
+            builder
+            .base_url(LOCAL_BOT_API_URL)
+            .base_file_url(LOCAL_BOT_API_URL.replace("/bot", "/file/bot"))
+            .local_mode(True)
+        )
+    else:
+        # Standart Telegram API (50 MB limit, R2 orqali katta fayllar)
+        logger.info("🌐 Standart Telegram API ishlatilmoqda")
+
+    app = builder.build()
 
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("help", help_handler))
