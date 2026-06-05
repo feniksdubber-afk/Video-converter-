@@ -64,6 +64,12 @@ from handlers.watermark import (
 from handlers.crop import (
     show_crop_menu, handle_crop_preset, handle_crop_custom_prompt, handle_crop_custom_text,
 )
+from handlers.batch import (
+    show_batch_menu, show_batch_new, handle_batch_step_toggle,
+    handle_batch_save_ask, handle_batch_start_nosave,
+    handle_batch_use_template, handle_batch_delete_template,
+    handle_batch_clear_files, handle_batch_run,
+)
 from utils.keyboards import main_menu_keyboard
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -242,6 +248,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "crop_custom":        await handle_crop_custom_prompt(update, context)
     elif data.startswith("crop_"):     await handle_crop_preset(update, context, data[5:])
 
+    # ── Batch ────────────────────────────────────────────────────────────────
+    elif data == "batch":                  await show_batch_menu(update, context)
+    elif data == "batch_menu":             await show_batch_menu(update, context)
+    elif data == "batch_new":              await show_batch_new(update, context)
+    elif data == "batch_noop":             await query.answer()
+    elif data == "batch_save_ask":         await handle_batch_save_ask(update, context)
+    elif data == "batch_start_nosave":     await handle_batch_start_nosave(update, context)
+    elif data == "batch_clear_files":      await handle_batch_clear_files(update, context)
+    elif data == "batch_run":              await handle_batch_run(update, context)
+    elif data.startswith("batch_step_"):   await handle_batch_step_toggle(update, context, data[11:])
+    elif data.startswith("batch_use_"):    await handle_batch_use_template(update, context, int(data[10:]))
+    elif data.startswith("batch_del_"):    await handle_batch_delete_template(update, context, int(data[10:]))
+
     else:
         await query.answer("Noma'lum buyruq", show_alert=True)
 
@@ -264,6 +283,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "watermark_text":      handle_watermark_text,
         "crop_custom":         handle_crop_custom_text,
     }
+
+    # Batch shablon nomi kiritish
+    if state == "batch_save_name":
+        from handlers.batch import handle_batch_save_name
+        await handle_batch_save_name(update, context)
+        return
     handler = dispatch.get(state)
     if handler:
         await handler(update, context)
