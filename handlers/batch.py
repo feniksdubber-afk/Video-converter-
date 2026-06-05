@@ -598,14 +598,35 @@ async def _run_step(step_key: str, input_path: str, input_name: str) -> tuple[st
 
 
 async def _get_streams(video_path: str) -> list[dict]:
-    result = subprocess.run(
-        ["ffprobe", "-v", "error",
-         "-show_entries", "stream=index,codec_type,codec_name",
-         "-of", "json", video_path],
-        capture_output=True, text=True, timeout=30
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error",
+            "-show_entries", "stream=index,codec_type,codec_name",
+            "-of", "json", video_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        data = json.loads(stdout.decode(errors="replace"))
+        return data.get("streams", [])
+    except Exception:
+        return []
+
+
+async def _run_cmd(cmd: list[str], timeout: int = 1800) -> tuple[int, str]:
+    """Komandani async bajaradi. (returncode, stderr) qaytaradi."""
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
     )
-    data = json.loads(result.stdout)
-    return data.get("streams", [])
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        return proc.returncode, stderr.decode(errors="replace")
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise RuntimeError(f"Vaqt tugadi ({timeout}s)")
 
 
 async def _step_keep_first_audio_no_subs(input_path: str, input_name: str) -> tuple[str, str]:
@@ -614,17 +635,14 @@ async def _step_keep_first_audio_no_subs(input_path: str, input_name: str) -> tu
 
     audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
     video_streams = [s for s in streams if s.get("codec_type") == "video"]
-    # subtitle va data olib tashlanadi
 
     map_args = []
     for s in video_streams:
         map_args += ["-map", f"0:{s['index']}"]
 
     if audio_streams:
-        # Faqat birinchi audio
         map_args += ["-map", f"0:{audio_streams[0]['index']}"]
 
-    # attachment (shrift, thumbnail) lar ham qoladi
     attachment_streams = [s for s in streams if s.get("codec_type") not in ("audio", "video", "subtitle")]
     for s in attachment_streams:
         map_args += ["-map", f"0:{s['index']}"]
@@ -635,9 +653,9 @@ async def _step_keep_first_audio_no_subs(input_path: str, input_name: str) -> tu
     out_name = f"{base}_cleaned{ext}"
 
     cmd = ["ffmpeg", "-y", "-i", input_path] + map_args + ["-c", "copy", out_path]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr[-800:])
+    rc, stderr = await _run_cmd(cmd, timeout=600)
+    if rc != 0:
+        raise RuntimeError(stderr[-800:])
     return out_path, out_name
 
 
@@ -649,9 +667,9 @@ async def _step_remove_subs(input_path: str, input_name: str) -> tuple[str, str]
     out_name = f"{base}_nosubs{ext}"
 
     cmd = ["ffmpeg", "-y", "-i", input_path, "-map", "0", "-map", "-0:s", "-c", "copy", out_path]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr[-800:])
+    rc, stderr = await _run_cmd(cmd, timeout=600)
+    if rc != 0:
+        raise RuntimeError(stderr[-800:])
     return out_path, out_name
 
 
@@ -666,18 +684,17 @@ async def _step_convert(input_path: str, base_name: str, fmt: str) -> tuple[str,
     else:
         cmd = ["ffmpeg", "-y", "-i", input_path, "-c", "copy", out_path]
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
-    if result.returncode != 0:
-        # Fallback: stream copy ishlamasa re-encode qilamiz
+    rc, stderr = await _run_cmd(cmd, timeout=1200)
+    if rc != 0:
         if fmt == "mp4":
             cmd2 = ["ffmpeg", "-y", "-i", input_path,
                     "-c:v", "libx264", "-preset", "fast", "-crf", "22",
                     "-c:a", "aac", "-movflags", "+faststart", out_path]
-            result2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=1800)
-            if result2.returncode != 0:
-                raise RuntimeError(result2.stderr[-800:])
+            rc2, stderr2 = await _run_cmd(cmd2, timeout=1800)
+            if rc2 != 0:
+                raise RuntimeError(stderr2[-800:])
         else:
-            raise RuntimeError(result.stderr[-800:])
+            raise RuntimeError(stderr[-800:])
     return out_path, out_name
 
 
@@ -689,9 +706,9 @@ async def _step_compress(input_path: str, base_name: str, crf: int) -> tuple[str
     cmd = ["ffmpeg", "-y", "-i", input_path,
            "-c:v", "libx264", "-preset", "medium", "-crf", str(crf),
            "-c:a", "copy", "-movflags", "+faststart", out_path]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr[-800:])
+    rc, stderr = await _run_cmd(cmd, timeout=1800)
+    if rc != 0:
+        raise RuntimeError(stderr[-800:])
     return out_path, out_name
 
 
@@ -702,9 +719,9 @@ async def _step_remove_audio(input_path: str, base_name: str) -> tuple[str, str]
     out_name = f"{base_name}_noaudio{ext}"
 
     cmd = ["ffmpeg", "-y", "-i", input_path, "-c:v", "copy", "-an", out_path]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr[-800:])
+    rc, stderr = await _run_cmd(cmd, timeout=600)
+    if rc != 0:
+        raise RuntimeError(stderr[-800:])
     return out_path, out_name
 
 
@@ -717,7 +734,7 @@ async def _step_change_res(input_path: str, base_name: str, height: int) -> tupl
            "-vf", f"scale=-2:{height}",
            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
            "-c:a", "copy", "-movflags", "+faststart", out_path]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr[-800:])
+    rc, stderr = await _run_cmd(cmd, timeout=1800)
+    if rc != 0:
+        raise RuntimeError(stderr[-800:])
     return out_path, out_name

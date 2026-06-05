@@ -137,12 +137,13 @@ async def handle_sub_translate_lang(update: Update, context: ContextTypes.DEFAUL
             os.remove(sub_path)
         context.user_data.pop("sub_translate_path", None)
 
-        await query.message.reply_document(
-            document=open(out_path, "rb"),
-            filename=out_name,
-            caption=f"✅ *{lang_name}* tiliga tarjima qilindi!",
-            parse_mode="Markdown",
-        )
+        with open(out_path, "rb") as doc_file:
+            await query.message.reply_document(
+                document=doc_file,
+                filename=out_name,
+                caption=f"✅ *{lang_name}* tiliga tarjima qilindi!",
+                parse_mode="Markdown",
+            )
         if os.path.exists(out_path):
             os.remove(out_path)
 

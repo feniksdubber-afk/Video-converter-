@@ -3,7 +3,7 @@ import os
 from telegram import Update
 from telegram.ext import ContextTypes
 from utils.keyboards import main_menu_keyboard
-from config import TEMP_DIR, BOT_TOKEN, API_ID, API_HASH
+from config import TEMP_DIR, DATA_DIR, BOT_TOKEN, API_ID, API_HASH
 from pyrogram import Client
 
 _pyrogram_client = None
@@ -19,7 +19,7 @@ async def get_pyrogram_client() -> Client:
                 api_id=API_ID,
                 api_hash=API_HASH,
                 bot_token=BOT_TOKEN,
-                workdir=TEMP_DIR,
+                workdir=DATA_DIR,
             )
             await _pyrogram_client.start()
     return _pyrogram_client
