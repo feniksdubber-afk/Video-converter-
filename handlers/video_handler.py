@@ -1,3 +1,4 @@
+import asyncio
 import os
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -6,19 +7,21 @@ from config import TEMP_DIR, BOT_TOKEN, API_ID, API_HASH
 from pyrogram import Client
 
 _pyrogram_client = None
+_pyrogram_lock = asyncio.Lock()
 
 
 async def get_pyrogram_client() -> Client:
     global _pyrogram_client
-    if _pyrogram_client is None or not _pyrogram_client.is_connected:
-        _pyrogram_client = Client(
-            "bot_session",
-            api_id=API_ID,
-            api_hash=API_HASH,
-            bot_token=BOT_TOKEN,
-            workdir=TEMP_DIR,
-        )
-        await _pyrogram_client.start()
+    async with _pyrogram_lock:
+        if _pyrogram_client is None or not _pyrogram_client.is_connected:
+            _pyrogram_client = Client(
+                "bot_session",
+                api_id=API_ID,
+                api_hash=API_HASH,
+                bot_token=BOT_TOKEN,
+                workdir=TEMP_DIR,
+            )
+            await _pyrogram_client.start()
     return _pyrogram_client
 
 

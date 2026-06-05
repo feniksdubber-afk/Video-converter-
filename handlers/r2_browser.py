@@ -18,6 +18,8 @@ Callback datalar:
 
 import base64
 import os
+import uuid
+import aiohttp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from utils.r2_manager import list_files, delete_file, rename_file, generate_presigned_url, get_public_url, is_configured, fmt_size
@@ -192,6 +194,11 @@ async def r2_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await query.answer()
 
+    elif data.startswith("r2_send_tg__"):
+        filename = data[len("r2_send_tg__"):]
+        await query.answer("📥 Yuklanmoqda...")
+        await _send_r2_file_to_telegram(query.message, filename)
+
 
 async def r2_rename_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Rename uchun matn kiritilganda."""
@@ -223,3 +230,61 @@ async def r2_rename_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await status.edit_text("❌ Nomni o'zgartirishda xato yuz berdi.")
     return True
+
+
+async def _send_r2_file_to_telegram(message, filename: str):
+    """R2 dagi faylni vaqtinchalik yuklab, Telegramga yuboradi."""
+    from config import TEMP_DIR
+
+    url = get_public_url(filename)
+    tmp_path = os.path.join(TEMP_DIR, f"r2tmp_{uuid.uuid4().hex}_{os.path.basename(filename)}")
+    status_msg = await message.reply_text(
+        f"📥 *Telegramga yuborilmoqda...*\n\n`[░░░░░░░░░░░░]` `0%`\n`{os.path.basename(filename)}`",
+        parse_mode="Markdown",
+    )
+
+    try:
+        # R2 dan yuklab olish
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    await status_msg.edit_text(f"❌ R2 dan yuklashda xato: HTTP {resp.status}")
+                    return
+                total = int(resp.headers.get("Content-Length", 0))
+                downloaded = 0
+                last_pct = -1
+                with open(tmp_path, "wb") as f:
+                    async for chunk in resp.content.iter_chunked(1024 * 256):  # 256 KB
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total > 0:
+                            pct = min(int(downloaded / total * 100), 99)
+                            if pct - last_pct >= 10:
+                                last_pct = pct
+                                filled = int(12 * pct / 100)
+                                bar = "[" + "█" * filled + "░" * (12 - filled) + "]"
+                                try:
+                                    await status_msg.edit_text(
+                                        f"📥 *Telegramga yuborilmoqda...*\n\n`{bar}` `{pct}%`\n`{os.path.basename(filename)}`",
+                                        parse_mode="Markdown",
+                                    )
+                                except Exception:
+                                    pass
+
+        # Telegramga yuborish
+        await status_msg.edit_text("📤 *Telegram serveriga yuborilmoqda...*", parse_mode="Markdown")
+        file_size = os.path.getsize(tmp_path)
+        with open(tmp_path, "rb") as f:
+            await message.reply_document(
+                document=f,
+                filename=os.path.basename(filename),
+                caption=f"📁 `{os.path.basename(filename)}`\n📦 `{fmt_size(file_size)}`",
+                parse_mode="Markdown",
+            )
+        await status_msg.delete()
+
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Yuborishda xato:\n`{e}`", parse_mode="Markdown")
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
