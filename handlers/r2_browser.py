@@ -84,6 +84,12 @@ async def r2_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("r2_info_"):
         idx = int(data.split("_")[-1])
+        if not files:
+            files = await list_files(max_keys=200)
+            context.user_data["r2_files"] = files
+        if idx >= len(files):
+            await query.answer("❌ Fayl topilmadi, ro'yxatni yangilang")
+            return
         key = files[idx]["key"]
         name = os.path.basename(key)
         url = get_public_url(key)
@@ -93,6 +99,12 @@ async def r2_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("r2_link_"):
         idx = int(data.split("_")[-1])
+        if not files:
+            files = await list_files(max_keys=200)
+            context.user_data["r2_files"] = files
+        if idx >= len(files):
+            await query.answer("❌ Fayl topilmadi, ro'yxatni yangilang")
+            return
         key = files[idx]["key"]
         url = get_public_url(key)
         presigned = await generate_presigned_url(key, expires=86400)
@@ -102,6 +114,12 @@ async def r2_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("r2_del_confirm_"):
         idx = int(data.split("_")[-1])
+        if not files:
+            files = await list_files(max_keys=200)
+            context.user_data["r2_files"] = files
+        if idx >= len(files):
+            await query.answer("❌ Fayl topilmadi, ro'yxatni yangilang")
+            return
         key = files[idx]["key"]
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ Ha, o'chir", callback_data=f"r2_del_do_{idx}"), InlineKeyboardButton("❌ Bekor", callback_data=f"r2_info_{idx}")]
@@ -111,6 +129,12 @@ async def r2_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("r2_del_do_"):
         idx = int(data.split("_")[-1])
+        if not files:
+            files = await list_files(max_keys=200)
+            context.user_data["r2_files"] = files
+        if idx >= len(files):
+            await query.answer("❌ Fayl topilmadi, ro'yxatni yangilang")
+            return
         key = files[idx]["key"]
         if await delete_file(key):
             await query.edit_message_text(f"✅ O'chirildi.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Ro'yxatga", callback_data="r2_list_0")]]), parse_mode="Markdown")
@@ -120,6 +144,12 @@ async def r2_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("r2_rename_"):
         idx = int(data.split("_")[-1])
+        if not files:
+            files = await list_files(max_keys=200)
+            context.user_data["r2_files"] = files
+        if idx >= len(files):
+            await query.answer("❌ Fayl topilmadi, ro'yxatni yangilang")
+            return
         context.user_data["r2_rename_key"] = files[idx]["key"]
         await query.edit_message_text("✏️ Yangi nom kiriting:", parse_mode="Markdown")
         await query.answer()
