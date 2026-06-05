@@ -10,7 +10,11 @@ from config import BOT_TOKEN, LOCAL_BOT_API_URL
 from utils.db import init_db
 from utils.user_settings import ensure_loaded
 from utils.post_action import handle_pa_send, handle_pa_continue, handle_pa_switch
-from handlers.start import start_handler, help_handler
+from handlers.start import (
+    start_handler, help_handler,
+    show_cat_video, show_cat_audio, show_cat_subtitle,
+    show_cat_stream, show_cat_tools, show_help_cb,
+)
 from handlers.video_handler import video_received
 from handlers.converter import (
     show_convert_menu, show_resolution_menu, handle_format_choice, handle_resolution_choice,
@@ -91,6 +95,24 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "pa_continue":          await handle_pa_continue(update, context); return
     if data.startswith("pa_switch_"):  await handle_pa_switch(update, context, int(data[10:])); return
 
+    # ── Kategoriya menyulari ─────────────────────────────────
+    if data == "cat_video":            await show_cat_video(update, context);    return
+    if data == "cat_audio":            await show_cat_audio(update, context);    return
+    if data == "cat_subtitle":         await show_cat_subtitle(update, context); return
+    if data == "cat_stream":           await show_cat_stream(update, context);   return
+    if data == "cat_tools":            await show_cat_tools(update, context);    return
+    if data == "help_cb":              await show_help_cb(update, context);      return
+    if data == "cat_batch":
+        await query.answer()
+        await show_batch_menu(update, context)
+        return
+    if data == "cat_r2":
+        await query.answer()
+        # R2 browser — list ni 0-sahifadan ko'rsatish
+        query.data = "r2_list_0"
+        await r2_callback(update, context)
+        return
+
     # ── Umumiy ──────────────────────────────────────────────
     if data == "cancel":
         context.user_data["state"] = None
@@ -103,7 +125,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "back":
         context.user_data["state"] = None
         await query.answer()
-        await query.edit_message_text("Quyidagi amallardan birini tanlang:", reply_markup=main_menu_keyboard())
+        has_video = bool(context.user_data.get("video_path"))
+        if has_video:
+            await query.edit_message_text(
+                "Kategoriyani tanlang:",
+                reply_markup=main_menu_keyboard(),
+            )
+        else:
+            from utils.keyboards import start_keyboard
+            await query.edit_message_text(
+                "📤 Video yuboring yoki bo'limni tanlang:",
+                reply_markup=start_keyboard(),
+            )
         return
 
     # ── Asosiy funksiyalar ───────────────────────────────────
