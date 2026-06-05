@@ -99,26 +99,34 @@ async def _show_list(message, context, page: int = 0):
     await message.reply_text(text, reply_markup=kb, parse_mode="Markdown")
 
 
+async def _show_r2_list_cb(query, page: int = 0):
+    """Callback query orqali R2 ro'yxatini ko'rsatadi (edit_message_text)."""
+    if not is_configured():
+        await query.edit_message_text("❌ R2 sozlanmagan. Railway da R2_* o'zgaruvchilarini tekshiring.")
+        return
+    all_items = await list_files(max_keys=200)
+    total = len(all_items)
+    if total == 0:
+        await query.edit_message_text("📭 R2 da hech qanday fayl yo'q.")
+        return
+    start = page * PAGE_SIZE
+    page_items = all_items[start:start + PAGE_SIZE]
+    text = (
+        f"☁️ *R2 Fayl Menejer* — sahifa {page + 1}/{(total - 1) // PAGE_SIZE + 1}\n"
+        f"Jami: *{total}* fayl\n\n"
+        "Fayl ustiga bosing:"
+    )
+    kb = _list_keyboard(page_items, page, total)
+    await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
+
+
 async def r2_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
 
     if data.startswith("r2_list_"):
         page = int(data.split("_")[-1])
-        all_items = await list_files(max_keys=200)
-        total = len(all_items)
-        if total == 0:
-            await query.edit_message_text("📭 R2 da hech qanday fayl yo'q.")
-            return
-        start = page * PAGE_SIZE
-        page_items = all_items[start:start + PAGE_SIZE]
-        text = (
-            f"☁️ *R2 Fayl Menejer* — sahifa {page + 1}/{(total - 1) // PAGE_SIZE + 1}\n"
-            f"Jami: *{total}* fayl\n\n"
-            "Fayl ustiga bosing:"
-        )
-        kb = _list_keyboard(page_items, page, total)
-        await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
+        await _show_r2_list_cb(query, page)
         await query.answer()
 
     elif data.startswith("r2_info_"):
