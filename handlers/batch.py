@@ -68,6 +68,10 @@ STEP_DEFS = {
         "label": "📐 480p ga o'zgartirish",
         "desc": "Video o'lchamini 480p ga o'zgartiradi",
     },
+    "upload_r2": {
+        "label": "☁️ R2 ga yuklash",
+        "desc": "Natijani Cloudflare R2 ga yuklab, havolasini yuboradi",
+    },
 }
 
 
@@ -465,15 +469,19 @@ async def handle_batch_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     progress=_dl_progress
                 )
 
+            # R2 yuklash qadamini ajratib olamiz (u transformatsiya emas)
+            do_r2_upload = "upload_r2" in steps
+            process_steps = [s for s in steps if s != "upload_r2"]
+
             # Qadamlarni ketma-ket bajarish
             current_path = local_path
             current_name = file_name
 
-            for step_idx, step_key in enumerate(steps):
+            for step_idx, step_key in enumerate(process_steps):
                 try:
                     await status_msg.edit_text(
                         f"⚙️ *{file_num}/{total_files}* — `{file_name}`\n"
-                        f"🔧 Qadam {step_idx+1}/{len(steps)}: {STEP_DEFS.get(step_key, {}).get('label', step_key)}",
+                        f"🔧 Qadam {step_idx+1}/{len(process_steps)}: {STEP_DEFS.get(step_key, {}).get('label', step_key)}",
                         parse_mode="Markdown"
                     )
                 except Exception:
@@ -487,7 +495,34 @@ async def handle_batch_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 current_path = new_path
                 current_name = new_name
 
-            # Natijani yuborish
+            r2_url = None
+            if do_r2_upload:
+                # R2 ga yuklash
+                from utils.r2_manager import upload_file as r2_upload_file, is_configured as r2_is_configured
+                if r2_is_configured():
+                    try:
+                        await status_msg.edit_text(
+                            f"☁️ *{file_num}/{total_files}* — `{current_name}`\n"
+                            f"📤 Cloudflare R2 ga yuklanmoqda...",
+                            parse_mode="Markdown"
+                        )
+                    except Exception:
+                        pass
+                    object_key = f"batch/{current_name}"
+                    r2_url = await r2_upload_file(current_path, object_key)
+                    # R2 URL ni yuborish
+                    await query.message.reply_text(
+                        f"☁️ *R2 yuklandi:* `{current_name}`\n\n"
+                        f"🔗 `{r2_url}`",
+                        parse_mode="Markdown"
+                    )
+                else:
+                    await query.message.reply_text(
+                        f"⚠️ R2 sozlanmagan, fayl bot orqali yuboriladi.",
+                        parse_mode="Markdown"
+                    )
+
+            # Natijani yuborish (telegram)
             await status_msg.edit_text(
                 f"📤 *{file_num}/{total_files}* — `{current_name}`\n"
                 f"✅ Qayta ishlandi, yuborilmoqda...",
@@ -505,7 +540,7 @@ async def handle_batch_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     pass
 
-            results.append({"name": file_name, "ok": True})
+            results.append({"name": file_name, "ok": True, "r2_url": r2_url})
 
         except Exception as e:
             results.append({"name": file_name, "ok": False, "error": str(e)[:100]})
@@ -542,6 +577,9 @@ async def handle_batch_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not r["ok"]:
                 summary_lines.append(f"  • `{r['name'][:30]}` — {r.get('error', 'Xato')[:60]}")
 
+    r2_results = [r for r in results if r.get("r2_url")]
+    if r2_results:
+        summary_lines.append(f"\n☁️ R2 yuklangan: *{len(r2_results)} ta*")
     summary_lines.append("\n📤 Barcha natijalar yuborildi!")
 
     try:
