@@ -395,17 +395,17 @@ async def handle_batch_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     steps = template["steps"]
-    total = len(files)
+    total_files = len(files)
 
     status_msg = await query.message.reply_text(
         f"🚀 *Batch ishlov boshlandi!*\n\n"
         f"📋 Vazifa: *{template['name']}*\n"
-        f"📁 Fayllar: *{total} ta*\n"
+        f"📁 Fayllar: *{total_files} ta*\n"
         f"⚙️ Qadamlar: *{len(steps)} ta*\n\n"
-        f"⏳ 1/{total} tayyorlanmoqda...",
+        f"⏳ 1/{total_files} tayyorlanmoqda...",
         parse_mode="Markdown"
     )
-    await query.edit_message_text(f"⏳ Batch ishlov boshlandi... ({total} fayl)")
+    await query.edit_message_text(f"⏳ Batch ishlov boshlandi... ({total_files} fayl)")
 
     results = []
 
@@ -415,7 +415,7 @@ async def handle_batch_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             await status_msg.edit_text(
-                f"⏳ *{file_num}/{total}* — `{file_name}`\n\n"
+                f"⏳ *{file_num}/{total_files}* — `{file_name}`\n\n"
                 f"⬇️ Yuklanmoqda...",
                 parse_mode="Markdown"
             )
@@ -423,14 +423,47 @@ async def handle_batch_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
         try:
-            # Faylni yuklab olish
-            from telegram import Bot
+            # Faylni yuklab olish (Pyrogram MTProto — cheksiz hajm)
             from config import TEMP_DIR
+            from handlers.video_handler import get_pyrogram_client, _progress_bar as _pbar
             ext = os.path.splitext(file_name)[1].lstrip(".").lower() or "mkv"
             local_path = os.path.join(TEMP_DIR, f"batch_{file_info['file_unique_id']}.{ext}")
 
-            tg_file = await context.bot.get_file(file_info["file_id"])
-            await tg_file.download_to_drive(local_path)
+            file_size = file_info.get("file_size") or 0
+
+            if file_size and file_size <= 20 * 1024 * 1024:
+                # 20MB gacha PTB yetarli
+                tg_file = await context.bot.get_file(file_info["file_id"])
+                await tg_file.download_to_drive(local_path)
+            else:
+                # Katta fayllar uchun Pyrogram
+                client = await get_pyrogram_client()
+                total_mb = file_size / 1024 / 1024 if file_size else 0
+                last_pct = [0]
+
+                async def _dl_progress(current, total):
+                    if total == 0:
+                        return
+                    pct = min(int(current / total * 100), 99)
+                    if pct - last_pct[0] < 10:
+                        return
+                    last_pct[0] = pct
+                    cur_mb = current / 1024 / 1024
+                    try:
+                        await status_msg.edit_text(
+                            f"⬇️ *{file_num}/{total_files}* — `{file_name}`\n"
+                            f"{_pbar(pct)} `{pct}%`\n"
+                            f"`{cur_mb:.1f}` / `{total_mb:.1f}` MB",
+                            parse_mode="Markdown"
+                        )
+                    except Exception:
+                        pass
+
+                await client.download_media(
+                    file_info["file_id"],
+                    file_name=local_path,
+                    progress=_dl_progress
+                )
 
             # Qadamlarni ketma-ket bajarish
             current_path = local_path
@@ -439,7 +472,7 @@ async def handle_batch_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for step_idx, step_key in enumerate(steps):
                 try:
                     await status_msg.edit_text(
-                        f"⚙️ *{file_num}/{total}* — `{file_name}`\n"
+                        f"⚙️ *{file_num}/{total_files}* — `{file_name}`\n"
                         f"🔧 Qadam {step_idx+1}/{len(steps)}: {STEP_DEFS.get(step_key, {}).get('label', step_key)}",
                         parse_mode="Markdown"
                     )
@@ -456,12 +489,12 @@ async def handle_batch_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # Natijani yuborish
             await status_msg.edit_text(
-                f"📤 *{file_num}/{total}* — `{current_name}`\n"
+                f"📤 *{file_num}/{total_files}* — `{current_name}`\n"
                 f"✅ Qayta ishlandi, yuborilmoqda...",
                 parse_mode="Markdown"
             )
             await send_file(query.message, current_path, current_name,
-                            f"✅ {file_num}/{total} | {current_name}", context=context)
+                            f"✅ {file_num}/{total_files} | {current_name}", context=context)
 
             # Vaqtinchalik fayllarni tozalash
             if os.path.exists(current_path):
@@ -479,7 +512,7 @@ async def handle_batch_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Xatolik bo'lsa o'tkazib yuborish
             try:
                 await status_msg.edit_text(
-                    f"⚠️ *{file_num}/{total}* — `{file_name}`\n"
+                    f"⚠️ *{file_num}/{total_files}* — `{file_name}`\n"
                     f"❌ Xato: {str(e)[:80]}\n"
                     f"➡️ Keyingisiga o'tilmoqda...",
                     parse_mode="Markdown"
@@ -497,11 +530,11 @@ async def handle_batch_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Yakuniy hisobot
     ok_count = sum(1 for r in results if r["ok"])
-    fail_count = total - ok_count
+    fail_count = total_files - ok_count
 
     summary_lines = [
         f"🏁 *Batch yakunlandi!*\n",
-        f"✅ Muvaffaqiyatli: *{ok_count}/{total}*",
+        f"✅ Muvaffaqiyatli: *{ok_count}/{total_files}*",
     ]
     if fail_count:
         summary_lines.append(f"❌ Xato: *{fail_count} ta*")
