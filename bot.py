@@ -74,7 +74,7 @@ from handlers.batch import (
     handle_batch_use_template, handle_batch_delete_template,
     handle_batch_clear_files, handle_batch_run,
 )
-from handlers.r2_browser import r2_command, r2_callback, r2_rename_text
+from handlers.r2_browser import r2_command, r2_callback, r2_rename_text, _show_r2_list_cb
 from utils.keyboards import main_menu_keyboard
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -108,9 +108,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if data == "cat_r2":
         await query.answer()
-        # R2 browser — list ni 0-sahifadan ko'rsatish
-        query.data = "r2_list_0"
-        await r2_callback(update, context)
+        await _show_r2_list_cb(query, page=0)
         return
 
     # ── Umumiy ──────────────────────────────────────────────
