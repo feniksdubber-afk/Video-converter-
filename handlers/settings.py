@@ -1,6 +1,7 @@
 import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
+from config import TEMP_DIR
 from utils.user_settings import ensure_loaded, get, set_, reset, summary
 from utils.keyboards import main_menu_keyboard
 
