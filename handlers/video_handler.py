@@ -60,8 +60,9 @@ async def video_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("❌ Noto'g'ri fayl. Iltimos video yuboring.")
         return
 
-    if file.file_size and file.file_size > 2_000_000_000:
-        await message.reply_text("❌ Fayl juda katta (2 GB dan ortiq).")
+    # 2 GB dan katta fayllar ham qabul qilinadi — sender R2 ga yo'naltiradi
+    if file.file_size and file.file_size > 4_000_000_000:
+        await message.reply_text("❌ Fayl juda katta (4 GB dan ortiq).")
         return
 
     status_msg = await message.reply_text("⏳ Video yuklanmoqda... 0%")
