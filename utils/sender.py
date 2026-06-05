@@ -130,9 +130,30 @@ async def send_file(
     # Video metadata va thumbnail olish
     meta = {}
     thumb_path = None
+    custom_thumb_tmp = None  # faqat yuklab olingan bo'lsa, keyin o'chiriladi
+
     if is_video:
         meta = _get_video_meta(file_path)
-        if meta.get("duration", 0) > 0:
+
+        # 1. Custom thumbnail (foydalanuvchi o'rnatgan)
+        if context is not None:
+            from utils.user_settings import get as get_setting
+            custom_file_id = get_setting(context, "custom_thumbnail")
+            if custom_file_id:
+                try:
+                    import uuid
+                    from telegram import Bot
+                    from config import BOT_TOKEN
+                    bot = Bot(token=BOT_TOKEN)
+                    tg_file = await bot.get_file(custom_file_id)
+                    custom_thumb_tmp = os.path.join(TEMP_DIR, f"cthumb_{uuid.uuid4().hex}.jpg")
+                    await tg_file.download_to_drive(custom_thumb_tmp)
+                    thumb_path = custom_thumb_tmp
+                except Exception:
+                    custom_thumb_tmp = None
+
+        # 2. Agar custom yo'q bo'lsa — videoning o'zidan auto thumbnail
+        if not thumb_path and meta.get("duration", 0) > 0:
             thumb_path = _make_thumb(file_path, meta["duration"])
 
     # ─── 2 GB dan katta → Gofile.io ───────────────────────────────────────
