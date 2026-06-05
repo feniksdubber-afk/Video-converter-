@@ -10,10 +10,27 @@ Hajm bo'yicha yo'naltirish:
 import os
 import asyncio
 import subprocess
+import hashlib
+import time
 import aiohttp
 from telegram import Message, InlineKeyboardButton, InlineKeyboardMarkup
 from handlers.video_handler import get_pyrogram_client
 from utils.r2_manager import upload_file as r2_upload, is_configured as r2_ok, R2_THRESHOLD, fmt_size as r2_fmt
+from utils.ffmpeg_utils import sanitize_filename
+
+# Telegram callback_data 64 bayt bilan cheklangan.
+# Fayl nomini to'g'ridan-to'g'ri ishlatish o'rniga qisqa hash saqlаymiz.
+# {short_key: {"filename": ..., "url": ..., "file_path": ..., "ts": unix_time}}
+_r2_pending: dict[str, dict] = {}
+_R2_PENDING_TTL = 3600  # 1 soat
+
+
+def _cleanup_r2_pending():
+    """1 soatdan eski yozuvlarni _r2_pending dan tozalaydi."""
+    now = time.time()
+    stale = [k for k, v in _r2_pending.items() if now - v.get("ts", 0) > _R2_PENDING_TTL]
+    for k in stale:
+        _r2_pending.pop(k, None)
 
 TELEGRAM_LIMIT = 50 * 1024 * 1024        # 50 MB
 PYROGRAM_LIMIT = 2 * 1024 * 1024 * 1024  # 2 GB
@@ -133,11 +150,26 @@ async def _upload_to_r2(message: Message, file_path: str, filename: str, file_si
             pass
 
     try:
-        url = await r2_upload(file_path, filename, progress_cb=progress_cb)
+        # S3 object key uchun fayl nomini tozalash (bo'shliq/qavslar muammo qilmasligi uchun)
+        safe_filename = sanitize_filename(filename)
+        url = await r2_upload(file_path, safe_filename, progress_cb=progress_cb)
+
+        # Eski yozuvlarni tozalash (xotira sizintisini oldini olish)
+        _cleanup_r2_pending()
+
+        # callback_data Telegram da 64 bayt bilan cheklangan.
+        # Fayl nomini to'g'ridan-to'g'ri ishlatish o'rniga qisqa hash (8 hex) ishlatamiz.
+        short_key = hashlib.md5(filename.encode()).hexdigest()[:8]
+        _r2_pending[short_key] = {
+            "filename": filename,
+            "url": url,
+            "file_path": file_path,
+            "ts": time.time(),
+        }
 
         # Telegram ga ham yuborish tugmasi chiqar
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📥 Telegramga yuklash", callback_data=f"r2_send_tg__{filename}")],
+            [InlineKeyboardButton("📥 Telegramga yuklash", callback_data=f"r2_send_tg__{short_key}")],
             [InlineKeyboardButton("🔗 Havolani nusxalash", url=url)],
         ])
 

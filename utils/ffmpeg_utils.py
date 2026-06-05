@@ -3,7 +3,21 @@ import os
 import uuid
 import asyncio
 import re
+import time
+import functools
 from config import TEMP_DIR
+
+
+def sanitize_filename(name: str) -> str:
+    """
+    Fayl nomidagi bo'shliq, qavs va boshqa URL/S3 uchun xavfli belgilarni
+    pastki chiziqqa almashtiradi. Kengaytma (extension) saqlanadi.
+    Misol: "Kung Fu Panda [HEVC].mkv" → "Kung_Fu_Panda_HEVC_.mkv"
+    """
+    base, ext = os.path.splitext(name)
+    base = re.sub(r"[^\w\-]", "_", base)
+    base = re.sub(r"_+", "_", base).strip("_")
+    return (base or "file") + ext
 
 
 def run_ffmpeg(args: list[str], timeout: int = 1800) -> tuple[bool, str]:
@@ -376,6 +390,211 @@ def softsub_video(video_path: str, subtitle_path: str) -> tuple[bool, str, str]:
         output_path,
     ]
     ok, err = run_ffmpeg(args)
+    return ok, output_path, err
+
+
+# ── Yordamchi: video o'lchamini olish ────────────────────────────────────────
+
+def get_video_resolution(input_path: str) -> tuple[int, int]:
+    """(kenglik, balandlik) qaytaradi. Xato bo'lsa (0, 0)."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "csv=p=0",
+                input_path,
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        parts = result.stdout.strip().split(",")
+        if len(parts) >= 2:
+            return int(parts[0]), int(parts[1])
+    except Exception:
+        pass
+    return 0, 0
+
+
+# ── Async executor wrappers (event loop bloklanmaydi) ────────────────────────
+
+async def _run_in_executor(func, *args):
+    """Sinxron funksiyani thread pool da ishlatadi — event loop bloklanmaydi."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, functools.partial(func, *args))
+
+
+async def trim_video_async(
+    input_path: str, start: str, end: str, status_msg=None
+) -> tuple[bool, str, str]:
+    """status_msg berilsa progress bar ko'rsatadi, aks holda thread pool ishlatadi."""
+    if status_msg is None:
+        return await _run_in_executor(trim_video, input_path, start, end)
+    output_path = make_temp_path("mp4")
+    args = [
+        "-ss", start, "-to", end,
+        "-i", input_path,
+        "-c", "copy",
+        "-movflags", "+faststart",
+        output_path,
+    ]
+    ok, err = await run_ffmpeg_async(
+        args, status_msg, label="Video kesil moqda", input_path=input_path
+    )
+    return ok, output_path, err
+
+
+async def remove_audio_async(input_path: str, status_msg=None) -> tuple[bool, str, str]:
+    """status_msg berilsa progress bar ko'rsatadi."""
+    if status_msg is None:
+        return await _run_in_executor(remove_audio, input_path)
+    output_path = make_temp_path("mp4")
+    args = ["-i", input_path, "-c:v", "copy", "-an", output_path]
+    ok, err = await run_ffmpeg_async(
+        args, status_msg, label="Ovoz o'chirilmoqda", input_path=input_path
+    )
+    return ok, output_path, err
+
+
+async def video_to_audio_async(
+    input_path: str, audio_format: str, status_msg=None
+) -> tuple[bool, str, str]:
+    """status_msg berilsa progress bar ko'rsatadi."""
+    if status_msg is None:
+        return await _run_in_executor(video_to_audio, input_path, audio_format)
+    output_path = make_temp_path(audio_format)
+    threads = _thread_count()
+    codec_map = {
+        "mp3":  ["-c:a", "libmp3lame", "-q:a", "2"],
+        "aac":  ["-c:a", "aac", "-b:a", "192k"],
+        "ogg":  ["-c:a", "libvorbis", "-q:a", "5"],
+        "wav":  ["-c:a", "pcm_s16le"],
+        "flac": ["-c:a", "flac"],
+    }
+    extra = codec_map.get(audio_format, ["-c:a", "libmp3lame"])
+    args = ["-i", input_path, "-threads", threads, "-vn"] + extra + [output_path]
+    ok, err = await run_ffmpeg_async(
+        args, status_msg,
+        label=f"{audio_format.upper()} ga o'tkazilmoqda",
+        input_path=input_path,
+    )
+    return ok, output_path, err
+
+
+async def take_screenshots_async(
+    input_path: str, count: int, status_msg=None
+) -> tuple[bool, list[str], str]:
+    """status_msg berilsa har bir skrinsotdan keyin progress yangilanadi."""
+    if status_msg is None:
+        return await _run_in_executor(take_screenshots, input_path, count)
+    duration = get_video_duration(input_path)
+    if duration <= 0:
+        return False, [], "Video davomiyligini aniqlab bo'lmadi"
+    paths = []
+    interval = duration / (count + 1)
+    err_msg = ""
+    loop = asyncio.get_event_loop()
+    for i in range(count):
+        timestamp = interval * (i + 1)
+        pct = int(i / count * 100)
+        bar = _progress_bar(pct)
+        try:
+            await status_msg.edit_text(
+                f"⚙️ *Skrinsot olinmoqda...*\n\n{bar} `{i}/{count}`",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
+        output_path = make_temp_path("jpg")
+        args = [
+            "-ss", str(timestamp), "-i", input_path,
+            "-frames:v", "1", "-q:v", "2", output_path,
+        ]
+        ok, err = await loop.run_in_executor(
+            None, functools.partial(run_ffmpeg, args, 60)
+        )
+        if ok:
+            paths.append(output_path)
+        else:
+            err_msg = err
+    try:
+        await status_msg.edit_text(
+            f"⚙️ *Skrinsot olinmoqda...*\n\n{_progress_bar(100)} `{count}/{count}`",
+            parse_mode="Markdown",
+        )
+    except Exception:
+        pass
+    return len(paths) > 0, paths, err_msg
+
+
+async def take_manual_shot_async(
+    input_path: str, timestamp: str, status_msg=None
+) -> tuple[bool, str, str]:
+    """status_msg berilsa holat xabari yangilanadi."""
+    if status_msg is None:
+        return await _run_in_executor(take_manual_shot, input_path, timestamp)
+    output_path = make_temp_path("jpg")
+    args = [
+        "-ss", timestamp, "-i", input_path,
+        "-frames:v", "1", "-q:v", "2", output_path,
+    ]
+    loop = asyncio.get_event_loop()
+    ok, err = await loop.run_in_executor(
+        None, functools.partial(run_ffmpeg, args, 60)
+    )
+    return ok, output_path, err
+
+
+async def softsub_video_async(
+    video_path: str, subtitle_path: str, status_msg=None
+) -> tuple[bool, str, str]:
+    """status_msg berilsa progress bar ko'rsatadi."""
+    if status_msg is None:
+        return await _run_in_executor(softsub_video, video_path, subtitle_path)
+    output_path = make_temp_path("mkv")
+    sub_ext = os.path.splitext(subtitle_path)[1].lower()
+    sub_codec = "copy" if sub_ext in (".ass", ".ssa") else "srt"
+    args = [
+        "-i", video_path,
+        "-i", subtitle_path,
+        "-map", "0", "-map", "1",
+        "-c", "copy",
+        "-c:s", sub_codec,
+        output_path,
+    ]
+    ok, err = await run_ffmpeg_async(
+        args, status_msg,
+        label="Subtitr birlashtirilmoqda",
+        input_path=video_path,
+    )
+    return ok, output_path, err
+
+
+async def downscale_for_telegram_async(
+    input_path: str,
+    target_height: int,
+    status_msg,
+) -> tuple[bool, str, str]:
+    """Videoni target_height balandligiga tushiradi (Telegram uchun) → MP4.
+
+    scale=-2:H — kengligi avtomatik, 2 ga bo'linadi (codec talabi).
+    """
+    output_path = make_temp_path("mp4")
+    threads = _thread_count()
+    args = [
+        "-i", input_path,
+        "-threads", threads,
+        "-vf", f"scale=-2:{target_height}",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        output_path,
+    ]
+    ok, err = await run_ffmpeg_async(
+        args, status_msg,
+        label=f"{target_height}p ga sifat tushirilmoqda",
+        input_path=input_path,
+    )
     return ok, output_path, err
 
 

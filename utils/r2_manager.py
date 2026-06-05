@@ -18,6 +18,7 @@ import math
 import asyncio
 import logging
 import boto3
+from urllib.parse import quote
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
@@ -50,10 +51,16 @@ def is_configured() -> bool:
 
 
 def get_public_url(object_key: str) -> str:
+    """
+    URL yaratadi. Bo'shliq va maxsus belgilar (qavslar, +, # va h.k.)
+    percent-encode qilinadi — aks holda havola brauzerda ochilmaydi.
+    Papka ajratgichi '/' encode qilinmaydi (safe='/').
+    """
     cfg = _get_config()
+    encoded_key = quote(object_key, safe="/")
     if cfg["public_url"]:
-        return f"{cfg['public_url']}/{object_key}"
-    return f"{cfg['endpoint']}/{cfg['bucket']}/{object_key}"
+        return f"{cfg['public_url']}/{encoded_key}"
+    return f"{cfg['endpoint']}/{cfg['bucket']}/{encoded_key}"
 
 
 def fmt_size(b: int) -> str:
