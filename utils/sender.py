@@ -1,12 +1,22 @@
+"""
+sender.py — Fayl yuborish logikasi.
+
+Hajm bo'yicha yo'naltirish:
+  <= 50 MB          → PTB (python-telegram-bot) to'g'ridan-to'g'ri
+  50 MB – 2 GB      → Pyrogram MTProto (progress bilan)
+  > 2 GB            → Cloudflare R2 (agar sozlangan), aks holda Gofile.io
+"""
+
 import os
 import asyncio
 import subprocess
 import aiohttp
-from telegram import Message
+from telegram import Message, InlineKeyboardButton, InlineKeyboardMarkup
 from handlers.video_handler import get_pyrogram_client
+from utils.r2_manager import upload_file as r2_upload, is_configured as r2_ok, R2_THRESHOLD, fmt_size as r2_fmt
 
-TELEGRAM_LIMIT = 50 * 1024 * 1024       # 50 MB — PTB chegarasi
-PYROGRAM_LIMIT = 2 * 1024 * 1024 * 1024  # 2 GB — Telegram chegarasi
+TELEGRAM_LIMIT = 50 * 1024 * 1024        # 50 MB
+PYROGRAM_LIMIT = 2 * 1024 * 1024 * 1024  # 2 GB
 
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".m4v", ".ts", ".wmv"}
 AUDIO_EXTENSIONS = {".mp3", ".aac", ".ogg", ".wav", ".flac", ".m4a", ".opus", ".wma"}
@@ -26,25 +36,21 @@ def _fmt_size(b: int) -> str:
 
 
 def _get_video_meta(file_path: str) -> dict:
-    """Video davomiyligi, eni, balandligini qaytaradi."""
     meta = {"duration": 0, "width": 0, "height": 0}
     try:
         r = subprocess.run(
-            [
-                "ffprobe", "-v", "error",
-                "-select_streams", "v:0",
-                "-show_entries", "stream=width,height",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1",
-                file_path,
-            ],
+            ["ffprobe", "-v", "error",
+             "-select_streams", "v:0",
+             "-show_entries", "stream=width,height",
+             "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1",
+             file_path],
             capture_output=True, text=True, timeout=30,
         )
         for line in r.stdout.strip().split("\n"):
             if "=" in line:
                 key, val = line.split("=", 1)
-                key = key.strip()
-                val = val.strip()
+                key, val = key.strip(), val.strip()
                 if key == "duration":
                     try:
                         meta["duration"] = int(float(val))
@@ -66,22 +72,14 @@ def _get_video_meta(file_path: str) -> dict:
 
 
 def _make_thumb(file_path: str, duration: int) -> str | None:
-    """Video o'rtasidan thumbnail (JPEG) oladi. Muvaffaqiyatli bo'lsa path qaytaradi."""
     try:
         from config import TEMP_DIR
         import uuid
         thumb_path = os.path.join(TEMP_DIR, f"thumb_{uuid.uuid4().hex}.jpg")
         seek = max(1, duration // 4) if duration > 4 else 1
         r = subprocess.run(
-            [
-                "ffmpeg", "-y",
-                "-ss", str(seek),
-                "-i", file_path,
-                "-frames:v", "1",
-                "-vf", "scale=320:-1",
-                "-q:v", "5",
-                thumb_path,
-            ],
+            ["ffmpeg", "-y", "-ss", str(seek), "-i", file_path,
+             "-frames:v", "1", "-vf", "scale=320:-1", "-q:v", "5", thumb_path],
             capture_output=True, timeout=30,
         )
         if r.returncode == 0 and os.path.exists(thumb_path):
@@ -92,12 +90,10 @@ def _make_thumb(file_path: str, duration: int) -> str | None:
 
 
 async def _upload_to_gofile(file_path: str) -> str:
-    """Gofile.io ga yuklaydi va download link qaytaradi."""
     async with aiohttp.ClientSession() as session:
         async with session.get("https://api.gofile.io/servers") as r:
             data = await r.json()
             server = data["data"]["servers"][0]["name"]
-
         with open(file_path, "rb") as f:
             form = aiohttp.FormData()
             form.add_field("file", f, filename=os.path.basename(file_path))
@@ -110,12 +106,65 @@ async def _upload_to_gofile(file_path: str) -> str:
                 return result["data"]["downloadPage"]
 
 
+async def _upload_to_r2(message: Message, file_path: str, filename: str, file_size: int) -> str | None:
+    """R2 ga yuklab, tugmali xabar yuboradi. URL qaytaradi yoki None."""
+    status_msg = await message.reply_text(
+        f"☁️ *R2 ga yuklanmoqda...*\n\n"
+        f"`[░░░░░░░░░░░░]` `0%`\n"
+        f"`0` / `{_fmt_size(file_size)}`",
+        parse_mode="Markdown",
+    )
+
+    last_pct = [-1]
+
+    async def progress_cb(uploaded, total, pct):
+        if pct - last_pct[0] < 5:
+            return
+        last_pct[0] = pct
+        bar = _progress_bar(pct)
+        try:
+            await status_msg.edit_text(
+                f"☁️ *R2 ga yuklanmoqda...*\n\n"
+                f"{bar} `{pct}%`\n"
+                f"`{_fmt_size(uploaded)}` / `{_fmt_size(total)}`",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
+
+    try:
+        url = await r2_upload(file_path, filename, progress_cb=progress_cb)
+
+        # Telegram ga ham yuborish tugmasi chiqar
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📥 Telegramga yuklash", callback_data=f"r2_send_tg__{filename}")],
+            [InlineKeyboardButton("🔗 Havolani nusxalash", url=url)],
+        ])
+
+        await status_msg.edit_text(
+            f"✅ *R2 ga yuklandi!*\n\n"
+            f"📁 Fayl: `{filename}`\n"
+            f"📦 Hajmi: `{_fmt_size(file_size)}`\n\n"
+            f"🔗 Havola:\n`{url}`",
+            reply_markup=keyboard,
+            parse_mode="Markdown",
+        )
+        return url
+    except Exception as e:
+        await status_msg.edit_text(
+            f"❌ R2 ga yuklashda xato:\n`{e}`",
+            parse_mode="Markdown",
+        )
+        return None
+
+
 async def send_file(
     message: Message,
     file_path: str,
     filename: str,
     caption: str = "",
     context=None,
+    force_r2: bool = False,
 ):
     file_size = os.path.getsize(file_path)
     ext = os.path.splitext(filename)[1].lower()
@@ -127,57 +176,53 @@ async def send_file(
         from utils.user_settings import get as get_setting
         upload_mode = get_setting(context, "upload_mode")
 
-    # Video metadata va thumbnail olish
+    # Thumbnail
     meta = {}
     thumb_path = None
     custom_thumb_tmp = None
 
     if is_video:
         meta = _get_video_meta(file_path)
-
-        # 1. Custom thumbnail — disk yo'li sifatida saqlanган
         if context is not None:
             from utils.user_settings import ensure_loaded as _ensure, get as get_setting
             await _ensure(context.user_data.get("_user_id", 0), context)
             custom_path = get_setting(context, "custom_thumbnail")
             if custom_path and isinstance(custom_path, str) and os.path.exists(custom_path):
                 thumb_path = custom_path
-
-        # 2. Custom yo'q bo'lsa — videoning o'zidan auto thumbnail
         if not thumb_path and meta.get("duration", 0) > 0:
             thumb_path = _make_thumb(file_path, meta["duration"])
-            custom_thumb_tmp = thumb_path  # auto thumb — o'chiriladi
+            custom_thumb_tmp = thumb_path
 
-    # ─── 2 GB dan katta → Gofile.io ───────────────────────────────────────
-    if file_size > PYROGRAM_LIMIT:
-        status_msg = await message.reply_text(
-            "☁️ *Fayl 2 GB dan katta!*\n\n"
-            "`[░░░░░░░░░░░░]` Gofile.io ga yuklanmoqda...",
-            parse_mode="Markdown",
-        )
-        try:
-            link = await _upload_to_gofile(file_path)
-            await status_msg.edit_text(
-                f"✅ *Fayl tayyor!*\n\n"
-                f"📦 Hajmi: `{_fmt_size(file_size)}`\n"
-                f"📁 Nom: `{filename}`\n\n"
-                f"Fayl 2 GB dan katta bo'lgani uchun link orqali yuklab oling:\n"
-                f"🔗 {link}\n\n"
-                f"_(Link 10 kun davomida faol bo'ladi)_",
+    # ─── > 2 GB → R2 yoki Gofile ─────────────────────────────────────────
+    if file_size > PYROGRAM_LIMIT or force_r2:
+        if r2_ok():
+            await _upload_to_r2(message, file_path, filename, file_size)
+        else:
+            # Fallback: Gofile
+            status_msg = await message.reply_text(
+                "☁️ *Fayl 2 GB dan katta!*\n\n"
+                "`[░░░░░░░░░░░░]` Gofile.io ga yuklanmoqda...",
                 parse_mode="Markdown",
             )
-        except Exception as e:
-            await status_msg.edit_text(
-                f"❌ Gofile.io ga yuklashda xato:\n`{e}`\n\n"
-                f"Faylni boshqa usulda olishga harakat qiling.",
-                parse_mode="Markdown",
-            )
-        finally:
-            if thumb_path and os.path.exists(thumb_path):
-                if custom_thumb_tmp and os.path.exists(custom_thumb_tmp): os.remove(custom_thumb_tmp)
+            try:
+                link = await _upload_to_gofile(file_path)
+                await status_msg.edit_text(
+                    f"✅ *Fayl tayyor!*\n\n"
+                    f"📦 Hajmi: `{_fmt_size(file_size)}`\n"
+                    f"📁 Nom: `{filename}`\n\n"
+                    f"🔗 {link}\n\n_(Link 10 kun faol)_",
+                    parse_mode="Markdown",
+                )
+            except Exception as e:
+                await status_msg.edit_text(
+                    f"❌ Gofile.io ga yuklashda xato:\n`{e}`",
+                    parse_mode="Markdown",
+                )
+        if custom_thumb_tmp and os.path.exists(custom_thumb_tmp):
+            os.remove(custom_thumb_tmp)
         return
 
-    # ─── 50 MB gacha → PTB ────────────────────────────────────────────────
+    # ─── <= 50 MB → PTB ──────────────────────────────────────────────────
     if file_size <= TELEGRAM_LIMIT:
         try:
             with open(file_path, "rb") as f:
@@ -185,12 +230,10 @@ async def send_file(
                     thumb_file = open(thumb_path, "rb") if thumb_path else None
                     try:
                         await message.reply_video(
-                            video=f,
-                            filename=filename,
-                            caption=caption,
-                            duration=meta.get("duration", 0) or None,
-                            width=meta.get("width", 0) or None,
-                            height=meta.get("height", 0) or None,
+                            video=f, filename=filename, caption=caption,
+                            duration=meta.get("duration") or None,
+                            width=meta.get("width") or None,
+                            height=meta.get("height") or None,
                             thumbnail=thumb_file,
                             supports_streaming=True,
                         )
@@ -202,11 +245,11 @@ async def send_file(
                 else:
                     await message.reply_document(document=f, filename=filename, caption=caption)
         finally:
-            if thumb_path and os.path.exists(thumb_path):
-                if custom_thumb_tmp and os.path.exists(custom_thumb_tmp): os.remove(custom_thumb_tmp)
+            if custom_thumb_tmp and os.path.exists(custom_thumb_tmp):
+                os.remove(custom_thumb_tmp)
         return
 
-    # ─── 50 MB – 2 GB → Pyrogram MTProto, progress bilan ─────────────────
+    # ─── 50 MB – 2 GB → Pyrogram MTProto ─────────────────────────────────
     status_msg = await message.reply_text("📤 Yuborilmoqda... 0%")
     client = await get_pyrogram_client()
 
@@ -234,36 +277,29 @@ async def send_file(
     try:
         if upload_mode == "video" and is_video:
             await client.send_video(
-                chat_id=message.chat_id,
-                video=file_path,
-                file_name=filename,
-                caption=caption,
-                duration=meta.get("duration", 0) or None,
-                width=meta.get("width", 0) or None,
-                height=meta.get("height", 0) or None,
-                thumb=thumb_path,
-                supports_streaming=True,
+                chat_id=message.chat_id, video=file_path,
+                file_name=filename, caption=caption,
+                duration=meta.get("duration") or None,
+                width=meta.get("width") or None,
+                height=meta.get("height") or None,
+                thumb=thumb_path, supports_streaming=True,
                 progress=progress,
             )
         elif upload_mode == "audio" and is_audio:
             await client.send_audio(
-                chat_id=message.chat_id,
-                audio=file_path,
-                file_name=filename,
-                caption=caption,
+                chat_id=message.chat_id, audio=file_path,
+                file_name=filename, caption=caption,
                 progress=progress,
             )
         else:
             await client.send_document(
-                chat_id=message.chat_id,
-                document=file_path,
-                file_name=filename,
-                caption=caption,
+                chat_id=message.chat_id, document=file_path,
+                file_name=filename, caption=caption,
                 progress=progress,
             )
     finally:
-        if thumb_path and os.path.exists(thumb_path):
-            if custom_thumb_tmp and os.path.exists(custom_thumb_tmp): os.remove(custom_thumb_tmp)
+        if custom_thumb_tmp and os.path.exists(custom_thumb_tmp):
+            os.remove(custom_thumb_tmp)
 
     try:
         await status_msg.edit_text(

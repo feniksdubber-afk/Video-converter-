@@ -72,6 +72,9 @@ def main_menu_keyboard():
             InlineKeyboardButton("📦 Batch Processor",   callback_data="batch"),
         ],
         [
+            InlineKeyboardButton("☁️ R2 Fayl Menejer",  callback_data="r2_list_0"),
+        ],
+        [
             InlineKeyboardButton("⚙️ Sozlamalar",        callback_data="settings"),
             InlineKeyboardButton("❌ Bekor qilish",      callback_data="cancel"),
         ],
