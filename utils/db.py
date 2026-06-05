@@ -3,6 +3,7 @@ SQLite orqali foydalanuvchi sozlamalarini saqlash.
 Railway da /data volume, local da ./data papkasi ishlatiladi.
 """
 import aiosqlite
+import json
 import os
 from config import DB_PATH
 
@@ -26,11 +27,60 @@ CREATE TABLE IF NOT EXISTS user_settings (
 )
 """
 
+_CREATE_BATCH_TABLE = """
+CREATE TABLE IF NOT EXISTS batch_templates (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    name       TEXT    NOT NULL,
+    steps      TEXT    NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
 
 async def init_db():
     """Bot ishga tushganda bitta marta chaqiriladi."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(_CREATE_TABLE)
+        await db.execute(_CREATE_BATCH_TABLE)
+        await db.commit()
+
+
+# ── Batch template DB funksiyalari ────────────────────────────────────────────
+
+async def db_load_batch_templates(user_id: int) -> list[dict]:
+    """Foydalanuvchining barcha batch shablonlarini yuklaydi."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, name, steps FROM batch_templates WHERE user_id = ? ORDER BY created_at DESC",
+            (user_id,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+    return [
+        {"id": row["id"], "name": row["name"], "steps": json.loads(row["steps"])}
+        for row in rows
+    ]
+
+
+async def db_save_batch_template(user_id: int, name: str, steps: list[str]) -> int:
+    """Yangi batch shablonini saqlaydi. ID qaytaradi."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "INSERT INTO batch_templates (user_id, name, steps) VALUES (?, ?, ?)",
+            (user_id, name, json.dumps(steps))
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def db_delete_batch_template(user_id: int, template_id: int) -> None:
+    """Batch shablonini o'chiradi."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM batch_templates WHERE id = ? AND user_id = ?",
+            (template_id, user_id)
+        )
         await db.commit()
 
 

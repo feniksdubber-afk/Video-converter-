@@ -69,6 +69,9 @@ def main_menu_keyboard():
         ],
         # ── System ────────────────────────────────────────────────
         [
+            InlineKeyboardButton("📦 Batch Processor",   callback_data="batch"),
+        ],
+        [
             InlineKeyboardButton("⚙️ Sozlamalar",        callback_data="settings"),
             InlineKeyboardButton("❌ Bekor qilish",      callback_data="cancel"),
         ],
