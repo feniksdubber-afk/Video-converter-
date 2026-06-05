@@ -1,4 +1,3 @@
-```python
 """
 r2_browser.py — R2 dagi fayllarni botdan boshqarish.
 Fayl kalitlari uzunligi muammosini hal qilish uchun indekslash usuli qo'llanildi.
@@ -136,5 +135,3 @@ async def r2_rename_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Xato.")
     context.user_data.pop("r2_rename_key", None)
     return True
-
-```
