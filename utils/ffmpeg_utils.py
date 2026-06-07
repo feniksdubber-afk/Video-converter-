@@ -455,7 +455,7 @@ def get_video_resolution(input_path: str) -> tuple[int, int]:
 
 async def _run_in_executor(func, *args):
     """Sinxron funksiyani thread pool da ishlatadi — event loop bloklanmaydi."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, functools.partial(func, *args))
 
 
@@ -528,7 +528,7 @@ async def take_screenshots_async(
     paths = []
     interval = duration / (count + 1)
     err_msg = ""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     for i in range(count):
         timestamp = interval * (i + 1)
         pct = int(i / count * 100)
@@ -573,7 +573,7 @@ async def take_manual_shot_async(
         "-ss", timestamp, "-i", input_path,
         "-frames:v", "1", "-q:v", "2", output_path,
     ]
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     ok, err = await loop.run_in_executor(
         None, functools.partial(run_ffmpeg, args, 60)
     )
@@ -821,7 +821,7 @@ async def convert_to_hls_async(
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
-            stdout=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.DEVNULL,   # PIPE ishlatilmaydi → deadlock oldini olish
             stderr=asyncio.subprocess.PIPE,
         )
 

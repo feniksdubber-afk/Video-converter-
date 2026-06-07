@@ -97,7 +97,7 @@ async def upload_file(local_path: str, object_key: str | None = None, progress_c
     cfg = _get_config()
     file_size = os.path.getsize(local_path)
     uploaded = [0]
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     def _callback(bytes_transferred):
         uploaded[0] += bytes_transferred
@@ -116,7 +116,7 @@ async def upload_file(local_path: str, object_key: str | None = None, progress_c
             Callback=_callback if progress_cb else None,
         )
 
-    await asyncio.get_event_loop().run_in_executor(None, _do_upload)
+    await loop.run_in_executor(None, _do_upload)
     return get_public_url(object_key)
 
 
@@ -131,7 +131,7 @@ async def delete_file(object_key: str) -> bool:
             logger.warning(f"R2 delete xato: {e}")
             return False
 
-    return await asyncio.get_event_loop().run_in_executor(None, _do)
+    return await asyncio.get_running_loop().run_in_executor(None, _do)
 
 
 async def list_files(prefix: str = "", max_keys: int = 50) -> list[dict]:
@@ -158,7 +158,7 @@ async def list_files(prefix: str = "", max_keys: int = 50) -> list[dict]:
             logger.warning(f"R2 list xato: {e}")
             return []
 
-    return await asyncio.get_event_loop().run_in_executor(None, _do)
+    return await asyncio.get_running_loop().run_in_executor(None, _do)
 
 
 async def rename_file(old_key: str, new_key: str) -> str | None:
@@ -179,7 +179,7 @@ async def rename_file(old_key: str, new_key: str) -> str | None:
             logger.warning(f"R2 rename xato: {e}")
             return None
 
-    return await asyncio.get_event_loop().run_in_executor(None, _do)
+    return await asyncio.get_running_loop().run_in_executor(None, _do)
 
 
 async def generate_presigned_url(object_key: str, expires: int = 3600) -> str | None:
@@ -195,4 +195,4 @@ async def generate_presigned_url(object_key: str, expires: int = 3600) -> str | 
             logger.warning(f"R2 presigned URL xato: {e}")
             return None
 
-    return await asyncio.get_event_loop().run_in_executor(None, _do)
+    return await asyncio.get_running_loop().run_in_executor(None, _do)

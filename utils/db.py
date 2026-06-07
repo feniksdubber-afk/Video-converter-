@@ -105,9 +105,16 @@ async def db_load(user_id: int) -> dict:
     }
 
 
+# SQL injection dan himoya: faqat shu ustun nomlari ruxsat etiladi
+_ALLOWED_COLUMNS: frozenset[str] = frozenset(DEFAULTS.keys())
+
+
 async def db_set(user_id: int, key: str, value) -> None:
     """Bitta sozlamani DBga saqlaydi (INSERT OR REPLACE + partial update)."""
-    if key not in DEFAULTS:
+    if key not in _ALLOWED_COLUMNS:
+        # Noto'g'ri kalit — logga yozamiz va chiqib ketamiz
+        import logging
+        logging.getLogger(__name__).warning("db_set: noto'g'ri kalit rad etildi: %r", key)
         return
     if isinstance(value, bool):
         value = int(value)

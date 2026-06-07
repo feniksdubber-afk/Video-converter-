@@ -52,7 +52,8 @@ def _fmt_size(b: int) -> str:
     return f"{b:.1f} GB"
 
 
-def _get_video_meta(file_path: str) -> dict:
+def _get_video_meta_sync(file_path: str) -> dict:
+    """Sinxron versiya — faqat executor ichida ishlatiladi."""
     meta = {"duration": 0, "width": 0, "height": 0}
     try:
         r = subprocess.run(
@@ -88,7 +89,13 @@ def _get_video_meta(file_path: str) -> dict:
     return meta
 
 
-def _make_thumb(file_path: str, duration: int) -> str | None:
+async def _get_video_meta(file_path: str) -> dict:
+    """Async: event loop ni bloklamasdan video meta ma'lumotlarini oladi."""
+    return await asyncio.get_running_loop().run_in_executor(None, _get_video_meta_sync, file_path)
+
+
+def _make_thumb_sync(file_path: str, duration: int) -> str | None:
+    """Sinxron versiya — faqat executor ichida ishlatiladi."""
     try:
         from config import TEMP_DIR
         import uuid
@@ -104,6 +111,13 @@ def _make_thumb(file_path: str, duration: int) -> str | None:
     except Exception:
         pass
     return None
+
+
+async def _make_thumb(file_path: str, duration: int) -> str | None:
+    """Async: event loop ni bloklamasdan thumbnail yaratadi."""
+    return await asyncio.get_running_loop().run_in_executor(
+        None, _make_thumb_sync, file_path, duration
+    )
 
 
 async def _upload_to_gofile(file_path: str) -> str:
@@ -123,7 +137,7 @@ async def _upload_to_gofile(file_path: str) -> str:
                 return result["data"]["downloadPage"]
 
 
-async def _upload_to_r2(message: Message, file_path: str, filename: str, file_size: int) -> str | None:
+async def _upload_to_r2(message: Message, file_path: str, filename: str, file_size: int, user_id: int = 0) -> str | None:
     """R2 ga yuklab, tugmali xabar yuboradi. URL qaytaradi yoki None."""
     status_msg = await message.reply_text(
         f"☁️ *R2 ga yuklanmoqda...*\n\n"
@@ -158,8 +172,8 @@ async def _upload_to_r2(message: Message, file_path: str, filename: str, file_si
         _cleanup_r2_pending()
 
         # callback_data Telegram da 64 bayt bilan cheklangan.
-        # Fayl nomini to'g'ridan-to'g'ri ishlatish o'rniga qisqa hash (8 hex) ishlatamiz.
-        short_key = hashlib.md5(filename.encode()).hexdigest()[:8]
+        # user_id + fayl nomi kombinatsiyasi — foydalanuvchilar orasida izolyatsiya.
+        short_key = hashlib.md5(f"{user_id}:{filename}".encode()).hexdigest()[:8]
         _r2_pending[short_key] = {
             "filename": filename,
             "url": url,
@@ -214,7 +228,7 @@ async def send_file(
     custom_thumb_tmp = None
 
     if is_video:
-        meta = _get_video_meta(file_path)
+        meta = await _get_video_meta(file_path)
         if context is not None:
             from utils.user_settings import ensure_loaded as _ensure, get as get_setting
             await _ensure(context.user_data.get("_user_id", 0), context)
@@ -222,13 +236,14 @@ async def send_file(
             if custom_path and isinstance(custom_path, str) and os.path.exists(custom_path):
                 thumb_path = custom_path
         if not thumb_path and meta.get("duration", 0) > 0:
-            thumb_path = _make_thumb(file_path, meta["duration"])
+            thumb_path = await _make_thumb(file_path, meta["duration"])
             custom_thumb_tmp = thumb_path
 
     # ─── > 2 GB → R2 yoki Gofile ─────────────────────────────────────────
+    _user_id = context.user_data.get("_user_id", 0) if context else 0
     if file_size > PYROGRAM_LIMIT or force_r2:
         if r2_ok():
-            await _upload_to_r2(message, file_path, filename, file_size)
+            await _upload_to_r2(message, file_path, filename, file_size, user_id=_user_id)
         else:
             # Fallback: Gofile
             status_msg = await message.reply_text(
