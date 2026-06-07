@@ -5,7 +5,10 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, filters, ContextTypes,
 )
-from handlers.hls_handler import show_hls_menu, handle_hls_quality
+from handlers.hls_handler import (
+    show_hls_menu, handle_hls_quality,
+    handle_hls_audio_toggle, handle_hls_audio_all, handle_hls_audio_done,
+)
 
 from config import BOT_TOKEN, LOCAL_BOT_API_URL
 from utils.db import init_db
@@ -245,6 +248,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── HLS Streaming ─────────────────────────────────────────────────
     elif data == "hls":
         await show_hls_menu(update, context)
+    elif data.startswith("hls_audio_toggle_"):
+        track_idx = int(data.replace("hls_audio_toggle_", ""))
+        await handle_hls_audio_toggle(update, context, track_idx)
+    elif data == "hls_audio_all":
+        await handle_hls_audio_all(update, context)
+    elif data == "hls_audio_done":
+        await handle_hls_audio_done(update, context)
     elif data.startswith("hls_q_"):
         # format: hls_q_360, hls_q_720, hls_q_1080
         await handle_hls_quality(update, context, data[6:])
