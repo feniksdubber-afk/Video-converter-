@@ -776,6 +776,26 @@ async def convert_to_hls_async(
         if not os.path.exists(master_path):
             return False, "", "master.m3u8 yaratilmadi"
 
+        # ── master.m3u8 RESOLUTION ni to'g'rilash ──────────────────────
+        try:
+            import re as _re
+            _resolution_map = {360: "640x360", 720: "1280x720", 1080: "1920x1080", 480: "854x480"}
+            with open(master_path, "r", encoding="utf-8") as _f:
+                _lines = _f.readlines()
+            _stream_idx = 0
+            _fixed = []
+            for _line in _lines:
+                if _line.startswith("#EXT-X-STREAM-INF:") and _stream_idx < len(qualities):
+                    _h = qualities[_stream_idx]["height"]
+                    _res = _resolution_map.get(_h, f"?x{_h}")
+                    _line = _re.sub(r"RESOLUTION=\d+x\d+", f"RESOLUTION={_res}", _line)
+                    _stream_idx += 1
+                _fixed.append(_line)
+            with open(master_path, "w", encoding="utf-8") as _f:
+                _f.writelines(_fixed)
+        except Exception:
+            pass  # fix ishlamasa ham stream ishlayveradi
+
         return True, master_path, ""
 
     except FileNotFoundError:
