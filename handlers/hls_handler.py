@@ -46,7 +46,9 @@ def _progress_bar(pct: int, length: int = 14) -> str:
     return "█" * filled + "░" * (length - filled)
 
 
-def hls_quality_keyboard() -> InlineKeyboardMarkup:
+def hls_quality_keyboard(available: list[str] | None = None) -> InlineKeyboardMarkup:
+    if available is None:
+        available = ["360", "720", "1080"]
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(HLS_PRESET_LABELS["360"],  callback_data="hls_q_360")],
         [InlineKeyboardButton(HLS_PRESET_LABELS["720"],  callback_data="hls_q_720")],
@@ -83,14 +85,38 @@ async def show_hls_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
     video_name = context.user_data.get("video_name", "video")
 
+    # Video original sifatini aniqlash
+    from utils.ffmpeg_utils import get_video_info
+    info = get_video_info(video_path)
+    try:
+        src_height = int(info.get("height", 1080))
+    except (ValueError, TypeError):
+        src_height = 1080
+
+    # Faqat original sifatdan past yoki teng presetlarni ko'rsatish
+    available_presets = []
+    if src_height >= 360:
+        available_presets.append("360")
+    if src_height >= 720:
+        available_presets.append("720")
+    if src_height >= 1080:
+        available_presets.append("1080")
+    if not available_presets:
+        available_presets = ["360"]
+
+    context.user_data["available_presets"] = available_presets
+
+    src_label = f"{src_height}p" if src_height else "noma'lum"
+
     await query.edit_message_text(
         f"📡 *HLS Streaming → R2*\n\n"
         f"📁 Fayl: `{video_name}`\n"
-        f"📦 Hajmi: {file_size_mb:.1f} MB\n\n"
+        f"📦 Hajmi: {file_size_mb:.1f} MB\n"
+        f"🎬 Original sifat: *{src_label}*\n\n"
         f"*Sifatni tanlang:*\n"
         f"_(Ko'proq sifat = ko'proq vaqt va disk joy)_",
         parse_mode="Markdown",
-        reply_markup=hls_quality_keyboard(),
+        reply_markup=hls_quality_keyboard(available_presets),
     )
 
 
