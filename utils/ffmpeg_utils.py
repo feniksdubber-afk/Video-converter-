@@ -639,3 +639,146 @@ async def hardsub_video_async(
         input_path=video_path,
     )
     return ok, output_path, err
+
+
+
+async def convert_to_hls_async(
+    input_path: str,
+    output_dir: str,
+    qualities: list[dict],
+    status_msg=None,
+) -> tuple[bool, str, str]:
+    """
+    Videoni HLS formatiga o'tkazadi (adaptive multi-quality).
+
+    qualities misoli:
+        [
+            {"height": 360,  "bitrate": "800k",  "audio_bitrate": "96k"},
+            {"height": 720,  "bitrate": "2800k", "audio_bitrate": "128k"},
+            {"height": 1080, "bitrate": "5000k", "audio_bitrate": "192k"},
+        ]
+
+    Qaytaradi: (ok, master_m3u8_path, error_msg)
+    Chiqish strukturasi:
+        output_dir/
+          master.m3u8
+          stream_0/index.m3u8  stream_0/seg000.ts ...
+          stream_1/index.m3u8  stream_1/seg000.ts ...
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    master_path = os.path.join(output_dir, "master.m3u8")
+
+    # ── FFmpeg buyrug'ini quramiz ─────────────────────────────────────
+    cmd = ["ffmpeg", "-i", input_path, "-y"]
+
+    var_stream_map_parts: list[str] = []
+
+    for i, q in enumerate(qualities):
+        height = q["height"]
+        vbitrate = q["bitrate"]
+        abitrate = q.get("audio_bitrate", "96k")
+
+        # Video va audio streamlarni map qilish
+        cmd += ["-map", "0:v:0", "-map", "0:a:0"]
+
+        # Video filtr va codec
+        cmd += [
+            f"-vf:{i}",     f"scale=-2:{height}",
+            f"-c:v:{i}",    "libx264",
+            f"-b:v:{i}",    vbitrate,
+            f"-maxrate:{i}", vbitrate,
+            f"-bufsize:{i}", str(int(vbitrate.rstrip("k")) * 2) + "k",
+            f"-preset:{i}", "veryfast",
+            f"-profile:v:{i}", "main",
+            f"-level:{i}",  "4.0",
+        ]
+
+        # Audio codec
+        cmd += [
+            f"-c:a:{i}",  "aac",
+            f"-b:a:{i}",  abitrate,
+            f"-ar:{i}",   "48000",
+            f"-ac:{i}",   "2",
+        ]
+
+        var_stream_map_parts.append(f"v:{i},a:{i}")
+
+    # HLS umumiy sozlamalar
+    cmd += [
+        "-f", "hls",
+        "-hls_time", "6",
+        "-hls_playlist_type", "vod",
+        "-hls_flags", "independent_segments",
+        "-hls_segment_type", "mpegts",
+        "-var_stream_map", " ".join(var_stream_map_parts),
+        "-master_pl_name", "master.m3u8",
+        "-hls_segment_filename", os.path.join(output_dir, "stream_%v", "seg%03d.ts"),
+        os.path.join(output_dir, "stream_%v", "index.m3u8"),
+    ]
+
+    # Stream papkalarini oldindan yaratish
+    for i in range(len(qualities)):
+        os.makedirs(os.path.join(output_dir, f"stream_{i}"), exist_ok=True)
+
+    # ── FFmpeg ni ishga tushirish ─────────────────────────────────────
+    if status_msg:
+        quality_names = " + ".join(f"{q['height']}p" for q in qualities)
+        try:
+            await status_msg.edit_text(
+                f"⚙️ *FFmpeg ishlayapti...*\n"
+                f"📊 Sifatlar: {quality_names}\n\n"
+                f"`[░░░░░░░░░░░░░░]` Hisoblanyapti...\n"
+                f"_(Bu bir necha daqiqa vaqt olishi mumkin)_",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        # FFmpeg progress ni stderr dan o'qish (time=XX:XX:XX)
+        last_update = 0.0
+        stderr_lines: list[str] = []
+
+        async def _read_stderr():
+            nonlocal last_update
+            assert proc.stderr is not None
+            async for line in proc.stderr:
+                text = line.decode(errors="replace").strip()
+                stderr_lines.append(text)
+                # "time=HH:MM:SS" ni qidirish
+                if "time=" in text and status_msg:
+                    import time
+                    now = time.monotonic()
+                    if now - last_update >= 5:   # har 5 soniyada yangilash
+                        last_update = now
+                        try:
+                            await status_msg.edit_text(
+                                f"⚙️ *FFmpeg ishlayapti...*\n\n"
+                                f"`{text[-80:]}`",
+                                parse_mode="Markdown",
+                            )
+                        except Exception:
+                            pass
+
+        await _read_stderr()
+        await proc.wait()
+
+        if proc.returncode != 0:
+            err_text = "\n".join(stderr_lines[-20:])
+            return False, "", err_text
+
+        if not os.path.exists(master_path):
+            return False, "", "master.m3u8 yaratilmadi"
+
+        return True, master_path, ""
+
+    except FileNotFoundError:
+        return False, "", "FFmpeg topilmadi. Serverda FFmpeg o'rnatilganini tekshiring."
+    except Exception as e:
+        return False, "", str(e)

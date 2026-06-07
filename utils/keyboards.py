@@ -22,6 +22,9 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("☁️ R2 Bulut",            callback_data="cat_r2"),
+            InlineKeyboardButton("📡 HLS → R2",            callback_data="hls"),
+        ],
+        [
             InlineKeyboardButton("⚙️ Sozlamalar",          callback_data="settings"),
         ],
     ])
