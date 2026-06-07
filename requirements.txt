@@ -1,7 +1,7 @@
 python-telegram-bot==21.6
-pyrogram
-tgcrypto
-aiosqlite
-aiohttp
-deep-translator
-boto3
+pyrogram==2.0.106
+tgcrypto==1.2.5
+aiosqlite==0.20.0
+aiohttp==3.10.5
+deep-translator==1.11.4
+boto3==1.35.0
