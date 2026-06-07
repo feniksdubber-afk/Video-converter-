@@ -5,6 +5,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, filters, ContextTypes,
 )
+from handlers.hls_handler import show_hls_menu, handle_hls_quality
 
 from config import BOT_TOKEN, LOCAL_BOT_API_URL
 from utils.db import init_db
@@ -241,6 +242,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Volume ───────────────────────────────────────────────
     elif data == "volume":             await show_volume_menu(update, context)
+    # ── HLS Streaming ─────────────────────────────────────────────────
+    elif data == "hls":
+        await show_hls_menu(update, context)
+    elif data.startswith("hls_q_"):
+        # format: hls_q_360, hls_q_720, hls_q_1080
+        await handle_hls_quality(update, context, data[6:])
+
     elif data.startswith("vol_"):      await handle_volume_choice(update, context, data[4:])
 
     # ── Fade ─────────────────────────────────────────────────
