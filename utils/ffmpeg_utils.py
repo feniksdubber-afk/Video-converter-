@@ -170,6 +170,41 @@ def get_video_info(input_path: str) -> dict:
         return {}
 
 
+
+
+def get_audio_tracks(input_path: str) -> list[dict]:
+    """
+    MKV/MP4 fayldagi barcha audio track larni qaytaradi.
+    Qaytaradi: [{"index": 1, "language": "uzb", "title": "O'zbekcha", "codec": "aac"}, ...]
+    index — 0:a:N formatida ishlatish uchun
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "a",
+                "-show_entries", "stream=index,codec_name:stream_tags=language,title",
+                "-of", "json",
+                input_path,
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        import json
+        data = json.loads(result.stdout)
+        tracks = []
+        for i, stream in enumerate(data.get("streams", [])):
+            tags = stream.get("tags", {})
+            tracks.append({
+                "index": i,                                      # 0:a:0, 0:a:1, ...
+                "stream_index": stream.get("index", i),          # global stream index
+                "codec": stream.get("codec_name", "unknown"),
+                "language": tags.get("language", ""),
+                "title": tags.get("title", ""),
+            })
+        return tracks
+    except Exception:
+        return []
+
 def make_temp_path(ext: str) -> str:
     return os.path.join(TEMP_DIR, f"{uuid.uuid4().hex}.{ext}")
 
@@ -647,9 +682,10 @@ async def convert_to_hls_async(
     output_dir: str,
     qualities: list[dict],
     status_msg=None,
+    audio_tracks: list[dict] | None = None,
 ) -> tuple[bool, str, str]:
     """
-    Videoni HLS formatiga o'tkazadi (adaptive multi-quality).
+    Videoni HLS formatiga o'tkazadi (adaptive multi-quality + multi-audio).
 
     qualities misoli:
         [
@@ -658,50 +694,97 @@ async def convert_to_hls_async(
             {"height": 1080, "bitrate": "5000k", "audio_bitrate": "192k"},
         ]
 
+    audio_tracks misoli (ixtiyoriy):
+        [
+            {"index": 0, "language": "uzb", "name": "O'zbekcha", "default": True},
+            {"index": 1, "language": "eng", "name": "Inglizcha", "default": False},
+        ]
+        None bo'lsa — birinchi audio track ishlatiladi (hozirgi xatti-harakat)
+
     Qaytaradi: (ok, master_m3u8_path, error_msg)
-    Chiqish strukturasi:
-        output_dir/
-          master.m3u8
-          stream_0/index.m3u8  stream_0/seg000.ts ...
-          stream_1/index.m3u8  stream_1/seg000.ts ...
     """
     os.makedirs(output_dir, exist_ok=True)
     master_path = os.path.join(output_dir, "master.m3u8")
+
+    multi_audio = audio_tracks and len(audio_tracks) > 1
 
     # ── FFmpeg buyrug'ini quramiz ─────────────────────────────────────
     cmd = ["ffmpeg", "-i", input_path, "-y"]
 
     var_stream_map_parts: list[str] = []
 
-    for i, q in enumerate(qualities):
-        height = q["height"]
-        vbitrate = q["bitrate"]
-        abitrate = q.get("audio_bitrate", "96k")
+    if multi_audio:
+        # ── Multi-audio rejim ──────────────────────────────────────────
+        # Har bir video sifat uchun: faqat video map qilamiz
+        # Audio lar alohida stream sifatida chiqadi
+        num_q = len(qualities)
+        num_a = len(audio_tracks)
 
-        # Video va audio streamlarni map qilish
-        cmd += ["-map", "0:v:0", "-map", "0:a:0"]
+        for i, q in enumerate(qualities):
+            height = q["height"]
+            vbitrate = q["bitrate"]
 
-        # Video filtr va codec
-        cmd += [
-            f"-vf:{i}",     f"scale=-2:{height}",
-            f"-c:v:{i}",    "libx264",
-            f"-b:v:{i}",    vbitrate,
-            f"-maxrate:{i}", vbitrate,
-            f"-bufsize:{i}", str(int(vbitrate.rstrip("k")) * 2) + "k",
-            f"-preset:{i}", "veryfast",
-            f"-profile:v:{i}", "main",
-            f"-level:{i}",  "4.0",
-        ]
+            cmd += ["-map", "0:v:0"]
 
-        # Audio codec
-        cmd += [
-            f"-c:a:{i}",  "aac",
-            f"-b:a:{i}",  abitrate,
-            f"-ar:{i}",   "48000",
-            f"-ac:{i}",   "2",
-        ]
+            cmd += [
+                f"-vf:{i}",          f"scale=-2:{height}",
+                f"-c:v:{i}",         "libx264",
+                f"-b:v:{i}",         vbitrate,
+                f"-maxrate:{i}",     vbitrate,
+                f"-bufsize:{i}",     str(int(vbitrate.rstrip("k")) * 2) + "k",
+                f"-preset:{i}",      "veryfast",
+                f"-profile:v:{i}",   "main",
+                f"-level:{i}",       "4.0",
+            ]
+            var_stream_map_parts.append(f"v:{i},agroup:audio,default:{'yes' if i == 0 else 'no'}")
 
-        var_stream_map_parts.append(f"v:{i},a:{i}")
+        # Audio track lar
+        for j, at in enumerate(audio_tracks):
+            ai = at["index"]
+            cmd += ["-map", f"0:a:{ai}"]
+            vi = num_q + j
+            abitrate = qualities[0].get("audio_bitrate", "128k")
+            cmd += [
+                f"-c:a:{j}",  "aac",
+                f"-b:a:{j}",  abitrate,
+                f"-ar:{j}",   "48000",
+                f"-ac:{j}",   "2",
+            ]
+            lang = at.get("language", "und")
+            name = at.get("name", f"Audio {j+1}")
+            default = "yes" if at.get("default", j == 0) else "no"
+            var_stream_map_parts.append(
+                f"a:{j},agroup:audio,language:{lang},name:{name},default:{default}"
+            )
+
+    else:
+        # ── Oddiy bitta audio rejim (hozirgi xatti-harakat) ───────────
+        for i, q in enumerate(qualities):
+            height = q["height"]
+            vbitrate = q["bitrate"]
+            abitrate = q.get("audio_bitrate", "96k")
+
+            cmd += ["-map", "0:v:0", "-map", "0:a:0"]
+
+            cmd += [
+                f"-vf:{i}",          f"scale=-2:{height}",
+                f"-c:v:{i}",         "libx264",
+                f"-b:v:{i}",         vbitrate,
+                f"-maxrate:{i}",     vbitrate,
+                f"-bufsize:{i}",     str(int(vbitrate.rstrip("k")) * 2) + "k",
+                f"-preset:{i}",      "veryfast",
+                f"-profile:v:{i}",   "main",
+                f"-level:{i}",       "4.0",
+            ]
+
+            cmd += [
+                f"-c:a:{i}",  "aac",
+                f"-b:a:{i}",  abitrate,
+                f"-ar:{i}",   "48000",
+                f"-ac:{i}",   "2",
+            ]
+
+            var_stream_map_parts.append(f"v:{i},a:{i}")
 
     # HLS umumiy sozlamalar
     cmd += [
@@ -717,7 +800,8 @@ async def convert_to_hls_async(
     ]
 
     # Stream papkalarini oldindan yaratish
-    for i in range(len(qualities)):
+    total_streams = len(qualities) + (len(audio_tracks) if multi_audio else 0)
+    for i in range(total_streams):
         os.makedirs(os.path.join(output_dir, f"stream_{i}"), exist_ok=True)
 
     # ── FFmpeg ni ishga tushirish ─────────────────────────────────────
