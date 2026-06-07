@@ -1,3 +1,4 @@
+import asyncio
 import os
 import subprocess
 import json
@@ -27,6 +28,11 @@ def _get_streams(video_path: str) -> list[dict]:
         return []
 
 
+async def _get_streams_async(video_path: str) -> list[dict]:
+    """_get_streams ni async (non-blocking) versiyasi."""
+    return await asyncio.get_running_loop().run_in_executor(None, _get_streams, video_path)
+
+
 def _audio_ext(codec: str) -> str:
     return {"aac": "aac", "mp3": "mp3", "opus": "opus", "vorbis": "ogg",
             "flac": "flac", "pcm_s16le": "wav"}.get(codec, "mka")
@@ -48,7 +54,7 @@ async def show_stream_remover_menu(update: Update, context: ContextTypes.DEFAULT
         await query.edit_message_text("❌ Video topilmadi. Iltimos qaytadan video yuboring.")
         return
 
-    streams = _get_streams(video_path)
+    streams = await _get_streams_async(video_path)
     if not streams:
         await query.edit_message_text("❌ Streamlar aniqlanmadi.", reply_markup=main_menu_keyboard())
         return
@@ -191,7 +197,11 @@ async def handle_remove_confirm(update: Update, context: ContextTypes.DEFAULT_TY
     await query.edit_message_text(f"⏳ {len(selected)} ta stream o'chirilmoqda...")
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=600),
+        )
         if result.returncode != 0:
             raise RuntimeError(result.stderr[-1500:])
 
@@ -233,7 +243,7 @@ async def show_stream_extractor_menu(update: Update, context: ContextTypes.DEFAU
         await query.edit_message_text("❌ Video topilmadi. Iltimos qaytadan video yuboring.")
         return
 
-    streams = _get_streams(video_path)
+    streams = await _get_streams_async(video_path)
     if not streams:
         await query.edit_message_text("❌ Streamlar aniqlanmadi.", reply_markup=main_menu_keyboard())
         return
@@ -286,7 +296,11 @@ async def handle_extract_stream(update: Update, context: ContextTypes.DEFAULT_TY
     await query.edit_message_text(f"⏳ #{stream_idx} stream ajratilmoqda...")
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=600),
+        )
         if result.returncode != 0:
             raise RuntimeError(result.stderr[-1500:])
 
@@ -389,7 +403,11 @@ async def _extract_by_type(query, context, stype_filter: str):
             pass
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            _loop = asyncio.get_running_loop()
+            result = await _loop.run_in_executor(
+                None,
+                lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=600),
+            )
             if result.returncode != 0:
                 raise RuntimeError(result.stderr[-500:])
 

@@ -2,6 +2,7 @@
 Video Merger, Video Splitter, Video+Audio Merger,
 Media Information, Video Renamer, Generate Sample
 """
+import asyncio
 import os
 import re
 import subprocess
@@ -70,10 +71,14 @@ async def show_media_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        result = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_format", "-show_streams",
-             "-of", "json", video_path],
-            capture_output=True, text=True, timeout=30,
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                ["ffprobe", "-v", "error", "-show_format", "-show_streams",
+                 "-of", "json", video_path],
+                capture_output=True, text=True, timeout=30,
+            )
         )
         data = json.loads(result.stdout)
         fmt = data.get("format", {})

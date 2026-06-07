@@ -1,3 +1,4 @@
+import asyncio
 import os
 import subprocess
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -155,7 +156,11 @@ async def handle_subext_format(
     )
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=120),
+        )
         if result.returncode != 0:
             raise RuntimeError(result.stderr[-1500:])
 
@@ -241,7 +246,11 @@ async def handle_subext_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            _loop = asyncio.get_running_loop()
+            result = await _loop.run_in_executor(
+                None,
+                lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=120),
+            )
             if result.returncode != 0:
                 raise RuntimeError(result.stderr[-500:])
 

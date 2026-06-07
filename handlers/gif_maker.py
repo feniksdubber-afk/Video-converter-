@@ -134,7 +134,7 @@ async def handle_gif_duration(
             "-vf", f"fps={fps},scale={width}:-1:flags=lanczos,palettegen=stats_mode=diff",
             palette_path,
         ]
-        r1 = await asyncio.get_event_loop().run_in_executor(
+        r1 = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: subprocess.run(pass1, capture_output=True, text=True, timeout=120),
         )
@@ -161,7 +161,7 @@ async def handle_gif_duration(
             f"fps={fps},scale={width}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=5",
             output_path,
         ]
-        r2 = await asyncio.get_event_loop().run_in_executor(
+        r2 = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: subprocess.run(pass2, capture_output=True, text=True, timeout=300),
         )

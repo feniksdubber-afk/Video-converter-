@@ -119,6 +119,7 @@ async def show_hls_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         available_presets = ["360"]
 
     context.user_data["available_presets"] = available_presets
+    context.user_data["src_height"] = src_height  # keyingi handlerlarda ishlatiladi
 
     # Audio track larni aniqlash
     tracks = get_audio_tracks(video_path)

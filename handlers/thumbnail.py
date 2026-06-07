@@ -1,3 +1,4 @@
+import asyncio
 import os
 import subprocess
 from telegram import Update
@@ -16,7 +17,7 @@ async def show_thumbnail_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     # Avval embedded thumbnail bor-yo'qligini tekshir
-    has_thumb = _has_embedded_thumbnail(video_path)
+    has_thumb = await _has_embedded_thumbnail_async(video_path)
     duration = get_video_duration(video_path)
 
     text = "🖼 *Thumbnail / Cover Extractor*\n\n"
@@ -50,6 +51,8 @@ async def handle_thumbnail_embedded(update: Update, context: ContextTypes.DEFAUL
     video_path = context.user_data.get("video_path")
     output_path = make_temp_path("jpg")
 
+    loop = asyncio.get_running_loop()
+
     cmd = [
         "ffmpeg", "-y", "-i", video_path,
         "-map", "0:v:1",         # odatda 2-video stream = thumbnail
@@ -58,7 +61,10 @@ async def handle_thumbnail_embedded(update: Update, context: ContextTypes.DEFAUL
         output_path,
     ]
     # Agar 0:v:1 bo'lmasa 0:v:0 dan olish
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    result = await loop.run_in_executor(
+        None,
+        lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=60),
+    )
     if result.returncode != 0 or not os.path.exists(output_path):
         cmd2 = [
             "ffmpeg", "-y", "-i", video_path,
@@ -67,7 +73,10 @@ async def handle_thumbnail_embedded(update: Update, context: ContextTypes.DEFAUL
             "-q:v", "2",
             output_path,
         ]
-        result2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=60)
+        result2 = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(cmd2, capture_output=True, text=True, timeout=60),
+        )
         if result2.returncode != 0:
             await query.edit_message_text("❌ Thumbnail olib bo'lmadi.", reply_markup=main_menu_keyboard())
             return
@@ -89,7 +98,10 @@ async def handle_thumbnail_time(update: Update, context: ContextTypes.DEFAULT_TY
         "-frames:v", "1", "-q:v", "2",
         output_path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    result = await asyncio.get_running_loop().run_in_executor(
+        None,
+        lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=60),
+    )
     if result.returncode != 0 or not os.path.exists(output_path):
         await query.edit_message_text(
             f"❌ {_fmt_time(seconds)} dan thumbnail olib bo'lmadi.",
@@ -125,7 +137,10 @@ async def handle_thumbnail_manual_text(update: Update, context: ContextTypes.DEF
         "-frames:v", "1", "-q:v", "2",
         output_path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    result = await asyncio.get_running_loop().run_in_executor(
+        None,
+        lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=60),
+    )
     if result.returncode != 0 or not os.path.exists(output_path):
         await update.message.reply_text(
             f"❌ `{text}` vaqtidan thumbnail olib bo'lmadi.\nTo'g'ri format: `01:30`",
@@ -153,20 +168,23 @@ async def _send_thumbnail(query, context, output_path: str, label: str):
         await query.message.reply_text(f"❌ Xato: {e}", reply_markup=main_menu_keyboard())
 
 
-def _has_embedded_thumbnail(video_path: str) -> bool:
-    try:
-        result = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v",
-             "-show_entries", "stream=codec_name,codec_type",
-             "-of", "json", video_path],
-            capture_output=True, text=True, timeout=15,
-        )
-        import json
-        streams = json.loads(result.stdout).get("streams", [])
-        # 2 ta video stream bo'lsa — biri asosiy, biri thumbnail
-        return len(streams) >= 2
-    except Exception:
-        return False
+async def _has_embedded_thumbnail_async(video_path: str) -> bool:
+    """Async: embedded thumbnail bor-yo'qligini blokirovchi bo'lmay tekshiradi."""
+    def _check():
+        try:
+            import json as _json
+            result = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v",
+                 "-show_entries", "stream=codec_name,codec_type",
+                 "-of", "json", video_path],
+                capture_output=True, text=True, timeout=15,
+            )
+            streams = _json.loads(result.stdout).get("streams", [])
+            return len(streams) >= 2
+        except Exception:
+            return False
+
+    return await asyncio.get_running_loop().run_in_executor(None, _check)
 
 
 def _fmt_time(seconds: int) -> str:
