@@ -348,7 +348,7 @@ async def _handle_r2_compress(query, context, data: str):
                         os.remove(out_path)
             else:
                 await status.edit_text(
-                    f"❌ <b>{height}p</b> xato: {html.escape(err or 'noma'lum')}",
+                    f"❌ <b>{height}p</b> xato: {html.escape(err or "noma'lum")}",
                     parse_mode="HTML"
                 )
 
