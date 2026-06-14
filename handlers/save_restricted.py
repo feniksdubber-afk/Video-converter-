@@ -93,7 +93,7 @@ async def _resolve_peer_safe(client: Client, chat_id):
     return False
 
 
-
+def _progress_bar(percent: int, length: int = 12) -> str:
     filled = int(length * percent / 100)
     return "[" + "█" * filled + "░" * (length - filled) + "]"
 
@@ -162,6 +162,7 @@ async def _send_media_msg(client: Client, msg, to_chat: int, status_msg, use_dis
             ext = "jpg"
 
         tmp_path = os.path.join(TEMP_DIR, f"sr_{msg.id}.{ext}")
+        downloaded = False
         try:
             total_size = (
                 (msg.video and msg.video.file_size) or
@@ -216,7 +217,20 @@ async def _send_media_msg(client: Client, msg, to_chat: int, status_msg, use_dis
                 media_obj = msg
 
             await dl_client.download_media(media_obj, file_name=tmp_path, progress=_dl_progress)
+            downloaded = True
+
+            # ✅ FIX: download tugadi — yuborish boshlanganligi ko'rsat
+            try:
+                await status_msg.edit_text(
+                    "📤 *Yuborilmoqda...*",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+
+            # ✅ FIX: _send_from_path exception raise qiladi, silent fail yo'q
             await _send_from_path(tg_bot, to_chat, tmp_path, msg, caption, pyro_client=client)
+
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
@@ -227,6 +241,16 @@ async def _send_media_msg(client: Client, msg, to_chat: int, status_msg, use_dis
             # Fallback — diskka
             await _send_media_msg(client, msg, to_chat, status_msg, use_disk=True)
             return
+
+        # ✅ FIX: yuborish boshlanganligi ko'rsat
+        try:
+            await status_msg.edit_text(
+                "📤 *Yuborilmoqda...*",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
+
         await _send_from_buf(tg_bot, to_chat, buf, msg, caption)
 
 
@@ -234,6 +258,8 @@ async def _send_from_path(bot, to_chat: int, path: str, msg, caption: str, pyro_
     """
     50MB dan kichik: bot (HTTP API) orqali yuboradi.
     50MB dan katta: pyrogram (MTProto) orqali yuboradi — 2GB gacha ishlaydi.
+
+    ✅ FIX: endi exception yutib yubormaydi — xato yuqoriga chiqariladi.
     """
     file_size = os.path.getsize(path)
     use_pyro = pyro_client is not None and file_size > 50 * 1024 * 1024
@@ -346,7 +372,7 @@ async def _download_and_send_one(client: Client, to_chat: int, from_chat, msg_id
         logger.error(f"msg {msg_id} OSError (3 retry ham ishlamadi): {e}")
         return False
     except Exception as e:
-        logger.error(f"msg {msg_id} xato: {e}")
+        logger.error(f"msg {msg_id} xato: {e}", exc_info=True)
         return False
 
 
@@ -413,11 +439,24 @@ async def save_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ok = await _download_and_send_one(client, update.effective_chat.id, chat_id, msg_id, status)
         _progress_state.pop(status.message_id, None)
         if ok:
-            await status.delete()
+            # ✅ FIX: "Yuborildi" deb ko'rsat, keyin o'chir
+            try:
+                await status.edit_text("✅ Yuborildi!")
+            except Exception:
+                pass
+            await asyncio.sleep(1)
+            try:
+                await status.delete()
+            except Exception:
+                pass
         else:
             await status.edit_text("❌ Yuklab bo'lmadi. Havola yoki ruxsat xatosi.")
     except Exception as e:
-        await status.edit_text(f"❌ Xato: {e}")
+        logger.error(f"save_link_handler xato: {e}", exc_info=True)
+        try:
+            await status.edit_text(f"❌ Xato: {e}")
+        except Exception:
+            pass
 
     return True  # text_handler'ga o'tmasin
 
@@ -475,6 +514,7 @@ async def save_topic_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 parse_mode="Markdown"
             )
     except Exception as e:
+        logger.error(f"save_topic_handler xato: {e}", exc_info=True)
         await status.edit_text(f"❌ Xato: {e}")
 
 
