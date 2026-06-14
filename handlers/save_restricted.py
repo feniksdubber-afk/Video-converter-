@@ -239,13 +239,22 @@ async def _download_and_send(
             caption=caption,
             context=_FakeCtx(),
         )
+        # ✅ Agar fayl R2 ga yuklangan bo'lsa, _r2_pending faylni ishlatadi.
+        # Shuning uchun bu yerda o'chirmaymiz — r2_browser.py "Telegramga yuklash"
+        # tugmasi bosilganda o'chiradi. Aks holda (Telegram ga to'g'ri yuklangan) — o'chiramiz.
+        from utils.sender import _r2_pending, PYROGRAM_LIMIT
+        import hashlib
+        short_key = hashlib.md5(f"{user_id}:{filename}".encode()).hexdigest()[:8]
+        if short_key in _r2_pending:
+            # R2 ga yuklangan — faylni saqlab qolamiz, r2_browser o'chiradi
+            tmp_path = None  # finally da o'chirilmasin
         return True
 
     except Exception as e:
         logger.error(f"_download_and_send xato: {e}", exc_info=True)
         return False
     finally:
-        if os.path.exists(tmp_path):
+        if tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
 
 

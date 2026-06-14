@@ -201,6 +201,14 @@ async def _handle_r2_send_tg(query, context, short_key: str):
             await status.delete()
         except Exception:
             pass
+        # Ishlatilgan faylni o'chirish
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            from utils.sender import _r2_pending
+            _r2_pending.pop(short_key, None)
+        except Exception:
+            pass
         return
 
     # 2GB dan katta va video — sifat tanlash menu
@@ -374,6 +382,20 @@ async def _handle_r2_compress(query, context, data: str):
                 r2_note = ""
         else:
             r2_note = "☁️ R2 da saqlanib qoldi."
+
+        # Original faylni o'chirish (R2 da qoldirmaslik tanlangan bo'lsa allaqachon o'chirilgan)
+        if not keep_r2:
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            except Exception:
+                pass
+        # _r2_pending dan tozalash
+        try:
+            from utils.sender import _r2_pending
+            _r2_pending.pop(short_key, None)
+        except Exception:
+            pass
 
         # Yakuniy xabar
         result_text = (
