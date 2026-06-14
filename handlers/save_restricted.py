@@ -216,7 +216,7 @@ async def _send_media_msg(client: Client, msg, to_chat: int, status_msg, use_dis
                 media_obj = msg
 
             await dl_client.download_media(media_obj, file_name=tmp_path, progress=_dl_progress)
-            await _send_from_path(tg_bot, to_chat, tmp_path, msg, caption)
+            await _send_from_path(tg_bot, to_chat, tmp_path, msg, caption, pyro_client=client)
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
@@ -230,27 +230,58 @@ async def _send_media_msg(client: Client, msg, to_chat: int, status_msg, use_dis
         await _send_from_buf(tg_bot, to_chat, buf, msg, caption)
 
 
-async def _send_from_path(bot, to_chat: int, path: str, msg, caption: str):
-    with open(path, "rb") as f:
+async def _send_from_path(bot, to_chat: int, path: str, msg, caption: str, pyro_client: Client = None):
+    """
+    50MB dan kichik: bot (HTTP API) orqali yuboradi.
+    50MB dan katta: pyrogram (MTProto) orqali yuboradi — 2GB gacha ishlaydi.
+    """
+    file_size = os.path.getsize(path)
+    use_pyro = pyro_client is not None and file_size > 50 * 1024 * 1024
+
+    if use_pyro:
+        # MTProto orqali — 2GB gacha
         if msg.video:
-            await bot.send_video(to_chat, video=f, caption=caption,
-                                 duration=msg.video.duration,
-                                 width=msg.video.width,
-                                 height=msg.video.height)
+            await pyro_client.send_video(
+                to_chat, path, caption=caption,
+                duration=msg.video.duration,
+                width=msg.video.width,
+                height=msg.video.height,
+                supports_streaming=True,
+            )
         elif msg.photo:
-            await bot.send_photo(to_chat, photo=f, caption=caption)
+            await pyro_client.send_photo(to_chat, path, caption=caption)
         elif msg.audio:
-            await bot.send_audio(to_chat, audio=f, caption=caption,
-                                 duration=msg.audio.duration)
+            await pyro_client.send_audio(to_chat, path, caption=caption,
+                                         duration=msg.audio.duration)
         elif msg.voice:
-            await bot.send_voice(to_chat, voice=f, caption=caption)
+            await pyro_client.send_voice(to_chat, path, caption=caption)
         elif msg.video_note:
-            await bot.send_video_note(to_chat, video_note=f)
-        elif msg.sticker:
-            await bot.send_sticker(to_chat, sticker=f)
+            await pyro_client.send_video_note(to_chat, path)
         else:
             name = (msg.document and msg.document.file_name) or "file"
-            await bot.send_document(to_chat, document=f, caption=caption, filename=name)
+            await pyro_client.send_document(to_chat, path, caption=caption, file_name=name)
+    else:
+        # HTTP Bot API — 50MB gacha
+        with open(path, "rb") as f:
+            if msg.video:
+                await bot.send_video(to_chat, video=f, caption=caption,
+                                     duration=msg.video.duration,
+                                     width=msg.video.width,
+                                     height=msg.video.height)
+            elif msg.photo:
+                await bot.send_photo(to_chat, photo=f, caption=caption)
+            elif msg.audio:
+                await bot.send_audio(to_chat, audio=f, caption=caption,
+                                     duration=msg.audio.duration)
+            elif msg.voice:
+                await bot.send_voice(to_chat, voice=f, caption=caption)
+            elif msg.video_note:
+                await bot.send_video_note(to_chat, video_note=f)
+            elif msg.sticker:
+                await bot.send_sticker(to_chat, sticker=f)
+            else:
+                name = (msg.document and msg.document.file_name) or "file"
+                await bot.send_document(to_chat, document=f, caption=caption, filename=name)
 
 
 async def _send_from_buf(bot, to_chat: int, buf: BytesIO, msg, caption: str):
