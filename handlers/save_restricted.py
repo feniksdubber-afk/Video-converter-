@@ -257,7 +257,7 @@ async def save_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not msg.media:
             # Oddiy matn — shunchaki yozib beramiz
             await status.edit_text(
-                f"📝 *Xabar matni:*\n\n{msg.text or '(bo'sh)'}",
+                f"📝 *Xabar matni:*\n\n{msg.text or '(bosh)'}",
                 parse_mode="Markdown"
             )
             return True
