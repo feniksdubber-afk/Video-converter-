@@ -96,7 +96,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await ensure_loaded(user_id, context)
 
     # ── Save Restricted confirm ────────────────────────────────────────────────
-    if data.startswith("sr_confirm|") or data == "sr_cancel":
+    if data.startswith("sr_confirm|") or data == "sr_cancel" or data.startswith("sr_progress|"):
         await save_confirm_callback(update, context)
         return
 
