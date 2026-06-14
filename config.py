@@ -3,7 +3,10 @@ import os
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 # Fall back to API_ID / API_HASH which are already set for the local bot-api server
 API_ID    = int(os.environ.get("TELEGRAM_API_ID") or os.environ.get("API_ID", "0"))
-API_HASH  = os.environ.get("TELEGRAM_API_HASH") or os.environ.get("API_HASH", "")
+API_HASH         = os.environ.get("TELEGRAM_API_HASH") or os.environ.get("API_HASH", "")
+
+# ── Save Restricted (userbot session) ─────────────────────────────────────
+SESSION_STRING   = os.environ.get("SESSION_STRING", "")
 
 # Local Bot API — Railway da: http://local-bot-api.railway.internal:8081/bot
 # Replit da: http://localhost:8080/bot

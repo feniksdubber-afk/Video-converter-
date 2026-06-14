@@ -79,6 +79,7 @@ from handlers.batch import (
     handle_batch_clear_files, handle_batch_run,
 )
 from handlers.r2_browser import r2_command, r2_callback, r2_rename_text, _show_r2_list_cb
+from handlers.save_restricted import save_link_handler, save_topic_handler, save_confirm_callback
 from utils.keyboards import main_menu_keyboard
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -93,6 +94,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     context.user_data["_user_id"] = user_id
     await ensure_loaded(user_id, context)
+
+    # ── Save Restricted confirm ────────────────────────────────────────────────
+    if data.startswith("sr_confirm|") or data == "sr_cancel":
+        await save_confirm_callback(update, context)
+        return
 
     # ── Post-action (yuborish / davom etish / versiya tanlash) ──
     if data == "pa_send":              await handle_pa_send(update, context);    return
@@ -350,6 +356,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     handler = dispatch.get(state)
     if handler:
         await handler(update, context)
+    elif await save_link_handler(update, context):
+        # t.me havola edi — save_restricted handle qildi
+        return
     else:
         await update.message.reply_text("📤 Video yuboring yoki /start bosing.")
 
@@ -502,6 +511,7 @@ def main():
     app.add_handler(CommandHandler("help", help_handler))
     app.add_handler(CommandHandler("settings", show_settings))
     app.add_handler(CommandHandler("r2", r2_command))
+    app.add_handler(CommandHandler("save", save_topic_handler))
 
     app.add_handler(MessageHandler(filters.VIDEO, document_handler))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
