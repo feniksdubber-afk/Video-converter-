@@ -52,9 +52,16 @@ def _progress_bar(percent: int, length: int = 12) -> str:
 # ── Havola parse ───────────────────────────────────────────────────────────
 
 def parse_tme_link(text: str):
+    """
+    Bitta xabar havolasi uchun (chat_id, msg_id) qaytaradi.
+      t.me/c/CHATID/MSGID          → (chat_id, MSGID)
+      t.me/c/CHATID/TOPICID/MSGID  → (chat_id, MSGID)
+      t.me/USERNAME/MSGID          → (username, MSGID)
+    """
     m = re.search(r"https?://t\.me/c/(\d+)/(\d+)(?:/(\d+))?", text)
     if m:
         chat_id = int("-100" + m.group(1))
+        # 3 segment bo'lsa: CHATID/TOPICID/MSGID → MSGID = group(3)
         msg_id = int(m.group(3)) if m.group(3) else int(m.group(2))
         return chat_id, msg_id
 
@@ -62,6 +69,25 @@ def parse_tme_link(text: str):
     if m2:
         return m2.group(1), int(m2.group(2))
 
+    return None, None
+
+
+def parse_topic_link(text: str):
+    """
+    Topic (forum thread) havolasi uchun (chat_id, thread_id) qaytaradi.
+      t.me/c/CHATID/TOPICID/MSGID  → (chat_id, TOPICID)
+      t.me/c/CHATID/TOPICID        → (chat_id, TOPICID)
+    Oddiy 2-segment havola (CHATID/MSGID) uchun thread_id=None.
+    """
+    m = re.search(r"https?://t\.me/c/(\d+)/(\d+)(?:/(\d+))?", text)
+    if m:
+        chat_id = int("-100" + m.group(1))
+        if m.group(3):
+            # 3 segment: CHATID/TOPICID/MSGID → thread_id = group(2)
+            return chat_id, int(m.group(2))
+        else:
+            # 2 segment: CHATID/ID → topic deb qabul qilamiz
+            return chat_id, int(m.group(2))
     return None, None
 
 
@@ -89,6 +115,7 @@ async def _download_and_send(
     msg,
     to_chat: int,
     status_msg,
+    user_id: int = 0,
 ) -> bool:
     """
     1. Pyrogram (userbot) orqali diskka yuklab oladi — progress bar bilan.
@@ -195,13 +222,22 @@ async def _download_and_send(
 
         caption = msg.caption or ""
 
-        # 4. Bot orqali yuborish (send_file: <50MB PTB, >50MB Pyrogram bot client)
-        fake_message = status_msg  # send_file message.reply_* ishlatadi
+        # 4. Foydalanuvchi sozlamasidan upload_mode olish
+        from utils.db import db_load
+        settings = await db_load(user_id)
+        upload_mode = settings.get("upload_mode", "document")
+
+        # 5. Bot orqali yuborish (send_file: <50MB PTB, >50MB Pyrogram bot client)
+        # send_file context kutadi — uni bypass qilish uchun fake context ishlatamiz
+        class _FakeCtx:
+            user_data = {"settings": settings, "_settings_loaded": True, "_user_id": user_id}
+        fake_message = status_msg
         await send_file(
             message=fake_message,
             file_path=tmp_path,
             filename=filename,
             caption=caption,
+            context=_FakeCtx(),
         )
         return True
 
@@ -226,7 +262,7 @@ async def _download_and_send_one(
         msg = await client.get_messages(from_chat, msg_id)
         if not msg or msg.empty or not msg.media:
             return False
-        return await _download_and_send(client, msg, to_chat, status_msg)
+        return await _download_and_send(client, msg, to_chat, status_msg, user_id=to_chat)
 
     except FloodWait as e:
         logger.warning(f"FloodWait {e.value}s")
@@ -337,9 +373,12 @@ async def save_topic_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("⚠️ Save Restricted funksiyasi sozlanmagan.")
         return
 
-    chat_id, thread_id = parse_tme_link(args[1])
-    if not chat_id:
-        await update.message.reply_text("❌ Havola xato.")
+    chat_id, thread_id = parse_topic_link(args[1])
+    if not chat_id or not thread_id:
+        await update.message.reply_text(
+            "❌ Havola xato.\nFormat: `https://t.me/c/CHATID/TOPICID` yoki `https://t.me/c/CHATID/TOPICID/MSGID`",
+            parse_mode="Markdown"
+        )
         return
 
     status = await update.message.reply_text("🔍 Topik skanlanmoqda...")
@@ -348,7 +387,14 @@ async def save_topic_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         media_ids = []
         async for m in client.get_chat_history(chat_id, limit=1000):
-            if (m.reply_to_message_id == thread_id or m.id == thread_id) and m.media:
+            if not m.media:
+                continue
+            # Forum supergroup: reply_to_top_message_id → topic ID
+            msg_thread = (
+                getattr(m, "reply_to_top_message_id", None)
+                or getattr(m, "reply_to_message_id", None)
+            )
+            if msg_thread == thread_id or m.id == thread_id:
                 media_ids.append(m.id)
         media_ids.sort()
 
