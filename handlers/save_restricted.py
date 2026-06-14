@@ -116,9 +116,24 @@ async def _stream_to_bytesio(client: Client, msg) -> BytesIO | None:
     if size > 50 * 1024 * 1024:
         return None  # katta fayl — diskka yukla
 
+    # Aniq media ob'ektni beramiz — thumbnail yuklanib qolmasin
+    if msg.video:
+        media_obj = msg.video
+    elif msg.document:
+        media_obj = msg.document
+    elif msg.audio:
+        media_obj = msg.audio
+    elif msg.voice:
+        media_obj = msg.voice
+    elif msg.video_note:
+        media_obj = msg.video_note
+    elif msg.photo:
+        media_obj = msg.photo
+    else:
+        media_obj = msg
+
     buf = BytesIO()
-    # stream_media faqat user client orqali — kichik fayllar uchun
-    async for chunk in client.stream_media(msg):
+    async for chunk in client.stream_media(media_obj):
         buf.write(chunk)
     buf.seek(0)
     return buf
@@ -156,12 +171,16 @@ async def _send_media_msg(client: Client, msg, to_chat: int, status_msg, use_dis
             total_mb = total_size / 1024 / 1024 if total_size else 0
             last_pct = [-1]
 
+            def _pb(p):
+                filled = int(12 * p / 100)
+                return "[" + "█" * filled + "░" * (12 - filled) + "]"
+
             async def _dl_progress(current, total):
                 if not total:
                     return
                 pct = min(int(current / total * 100), 99)
                 cur_mb = current / 1024 / 1024
-                bar = _progress_bar(pct)
+                bar = _pb(pct)
                 txt = (
                     "⬇️ *Yuklanmoqda...*\n\n"
                     + bar + f" `{pct}%`\n"
@@ -180,7 +199,23 @@ async def _send_media_msg(client: Client, msg, to_chat: int, status_msg, use_dis
                 except Exception:
                     pass
 
-            await dl_client.download_media(msg, file_name=tmp_path, progress=_dl_progress)
+            # msg emas, aniq media ob'ektni beramiz — thumbnail yuklanib qolmasin
+            if msg.video:
+                media_obj = msg.video
+            elif msg.document:
+                media_obj = msg.document
+            elif msg.audio:
+                media_obj = msg.audio
+            elif msg.voice:
+                media_obj = msg.voice
+            elif msg.video_note:
+                media_obj = msg.video_note
+            elif msg.photo:
+                media_obj = msg.photo
+            else:
+                media_obj = msg
+
+            await dl_client.download_media(media_obj, file_name=tmp_path, progress=_dl_progress)
             await _send_from_path(tg_bot, to_chat, tmp_path, msg, caption)
         finally:
             if os.path.exists(tmp_path):
