@@ -63,7 +63,27 @@ def parse_tme_link(text: str):
 
 # ── Yuklab olish va yuborish ────────────────────────────────────────────────
 
-def _progress_bar(percent: int, length: int = 12) -> str:
+async def _resolve_peer_safe(client: Client, chat_id):
+    """
+    Pyrogram peer cache'ini to'ldiradi.
+    get_chat() ko'pincha PeerIdInvalid beradi — resolve_peer() ishonchli.
+    """
+    try:
+        await client.resolve_peer(chat_id)
+        return True
+    except Exception:
+        pass
+    # Fallback: get_dialogs orqali peer'ni topishga urinish
+    try:
+        async for dialog in client.get_dialogs(limit=100):
+            if dialog.chat.id == chat_id:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+
     filled = int(length * percent / 100)
     return "[" + "█" * filled + "░" * (length - filled) + "]"
 
@@ -184,12 +204,7 @@ async def _send_from_buf(bot, to_chat: int, buf: BytesIO, msg, caption: str):
 async def _download_and_send_one(client: Client, to_chat: int, from_chat, msg_id: int, status_msg) -> bool:
     """Bitta xabarni yuklab yuboradi. True = muvaffaqiyat."""
     try:
-        # Peer cache'ini to'ldirish
-        try:
-            await client.get_chat(from_chat)
-        except Exception:
-            pass
-
+        await _resolve_peer_safe(client, from_chat)
         msg = await client.get_messages(from_chat, msg_id)
         if not msg or msg.empty or not msg.media:
             return False
@@ -256,12 +271,7 @@ async def save_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     status = await update.message.reply_text("⏳ Tekshirilmoqda...")
     try:
-        # Pyrogram peer cache'ini to'ldirish uchun avval get_chat chaqiramiz
-        try:
-            await client.get_chat(chat_id)
-        except Exception:
-            pass  # a'zo bo'lmagan bo'lsa ham davom etamiz
-
+        await _resolve_peer_safe(client, chat_id)
         msg = await client.get_messages(chat_id, msg_id)
         if not msg or msg.empty:
             await status.edit_text("❌ Xabar topilmadi. Havola to'g'riligini tekshiring.")
@@ -308,10 +318,7 @@ async def save_topic_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     status = await update.message.reply_text("🔍 Topik skanlanmoqda...")
     try:
-        try:
-            await client.get_chat(chat_id)
-        except Exception:
-            pass
+        await _resolve_peer_safe(client, chat_id)
 
         media_ids = []
         async for msg in client.get_chat_history(chat_id, limit=1000):
