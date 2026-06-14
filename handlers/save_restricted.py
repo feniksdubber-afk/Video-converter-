@@ -184,6 +184,12 @@ async def _send_from_buf(bot, to_chat: int, buf: BytesIO, msg, caption: str):
 async def _download_and_send_one(client: Client, to_chat: int, from_chat, msg_id: int, status_msg) -> bool:
     """Bitta xabarni yuklab yuboradi. True = muvaffaqiyat."""
     try:
+        # Peer cache'ini to'ldirish
+        try:
+            await client.get_chat(from_chat)
+        except Exception:
+            pass
+
         msg = await client.get_messages(from_chat, msg_id)
         if not msg or msg.empty or not msg.media:
             return False
@@ -250,6 +256,12 @@ async def save_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     status = await update.message.reply_text("⏳ Tekshirilmoqda...")
     try:
+        # Pyrogram peer cache'ini to'ldirish uchun avval get_chat chaqiramiz
+        try:
+            await client.get_chat(chat_id)
+        except Exception:
+            pass  # a'zo bo'lmagan bo'lsa ham davom etamiz
+
         msg = await client.get_messages(chat_id, msg_id)
         if not msg or msg.empty:
             await status.edit_text("❌ Xabar topilmadi. Havola to'g'riligini tekshiring.")
@@ -296,6 +308,11 @@ async def save_topic_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     status = await update.message.reply_text("🔍 Topik skanlanmoqda...")
     try:
+        try:
+            await client.get_chat(chat_id)
+        except Exception:
+            pass
+
         media_ids = []
         async for msg in client.get_chat_history(chat_id, limit=1000):
             if (msg.reply_to_message_id == thread_id or msg.id == thread_id) and msg.media:
