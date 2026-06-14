@@ -36,6 +36,16 @@ async def get_user_client() -> Client | None:
     return _user_client
 
 
+# ── Progress holati (message_id → info) ───────────────────────────────────
+_progress_state: dict = {}
+
+
+def _refresh_kb(msg_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔄 Yangilash", callback_data=f"sr_progress|{msg_id}")
+    ]])
+
+
 # ── Havola parse ────────────────────────────────────────────────────────────
 
 def parse_tme_link(text: str):
@@ -107,6 +117,7 @@ async def _stream_to_bytesio(client: Client, msg) -> BytesIO | None:
         return None  # katta fayl — diskka yukla
 
     buf = BytesIO()
+    # stream_media faqat user client orqali — kichik fayllar uchun
     async for chunk in client.stream_media(msg):
         buf.write(chunk)
     buf.seek(0)
@@ -116,10 +127,18 @@ async def _stream_to_bytesio(client: Client, msg) -> BytesIO | None:
 async def _send_media_msg(client: Client, msg, to_chat: int, status_msg, use_disk: bool):
     """Bitta xabarni yuklab olib, foydalanuvchiga yuboradi."""
     from telegram import Bot
-    # bot instance'ini status_msg orqali olamiz
+    from handlers.video_handler import get_pyrogram_client as get_bot_client
     tg_bot: Bot = status_msg.get_bot()
 
     caption = msg.caption or ""
+
+    # Faylni yuklab olish uchun bot pyrogram client ishlatamiz
+    # (Railway da user DC != media DC bo'lsa OSError chiqadi)
+    # bot_client Railway da ishlashini allaqachon tekshirdik
+    try:
+        dl_client = await get_bot_client()
+    except Exception:
+        dl_client = client  # fallback — user client
 
     if use_disk:
         # Diskka yuklab olish
@@ -135,7 +154,39 @@ async def _send_media_msg(client: Client, msg, to_chat: int, status_msg, use_dis
 
         tmp_path = os.path.join(TEMP_DIR, f"sr_{msg.id}.{ext}")
         try:
-            await client.download_media(msg, file_name=tmp_path)
+            total_size = (
+                (msg.video and msg.video.file_size) or
+                (msg.document and msg.document.file_size) or
+                (msg.audio and msg.audio.file_size) or 0
+            )
+            total_mb = total_size / 1024 / 1024 if total_size else 0
+            last_pct = [-1]
+
+            async def _dl_progress(current, total):
+                if not total:
+                    return
+                pct = min(int(current / total * 100), 99)
+                cur_mb = current / 1024 / 1024
+                bar = _progress_bar(pct)
+                txt = (
+                    "⬇️ *Yuklanmoqda...*\n\n"
+                    + bar + f" `{pct}%`\n"
+                    + f"`{cur_mb:.1f}` / `{total_mb:.1f}` MB"
+                )
+                # Global state yangilash (tugma bosilganda ishlatiladi)
+                _progress_state[status_msg.message_id] = txt
+                if pct - last_pct[0] < 10:
+                    return
+                last_pct[0] = pct
+                try:
+                    await status_msg.edit_text(
+                        txt, parse_mode="Markdown",
+                        reply_markup=_refresh_kb(status_msg.message_id)
+                    )
+                except Exception:
+                    pass
+
+            await dl_client.download_media(msg, file_name=tmp_path, progress=_dl_progress)
             await _send_from_path(tg_bot, to_chat, tmp_path, msg, caption)
         finally:
             if os.path.exists(tmp_path):
@@ -284,8 +335,14 @@ async def save_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return True
 
-        await status.edit_text("⬇️ Yuklanmoqda...")
+        _progress_state[status.message_id] = "⬇️ *Yuklanmoqda...*"
+        await status.edit_text(
+            "⬇️ *Yuklanmoqda...*",
+            parse_mode="Markdown",
+            reply_markup=_refresh_kb(status.message_id)
+        )
         ok = await _download_and_send_one(client, update.effective_chat.id, chat_id, msg_id, status)
+        _progress_state.pop(status.message_id, None)
         if ok:
             await status.delete()
         else:
@@ -353,8 +410,16 @@ async def save_topic_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def save_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """✅ Ha tugmasi bosilganda."""
+    """Ha/Bekor/Progress tugmalari."""
     query = update.callback_query
+
+    # 🔄 Yangilash tugmasi
+    if query.data.startswith("sr_progress|"):
+        msg_id = int(query.data.split("|")[1])
+        txt = _progress_state.get(msg_id, "⏳ Ma'lumot yo'q.")
+        await query.answer(txt[:200], show_alert=True)
+        return
+
     await query.answer()
 
     if query.data == "sr_cancel":
@@ -373,6 +438,11 @@ async def save_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text("⚠️ Userbot ulanmagan.")
         return
 
-    await query.edit_message_text("📦 Yuklanmoqda...")
+    _progress_state[query.message.message_id] = "📦 *Yuklanmoqda...*"
+    await query.edit_message_text(
+        "📦 *Yuklanmoqda...*",
+        parse_mode="Markdown",
+        reply_markup=_refresh_kb(query.message.message_id)
+    )
     context.bot_data.pop(key, None)
     await _send_batch(client, query.message.chat.id, data["chat_id"], data["ids"], query.message)
