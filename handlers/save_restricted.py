@@ -127,18 +127,12 @@ async def _stream_to_bytesio(client: Client, msg) -> BytesIO | None:
 async def _send_media_msg(client: Client, msg, to_chat: int, status_msg, use_disk: bool):
     """Bitta xabarni yuklab olib, foydalanuvchiga yuboradi."""
     from telegram import Bot
-    from handlers.video_handler import get_pyrogram_client as get_bot_client
     tg_bot: Bot = status_msg.get_bot()
 
     caption = msg.caption or ""
 
-    # Faylni yuklab olish uchun bot pyrogram client ishlatamiz
-    # (Railway da user DC != media DC bo'lsa OSError chiqadi)
-    # bot_client Railway da ishlashini allaqachon tekshirdik
-    try:
-        dl_client = await get_bot_client()
-    except Exception:
-        dl_client = client  # fallback — user client
+    # download_media faqat msg ni olgan client orqali ishlaydi (file_reference sessiyaga bog'liq)
+    dl_client = client
 
     if use_disk:
         # Diskka yuklab olish
@@ -252,10 +246,11 @@ async def _send_from_buf(bot, to_chat: int, buf: BytesIO, msg, caption: str):
         await bot.send_document(to_chat, document=buf, caption=caption, filename=name)
 
 
-async def _download_and_send_one(client: Client, to_chat: int, from_chat, msg_id: int, status_msg) -> bool:
+async def _download_and_send_one(client: Client, to_chat: int, from_chat, msg_id: int, status_msg, _retry: int = 0) -> bool:
     """Bitta xabarni yuklab yuboradi. True = muvaffaqiyat."""
     try:
         await _resolve_peer_safe(client, from_chat)
+        # Har safar yangi msg olamiz — file_reference yangilanadi
         msg = await client.get_messages(from_chat, msg_id)
         if not msg or msg.empty or not msg.media:
             return False
@@ -275,7 +270,15 @@ async def _download_and_send_one(client: Client, to_chat: int, from_chat, msg_id
     except FloodWait as e:
         logger.warning(f"FloodWait {e.value}s")
         await asyncio.sleep(e.value)
-        return await _download_and_send_one(client, to_chat, from_chat, msg_id, status_msg)
+        return await _download_and_send_one(client, to_chat, from_chat, msg_id, status_msg, _retry)
+    except OSError as e:
+        # Railway cross-DC ulanish muammosi — qayta urinish
+        if _retry < 3:
+            logger.warning(f"OSError msg {msg_id}, retry {_retry+1}/3: {e}")
+            await asyncio.sleep(2 * (_retry + 1))
+            return await _download_and_send_one(client, to_chat, from_chat, msg_id, status_msg, _retry + 1)
+        logger.error(f"msg {msg_id} OSError (3 retry ham ishlamadi): {e}")
+        return False
     except Exception as e:
         logger.error(f"msg {msg_id} xato: {e}")
         return False
