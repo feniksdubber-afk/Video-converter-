@@ -308,6 +308,7 @@ async def handle_hls_quality(update: Update, context: ContextTypes.DEFAULT_TYPE,
     ok, master_path, err = await convert_to_hls_async(
         video_path, hls_dir, qualities, status_msg,
         audio_tracks=audio_tracks if multi_audio else None,
+        user_id=context.user_data.get("_user_id", query.from_user.id),
     )
 
     if not ok:
