@@ -135,7 +135,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if data == "cat_r2":
         await query.answer()
-        await _show_r2_list_cb(query, page=0)
+        await _show_r2_list_cb(query, context, page=0)
         return
 
     # ── Umumiy ──────────────────────────────────────────────
