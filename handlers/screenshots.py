@@ -34,7 +34,10 @@ async def handle_screenshots_count(update: Update, context: ContextTypes.DEFAULT
         parse_mode="Markdown",
     )
 
-    ok, paths, err = await take_screenshots_async(video_path, count, status_msg=query.message)
+    ok, paths, err = await take_screenshots_async(
+        video_path, count, status_msg=query.message,
+        user_id=context.user_data.get("_user_id", query.from_user.id),
+    )
 
     if ok and paths:
         await query.message.reply_text(f"✅ {len(paths)} ta skrinsot olindi! Yuborilmoqda...")
