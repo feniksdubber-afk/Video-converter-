@@ -46,8 +46,16 @@ async def run_ffmpeg_async(
     label: str = "Ishlanmoqda",
     input_path: str = None,
     timeout: int = 1800,
+    user_id: int = 0,
 ) -> tuple[bool, str]:
     """FFmpeg ni async + progress foizi bilan ishlatadi."""
+    from utils.task_manager import (
+        register_task, set_task_proc, is_cancelled, clear_task, progress_keyboard,
+    )
+
+    if user_id:
+        register_task(user_id, label=label)
+
     cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-nostats"] + args
     duration_sec = 0.0
     if input_path:
@@ -60,6 +68,16 @@ async def run_ffmpeg_async(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        if user_id:
+            set_task_proc(user_id, proc)
+            try:
+                await status_msg.edit_text(
+                    f"⚙️ *{label}...*\n\n{_progress_bar(0)} `0%`",
+                    reply_markup=progress_keyboard(True),
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
 
         last_percent = -1
         stderr_chunks = []
@@ -75,6 +93,9 @@ async def run_ffmpeg_async(
         async def _read_stdout():
             nonlocal current_time, last_percent
             async for raw_line in proc.stdout:
+                if user_id and is_cancelled(user_id):
+                    proc.kill()
+                    break
                 line = raw_line.decode(errors="replace").strip()
 
                 m = re.search(r"out_time_ms=(\d+)", line)
@@ -90,9 +111,11 @@ async def run_ffmpeg_async(
                     if percent - last_percent >= 5:
                         last_percent = percent
                         bar = _progress_bar(percent)
+                        kb = progress_keyboard(bool(user_id))
                         try:
                             await status_msg.edit_text(
                                 f"⚙️ *{label}...*\n\n{bar} `{percent}%`",
+                                reply_markup=kb,
                                 parse_mode="Markdown",
                             )
                         except Exception:
@@ -108,6 +131,9 @@ async def run_ffmpeg_async(
         await asyncio.wait_for(proc.wait(), timeout=30)
         await stderr_task
         stderr_text = "".join(stderr_chunks)
+
+        if user_id and is_cancelled(user_id):
+            return False, "Bekor qilindi"
 
         if proc.returncode != 0:
             return False, stderr_text[-2000:] if stderr_text else "Noma'lum xato"
@@ -132,6 +158,9 @@ async def run_ffmpeg_async(
             except Exception:
                 pass
         return False, str(e)
+    finally:
+        if user_id:
+            clear_task(user_id)
 
 
 def _progress_bar(percent: int, length: int = 12) -> str:
@@ -241,7 +270,7 @@ def convert_video(input_path: str, output_format: str) -> tuple[bool, str, str]:
     return ok, output_path, err
 
 
-async def convert_video_async(input_path: str, output_format: str, status_msg) -> tuple[bool, str, str]:
+async def convert_video_async(input_path: str, output_format: str, status_msg, user_id: int = 0) -> tuple[bool, str, str]:
     output_path = make_temp_path(output_format)
     threads = _thread_count()
     codec_map = {
@@ -261,11 +290,12 @@ async def convert_video_async(input_path: str, output_format: str, status_msg) -
         args, status_msg,
         label=f"{output_format.upper()} formatiga o'tkazilmoqda",
         input_path=input_path,
+        user_id=user_id,
     )
     return ok, output_path, err
 
 
-async def change_resolution_async(input_path: str, height: int, status_msg) -> tuple[bool, str, str]:
+async def change_resolution_async(input_path: str, height: int, status_msg, user_id: int = 0) -> tuple[bool, str, str]:
     output_path = make_temp_path("mp4")
     threads = _thread_count()
     args = [
@@ -281,6 +311,7 @@ async def change_resolution_async(input_path: str, height: int, status_msg) -> t
         args, status_msg,
         label=f"{height}p o'lchamiga o'zgartirilmoqda",
         input_path=input_path,
+        user_id=user_id,
     )
     return ok, output_path, err
 
@@ -301,7 +332,7 @@ def change_resolution(input_path: str, height: int) -> tuple[bool, str, str]:
     return ok, output_path, err
 
 
-async def compress_video_async(input_path: str, quality: str, status_msg) -> tuple[bool, str, str]:
+async def compress_video_async(input_path: str, quality: str, status_msg, user_id: int = 0) -> tuple[bool, str, str]:
     output_path = make_temp_path("mp4")
     threads = _thread_count()
     crf_map = {"high": "23", "medium": "28", "low": "35"}
@@ -319,6 +350,7 @@ async def compress_video_async(input_path: str, quality: str, status_msg) -> tup
         args, status_msg,
         label=labels.get(quality, "Siqilmoqda"),
         input_path=input_path,
+        user_id=user_id,
     )
     return ok, output_path, err
 
@@ -460,7 +492,7 @@ async def _run_in_executor(func, *args):
 
 
 async def trim_video_async(
-    input_path: str, start: str, end: str, status_msg=None
+    input_path: str, start: str, end: str, status_msg=None, user_id: int = 0
 ) -> tuple[bool, str, str]:
     """status_msg berilsa progress bar ko'rsatadi, aks holda thread pool ishlatadi."""
     if status_msg is None:
@@ -474,25 +506,25 @@ async def trim_video_async(
         output_path,
     ]
     ok, err = await run_ffmpeg_async(
-        args, status_msg, label="Video kesil moqda", input_path=input_path
+        args, status_msg, label="Video kesilmoqda", input_path=input_path, user_id=user_id,
     )
     return ok, output_path, err
 
 
-async def remove_audio_async(input_path: str, status_msg=None) -> tuple[bool, str, str]:
+async def remove_audio_async(input_path: str, status_msg=None, user_id: int = 0) -> tuple[bool, str, str]:
     """status_msg berilsa progress bar ko'rsatadi."""
     if status_msg is None:
         return await _run_in_executor(remove_audio, input_path)
     output_path = make_temp_path("mp4")
     args = ["-i", input_path, "-c:v", "copy", "-an", output_path]
     ok, err = await run_ffmpeg_async(
-        args, status_msg, label="Ovoz o'chirilmoqda", input_path=input_path
+        args, status_msg, label="Ovoz o'chirilmoqda", input_path=input_path, user_id=user_id,
     )
     return ok, output_path, err
 
 
 async def video_to_audio_async(
-    input_path: str, audio_format: str, status_msg=None
+    input_path: str, audio_format: str, status_msg=None, user_id: int = 0
 ) -> tuple[bool, str, str]:
     """status_msg berilsa progress bar ko'rsatadi."""
     if status_msg is None:
@@ -512,30 +544,41 @@ async def video_to_audio_async(
         args, status_msg,
         label=f"{audio_format.upper()} ga o'tkazilmoqda",
         input_path=input_path,
+        user_id=user_id,
     )
     return ok, output_path, err
 
 
 async def take_screenshots_async(
-    input_path: str, count: int, status_msg=None
+    input_path: str, count: int, status_msg=None, user_id: int = 0
 ) -> tuple[bool, list[str], str]:
     """status_msg berilsa har bir skrinsotdan keyin progress yangilanadi."""
+    from utils.task_manager import is_cancelled, progress_keyboard, register_task, clear_task
     if status_msg is None:
         return await _run_in_executor(take_screenshots, input_path, count)
+    if user_id:
+        register_task(user_id, label="Skrinsot")
     duration = get_video_duration(input_path)
     if duration <= 0:
+        if user_id:
+            clear_task(user_id)
         return False, [], "Video davomiyligini aniqlab bo'lmadi"
     paths = []
     interval = duration / (count + 1)
     err_msg = ""
     loop = asyncio.get_running_loop()
+    kb = progress_keyboard(bool(user_id))
     for i in range(count):
+        if user_id and is_cancelled(user_id):
+            clear_task(user_id)
+            return len(paths) > 0, paths, "Bekor qilindi"
         timestamp = interval * (i + 1)
         pct = int(i / count * 100)
         bar = _progress_bar(pct)
         try:
             await status_msg.edit_text(
                 f"⚙️ *Skrinsot olinmoqda...*\n\n{bar} `{i}/{count}`",
+                reply_markup=kb,
                 parse_mode="Markdown",
             )
         except Exception:
@@ -559,11 +602,13 @@ async def take_screenshots_async(
         )
     except Exception:
         pass
+    if user_id:
+        clear_task(user_id)
     return len(paths) > 0, paths, err_msg
 
 
 async def take_manual_shot_async(
-    input_path: str, timestamp: str, status_msg=None
+    input_path: str, timestamp: str, status_msg=None, user_id: int = 0
 ) -> tuple[bool, str, str]:
     """status_msg berilsa holat xabari yangilanadi."""
     if status_msg is None:
@@ -581,7 +626,7 @@ async def take_manual_shot_async(
 
 
 async def softsub_video_async(
-    video_path: str, subtitle_path: str, status_msg=None
+    video_path: str, subtitle_path: str, status_msg=None, user_id: int = 0
 ) -> tuple[bool, str, str]:
     """status_msg berilsa progress bar ko'rsatadi."""
     if status_msg is None:
@@ -601,6 +646,7 @@ async def softsub_video_async(
         args, status_msg,
         label="Subtitr birlashtirilmoqda",
         input_path=video_path,
+        user_id=user_id,
     )
     return ok, output_path, err
 
@@ -609,6 +655,7 @@ async def downscale_for_telegram_async(
     input_path: str,
     target_height: int,
     status_msg,
+    user_id: int = 0,
 ) -> tuple[bool, str, str]:
     """Videoni target_height balandligiga tushiradi (Telegram uchun) → MP4.
 
@@ -629,6 +676,7 @@ async def downscale_for_telegram_async(
         args, status_msg,
         label=f"{target_height}p ga sifat tushirilmoqda",
         input_path=input_path,
+        user_id=user_id,
     )
     return ok, output_path, err
 
@@ -639,6 +687,7 @@ async def hardsub_video_async(
     font_size: int,
     status_msg,
     is_ass: bool = False,
+    user_id: int = 0,
 ) -> tuple[bool, str, str]:
     """Subtitle ni video kadrlariga yoqib qo'yadi (hardsub) → MP4."""
     output_path = make_temp_path("mp4")
@@ -672,6 +721,7 @@ async def hardsub_video_async(
         args, status_msg,
         label="Hardsub qo'shilmoqda",
         input_path=video_path,
+        user_id=user_id,
     )
     return ok, output_path, err
 
@@ -683,6 +733,7 @@ async def convert_to_hls_async(
     qualities: list[dict],
     status_msg=None,
     audio_tracks: list[dict] | None = None,
+    user_id: int = 0,
 ) -> tuple[bool, str, str]:
     """
     Videoni HLS formatiga o'tkazadi (adaptive multi-quality + multi-audio).
@@ -805,14 +856,21 @@ async def convert_to_hls_async(
         os.makedirs(os.path.join(output_dir, f"stream_{i}"), exist_ok=True)
 
     # ── FFmpeg ni ishga tushirish ─────────────────────────────────────
+    from utils.task_manager import (
+        register_task, set_task_proc, is_cancelled, clear_task, progress_keyboard,
+    )
+    if user_id:
+        register_task(user_id, label="HLS konvertatsiya")
+
     if status_msg:
         quality_names = " + ".join(f"{q['height']}p" for q in qualities)
+        kb = progress_keyboard(bool(user_id))
         try:
             await status_msg.edit_text(
                 f"⚙️ *FFmpeg ishlayapti...*\n"
                 f"📊 Sifatlar: {quality_names}\n\n"
-                f"`[░░░░░░░░░░░░░░]` Hisoblanyapti...\n"
-                f"_(Bu bir necha daqiqa vaqt olishi mumkin)_",
+                f"`[░░░░░░░░░░░░░░]` Hisoblanyapti...",
+                reply_markup=kb,
                 parse_mode="Markdown",
             )
         except Exception:
@@ -821,11 +879,12 @@ async def convert_to_hls_async(
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
-            stdout=asyncio.subprocess.DEVNULL,   # PIPE ishlatilmaydi → deadlock oldini olish
+            stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
+        if user_id:
+            set_task_proc(user_id, proc)
 
-        # FFmpeg progress ni stderr dan o'qish (time=XX:XX:XX)
         last_update = 0.0
         stderr_lines: list[str] = []
 
@@ -833,18 +892,20 @@ async def convert_to_hls_async(
             nonlocal last_update
             assert proc.stderr is not None
             async for line in proc.stderr:
+                if user_id and is_cancelled(user_id):
+                    proc.kill()
+                    break
                 text = line.decode(errors="replace").strip()
                 stderr_lines.append(text)
-                # "time=HH:MM:SS" ni qidirish
                 if "time=" in text and status_msg:
-                    import time
-                    now = time.monotonic()
-                    if now - last_update >= 5:   # har 5 soniyada yangilash
+                    import time as _time
+                    now = _time.monotonic()
+                    if now - last_update >= 5:
                         last_update = now
                         try:
                             await status_msg.edit_text(
-                                f"⚙️ *FFmpeg ishlayapti...*\n\n"
-                                f"`{text[-80:]}`",
+                                f"⚙️ *FFmpeg ishlayapti...*\n\n`{text[-80:]}`",
+                                reply_markup=progress_keyboard(bool(user_id)),
                                 parse_mode="Markdown",
                             )
                         except Exception:
@@ -852,6 +913,10 @@ async def convert_to_hls_async(
 
         await _read_stderr()
         await proc.wait()
+
+        if user_id and is_cancelled(user_id):
+            clear_task(user_id)
+            return False, "", "Bekor qilindi"
 
         if proc.returncode != 0:
             err_text = "\n".join(stderr_lines[-20:])
@@ -886,3 +951,6 @@ async def convert_to_hls_async(
         return False, "", "FFmpeg topilmadi. Serverda FFmpeg o'rnatilganini tekshiring."
     except Exception as e:
         return False, "", str(e)
+    finally:
+        if user_id:
+            clear_task(user_id)
