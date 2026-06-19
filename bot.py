@@ -81,7 +81,7 @@ from handlers.batch import (
 )
 from handlers.r2_browser import r2_command, r2_callback, r2_rename_text, r2_mkdir_text, _show_r2_list_cb
 from handlers.save_restricted import save_link_handler, save_topic_handler, save_confirm_callback
-from handlers.auth_handlers import auth_gate, allow_handler, deny_handler, users_handler
+from utils.auth_handlers import auth_gate, allow_handler, deny_handler, users_handler
 from utils.auth import reload_auth
 from utils.task_manager import cancel_task, clear_task
 from utils.keyboards import main_menu_keyboard
