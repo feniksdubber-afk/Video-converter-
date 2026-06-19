@@ -139,6 +139,7 @@ async def handle_crop_custom_text(update: Update, context: ContextTypes.DEFAULT_
 
     ok, err = await run_ffmpeg_async(
         args, status_msg, label=label, input_path=video_path,
+        user_id=update.effective_user.id,
     )
 
     if ok and os.path.exists(output_path):
@@ -175,6 +176,7 @@ async def _do_crop(query, context, video_path: str, vf: str, label: str, suffix:
 
     ok, err = await run_ffmpeg_async(
         args, status_msg, label=label, input_path=video_path,
+        user_id=context.user_data.get("_user_id", query.from_user.id),
     )
 
     if ok and os.path.exists(output_path):
