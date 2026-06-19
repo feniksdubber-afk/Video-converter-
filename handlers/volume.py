@@ -85,6 +85,7 @@ async def handle_volume_choice(update: Update, context: ContextTypes.DEFAULT_TYP
         args, status_msg,
         label=f"Ovoz: {label}",
         input_path=video_path,
+        user_id=context.user_data.get("_user_id", query.from_user.id),
     )
 
     if ok and os.path.exists(output_path):
