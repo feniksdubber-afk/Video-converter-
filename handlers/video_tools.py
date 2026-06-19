@@ -206,7 +206,8 @@ async def handle_sample_from(update: Update, context: ContextTypes.DEFAULT_TYPE,
     ]
     ok, err = await run_ffmpeg_async(
         args, status_msg, label="Namuna yaratilmoqda",
-        input_path=None,  # -t bilan progress boshqacha, manual
+        input_path=None,
+        user_id=context.user_data.get("_user_id", query.from_user.id),
     )
     # run_ffmpeg_async duration aniqlay olmasa — oddiy subprocess
     if not ok:
@@ -491,6 +492,7 @@ async def handle_merge_go(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ffmpeg_args, status_msg,
         label=f"{len(all_videos)} ta video birlashtirilmoqda",
         input_path=all_videos[0],
+        user_id=context.user_data.get("_user_id", query.from_user.id),
     )
     try:
         os.remove(list_path)
@@ -598,6 +600,7 @@ async def handle_vid_aud_merge_received(update: Update, context: ContextTypes.DE
         ffmpeg_args, status,
         label="Video + Audio birlashtirilmoqda",
         input_path=video_path,
+        user_id=context.user_data.get("_user_id", update.effective_user.id),
     )
     try:
         os.remove(audio_path)
