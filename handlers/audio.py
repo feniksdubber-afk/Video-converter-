@@ -17,7 +17,10 @@ async def show_remove_audio_menu(update: Update, context: ContextTypes.DEFAULT_T
 
     await query.edit_message_text("⏳ *Ovoz o'chirilmoqda...*\n\nKuting...", parse_mode="Markdown")
 
-    ok, output_path, err = await remove_audio_async(video_path, status_msg=query.message)
+    ok, output_path, err = await remove_audio_async(
+        video_path, status_msg=query.message,
+        user_id=context.user_data.get("_user_id", query.from_user.id),
+    )
 
     if ok and os.path.exists(output_path):
         video_name = context.user_data.get("video_name", "video")
@@ -58,7 +61,10 @@ async def handle_audio_format(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"⏳ *{fmt.upper()} formatiga o'tkazilmoqda...*\n\nKuting...", parse_mode="Markdown"
     )
 
-    ok, output_path, err = await video_to_audio_async(video_path, fmt, status_msg=query.message)
+    ok, output_path, err = await video_to_audio_async(
+        video_path, fmt, status_msg=query.message,
+        user_id=context.user_data.get("_user_id", query.from_user.id),
+    )
 
     if ok and os.path.exists(output_path):
         video_name = context.user_data.get("video_name", "video")
