@@ -164,9 +164,18 @@ async def _upload_to_r2(message: Message, file_path: str, filename: str, file_si
             pass
 
     try:
-        # S3 object key uchun fayl nomini tozalash (bo'shliq/qavslar muammo qilmasligi uchun)
-        safe_filename = sanitize_filename(filename)
-        url = await r2_upload(file_path, safe_filename, progress_cb=progress_cb)
+        # S3 object key
+        if r2_object_key:
+            safe_key = r2_object_key
+        else:
+            from config import R2_USER_PREFIX
+            from utils.r2_manager import user_upload_key
+            uid = context.user_data.get("_user_id", 0) if context else 0
+            if uid:
+                safe_key = user_upload_key(uid, filename, R2_USER_PREFIX)
+            else:
+                safe_key = sanitize_filename(filename)
+        url = await r2_upload(file_path, safe_key, progress_cb=progress_cb)
 
         # Eski yozuvlarni tozalash (xotira sizintisini oldini olish)
         _cleanup_r2_pending()
@@ -211,6 +220,10 @@ async def send_file(
     caption: str = "",
     context=None,
     force_r2: bool = False,
+    force_document: bool = False,
+    target_chat_id: int | None = None,
+    message_thread_id: int | None = None,
+    r2_object_key: str | None = None,
 ):
     file_size = os.path.getsize(file_path)
     ext = os.path.splitext(filename)[1].lower()
@@ -218,9 +231,13 @@ async def send_file(
     is_audio = ext in AUDIO_EXTENSIONS
 
     upload_mode = "document"
-    if context is not None:
+    if context is not None and not force_document:
         from utils.user_settings import get as get_setting
         upload_mode = get_setting(context, "upload_mode")
+    elif force_document:
+        upload_mode = "document"
+
+    dest_chat = target_chat_id or message.chat_id
 
     # Thumbnail
     meta = {}
@@ -272,25 +289,50 @@ async def send_file(
     # ─── <= 50 MB → PTB ──────────────────────────────────────────────────
     if file_size <= TELEGRAM_LIMIT:
         try:
+            send_kw = {}
+            if message_thread_id:
+                send_kw["message_thread_id"] = message_thread_id
             with open(file_path, "rb") as f:
                 if upload_mode == "video" and is_video:
                     thumb_file = open(thumb_path, "rb") if thumb_path else None
                     try:
-                        await message.reply_video(
-                            video=f, filename=filename, caption=caption,
-                            duration=meta.get("duration") or None,
-                            width=meta.get("width") or None,
-                            height=meta.get("height") or None,
-                            thumbnail=thumb_file,
-                            supports_streaming=True,
-                        )
+                        if dest_chat == message.chat_id:
+                            await message.reply_video(
+                                video=f, filename=filename, caption=caption,
+                                duration=meta.get("duration") or None,
+                                width=meta.get("width") or None,
+                                height=meta.get("height") or None,
+                                thumbnail=thumb_file,
+                                supports_streaming=True,
+                                **send_kw,
+                            )
+                        else:
+                            await message.get_bot().send_video(
+                                chat_id=dest_chat, video=f, filename=filename, caption=caption,
+                                duration=meta.get("duration") or None,
+                                width=meta.get("width") or None,
+                                height=meta.get("height") or None,
+                                thumbnail=thumb_file,
+                                supports_streaming=True,
+                                **send_kw,
+                            )
                     finally:
                         if thumb_file:
                             thumb_file.close()
                 elif upload_mode == "audio" and is_audio:
-                    await message.reply_audio(audio=f, filename=filename, caption=caption)
+                    if dest_chat == message.chat_id:
+                        await message.reply_audio(audio=f, filename=filename, caption=caption, **send_kw)
+                    else:
+                        await message.get_bot().send_audio(
+                            chat_id=dest_chat, audio=f, filename=filename, caption=caption, **send_kw,
+                        )
                 else:
-                    await message.reply_document(document=f, filename=filename, caption=caption)
+                    if dest_chat == message.chat_id:
+                        await message.reply_document(document=f, filename=filename, caption=caption, **send_kw)
+                    else:
+                        await message.get_bot().send_document(
+                            chat_id=dest_chat, document=f, filename=filename, caption=caption, **send_kw,
+                        )
         finally:
             if custom_thumb_tmp and os.path.exists(custom_thumb_tmp):
                 os.remove(custom_thumb_tmp)
@@ -322,27 +364,33 @@ async def send_file(
                 pass
 
     try:
+        pyro_kw = {}
+        if message_thread_id:
+            pyro_kw["reply_to_message_id"] = message_thread_id  # Pyrogram forum topic
         if upload_mode == "video" and is_video:
             await client.send_video(
-                chat_id=message.chat_id, video=file_path,
+                chat_id=dest_chat, video=file_path,
                 file_name=filename, caption=caption,
                 duration=meta.get("duration") or None,
                 width=meta.get("width") or None,
                 height=meta.get("height") or None,
                 thumb=thumb_path, supports_streaming=True,
                 progress=progress,
+                **pyro_kw,
             )
         elif upload_mode == "audio" and is_audio:
             await client.send_audio(
-                chat_id=message.chat_id, audio=file_path,
+                chat_id=dest_chat, audio=file_path,
                 file_name=filename, caption=caption,
                 progress=progress,
+                **pyro_kw,
             )
         else:
             await client.send_document(
-                chat_id=message.chat_id, document=file_path,
+                chat_id=dest_chat, document=file_path,
                 file_name=filename, caption=caption,
                 progress=progress,
+                **pyro_kw,
             )
     finally:
         if custom_thumb_tmp and os.path.exists(custom_thumb_tmp):
