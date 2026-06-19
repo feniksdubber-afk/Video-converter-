@@ -114,6 +114,7 @@ async def _do_hardsub(message, context, sub_path: str, font_size: int, is_ass: b
 
     ok, output_path, err = await hardsub_video_async(
         video_path, sub_path, font_size, status_msg, is_ass=is_ass,
+        user_id=context.user_data.get("_user_id", 0),
     )
 
     if os.path.exists(sub_path):
