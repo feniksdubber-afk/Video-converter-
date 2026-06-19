@@ -1,21 +1,37 @@
+"""
+save_restricted.py — Restricted kanallardan media yuklab olish.
+
+Yangi imkoniyatlar:
+  - ARCHIVE_GROUP_ID → forum topic ga avtomatik saqlash
+  - force_document → format saqlanadi
+  - Album (media_group) qo'llab-quvvatlash
+  - Jarayon davomida bekor qilish
+  - To'g'ri user_id (guruh emas)
+"""
+
 import asyncio
+import hashlib
 import logging
 import os
 import re
-from io import BytesIO
+import time
 
 from pyrogram import Client
 from pyrogram.errors import FloodWait
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 
-from config import API_ID, API_HASH, SESSION_STRING, TEMP_DIR
+from config import API_ID, API_HASH, SESSION_STRING, TEMP_DIR, ARCHIVE_GROUP_ID, AUTO_CREATE_TOPIC
+from utils.task_manager import (
+    register_task, is_cancelled, clear_task, progress_keyboard, cancel_task,
+)
 
 logger = logging.getLogger(__name__)
 
-# ── Userbot client ─────────────────────────────────────────────────────────
 _user_client: Client | None = None
 _user_lock = asyncio.Lock()
+
+_progress_state: dict = {}
 
 
 async def get_user_client() -> Client | None:
@@ -34,14 +50,13 @@ async def get_user_client() -> Client | None:
     return _user_client
 
 
-# ── Progress holati ────────────────────────────────────────────────────────
-_progress_state: dict = {}
-
-
 def _refresh_kb(msg_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("🔄 Yangilash", callback_data=f"sr_progress|{msg_id}")
-    ]])
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔄 Yangilash", callback_data=f"sr_progress|{msg_id}"),
+            InlineKeyboardButton("❌ Bekor", callback_data="sr_cancel_run"),
+        ],
+    ])
 
 
 def _progress_bar(percent: int, length: int = 12) -> str:
@@ -49,49 +64,28 @@ def _progress_bar(percent: int, length: int = 12) -> str:
     return "[" + "█" * filled + "░" * (length - filled) + "]"
 
 
-# ── Havola parse ───────────────────────────────────────────────────────────
-
 def parse_tme_link(text: str):
-    """
-    Bitta xabar havolasi uchun (chat_id, msg_id) qaytaradi.
-      t.me/c/CHATID/MSGID          → (chat_id, MSGID)
-      t.me/c/CHATID/TOPICID/MSGID  → (chat_id, MSGID)
-      t.me/USERNAME/MSGID          → (username, MSGID)
-    """
     m = re.search(r"https?://t\.me/c/(\d+)/(\d+)(?:/(\d+))?", text)
     if m:
         chat_id = int("-100" + m.group(1))
-        # 3 segment bo'lsa: CHATID/TOPICID/MSGID → MSGID = group(3)
         msg_id = int(m.group(3)) if m.group(3) else int(m.group(2))
         return chat_id, msg_id
 
     m2 = re.search(r"https?://t\.me/(?!c/)([A-Za-z][A-Za-z0-9_]{3,})/(\d+)", text)
     if m2:
         return m2.group(1), int(m2.group(2))
-
     return None, None
 
 
 def parse_topic_link(text: str):
-    """
-    Topic (forum thread) havolasi uchun (chat_id, thread_id) qaytaradi.
-      t.me/c/CHATID/TOPICID/MSGID  → (chat_id, TOPICID)
-      t.me/c/CHATID/TOPICID        → (chat_id, TOPICID)
-    Oddiy 2-segment havola (CHATID/MSGID) uchun thread_id=None.
-    """
     m = re.search(r"https?://t\.me/c/(\d+)/(\d+)(?:/(\d+))?", text)
     if m:
         chat_id = int("-100" + m.group(1))
         if m.group(3):
-            # 3 segment: CHATID/TOPICID/MSGID → thread_id = group(2)
             return chat_id, int(m.group(2))
-        else:
-            # 2 segment: CHATID/ID → topic deb qabul qilamiz
-            return chat_id, int(m.group(2))
+        return chat_id, int(m.group(2))
     return None, None
 
-
-# ── Peer resolve ───────────────────────────────────────────────────────────
 
 async def _resolve_peer_safe(client: Client, chat_id):
     try:
@@ -100,7 +94,7 @@ async def _resolve_peer_safe(client: Client, chat_id):
     except Exception:
         pass
     try:
-        async for dialog in client.get_dialogs(limit=100):
+        async for dialog in client.get_dialogs(limit=200):
             if dialog.chat.id == chat_id:
                 return True
     except Exception:
@@ -108,75 +102,106 @@ async def _resolve_peer_safe(client: Client, chat_id):
     return False
 
 
-# ── Asosiy yuklash + yuborish ──────────────────────────────────────────────
+def _resolve_filename(msg) -> str:
+    """Asl fayl nomini saqlash."""
+    if msg.document and msg.document.file_name:
+        return msg.document.file_name
+    if msg.video and msg.video.file_name:
+        return msg.video.file_name
+    if msg.audio and msg.audio.file_name:
+        return msg.audio.file_name
+    cap = (msg.caption or "").strip()
+    if cap and len(cap) < 120 and not cap.startswith("http"):
+        ext = _guess_ext(msg)
+        safe = re.sub(r'[<>:"/\\|?*]', "_", cap)[:80]
+        return f"{safe}{ext}"
+    ext = _guess_ext(msg)
+    return f"media_{msg.id}{ext}"
+
+
+def _guess_ext(msg) -> str:
+    if msg.document and msg.document.file_name:
+        e = os.path.splitext(msg.document.file_name)[1]
+        if e:
+            return e
+    if msg.video:
+        return ".mp4"
+    if msg.audio:
+        return ".mp3"
+    if msg.photo:
+        return ".jpg"
+    if msg.voice:
+        return ".ogg"
+    if msg.video_note:
+        return ".mp4"
+    return ".bin"
+
+
+def _media_obj(msg):
+    if msg.video:
+        return msg.video
+    if msg.document:
+        return msg.document
+    if msg.audio:
+        return msg.audio
+    if msg.voice:
+        return msg.voice
+    if msg.video_note:
+        return msg.video_note
+    if msg.photo:
+        return msg.photo
+    return msg
+
+
+async def _ensure_archive_topic(bot, topic_name: str) -> tuple[int, int | None]:
+    """ARCHIVE_GROUP_ID ga topic yaratadi yoki mavjud chat qaytaradi."""
+    if not ARCHIVE_GROUP_ID:
+        return None, None
+    chat_id = ARCHIVE_GROUP_ID
+    thread_id = None
+    if AUTO_CREATE_TOPIC:
+        name = topic_name[:128] or f"Save {time.strftime('%d.%m %H:%M')}"
+        try:
+            topic = await bot.create_forum_topic(chat_id=chat_id, name=name)
+            thread_id = topic.message_thread_id
+        except Exception as e:
+            logger.warning("Topic yaratish xato: %s", e)
+    return chat_id, thread_id
+
 
 async def _download_and_send(
     pyro_client: Client,
     msg,
-    to_chat: int,
     status_msg,
-    user_id: int = 0,
+    user_id: int,
+    dest_chat_id: int,
+    dest_thread_id: int | None,
+    bot,
 ) -> bool:
-    """
-    1. Pyrogram (userbot) orqali diskka yuklab oladi — progress bar bilan.
-    2. Bot (HTTP API) orqali foydalanuvchiga yuboradi.
-       50MB dan katta bo'lsa sender.py → Pyrogram MTProto bot client ishlatiladi.
-    """
-    from utils.sender import send_file
+    from utils.sender import send_file, _r2_pending
 
-    # Fayl hajmi va kengaytma
-    ext = "mp4"
-    file_size = 0
-    if msg.video:
-        file_size = msg.video.file_size or 0
-        ext = "mp4"
-    elif msg.document:
-        file_size = msg.document.file_size or 0
-        if msg.document.file_name:
-            ext = os.path.splitext(msg.document.file_name)[1].lstrip(".") or "bin"
-    elif msg.audio:
-        file_size = msg.audio.file_size or 0
-        ext = "mp3"
-    elif msg.photo:
-        file_size = getattr(msg.photo, "file_size", 0) or 0
-        ext = "jpg"
-    elif msg.voice:
-        file_size = msg.voice.file_size or 0
-        ext = "ogg"
-    elif msg.video_note:
-        file_size = msg.video_note.file_size or 0
-        ext = "mp4"
+    if is_cancelled(user_id):
+        return False
 
-    # Media ob'ekti (thumbnail yuklanib qolmasin)
-    if msg.video:
-        media_obj = msg.video
-    elif msg.document:
-        media_obj = msg.document
-    elif msg.audio:
-        media_obj = msg.audio
-    elif msg.voice:
-        media_obj = msg.voice
-    elif msg.video_note:
-        media_obj = msg.video_note
-    elif msg.photo:
-        media_obj = msg.photo
-    else:
-        media_obj = msg
+    media_obj = _media_obj(msg)
+    if not media_obj:
+        return False
 
+    filename = _resolve_filename(msg)
+    ext = os.path.splitext(filename)[1].lstrip(".") or "bin"
+    file_size = getattr(media_obj, "file_size", 0) or 0
     total_mb = file_size / 1024 / 1024 if file_size else 0
     last_pct = [-1]
 
     async def _dl_progress(current, total):
+        if is_cancelled(user_id):
+            return
         if not total:
             return
         pct = min(int(current / total * 100), 99)
         cur_mb = current / 1024 / 1024
         bar = _progress_bar(pct)
-        txt = (
-            "⬇️ *Yuklanmoqda...*\n\n"
-            + bar + f" `{pct}%`\n"
-            + f"`{cur_mb:.1f}` / `{total_mb:.1f}` MB"
-        )
+        txt = f"⬇️ *Yuklanmoqda...*\n\n{bar} `{pct}%`\n`{cur_mb:.1f}` / `{total_mb:.1f}` MB"
         _progress_state[status_msg.message_id] = txt
         if pct - last_pct[0] < 10:
             return
@@ -184,86 +209,86 @@ async def _download_and_send(
         try:
             await status_msg.edit_text(
                 txt, parse_mode="Markdown",
-                reply_markup=_refresh_kb(status_msg.message_id)
+                reply_markup=_refresh_kb(status_msg.message_id),
             )
         except Exception:
             pass
 
-    tmp_path = os.path.join(TEMP_DIR, f"sr_{msg.id}.{ext}")
+    tmp_path = os.path.join(TEMP_DIR, f"sr_{msg.id}_{user_id}.{ext}")
     try:
-        # 1. Diskka yuklab olish (userbot orqali — restricted kanaldan)
         await pyro_client.download_media(media_obj, file_name=tmp_path, progress=_dl_progress)
 
-        if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
-            logger.error(f"Download muvaffaqiyatsiz: {tmp_path} mavjud emas yoki bo'sh")
+        if is_cancelled(user_id):
             return False
 
-        # 2. "Yuborilmoqda" holati
+        if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
+            return False
+
         try:
-            await status_msg.edit_text("📤 *Yuborilmoqda...*", parse_mode="Markdown")
+            await status_msg.edit_text(
+                f"📤 *Yuborilmoqda:* `{filename}`",
+                parse_mode="Markdown",
+                reply_markup=_refresh_kb(status_msg.message_id),
+            )
         except Exception:
             pass
 
-        # 3. Fayl nomini aniqlash
-        if msg.document and msg.document.file_name:
-            filename = msg.document.file_name
-        elif msg.video:
-            filename = f"video_{msg.id}.mp4"
-        elif msg.audio:
-            filename = f"audio_{msg.id}.mp3"
-        elif msg.photo:
-            filename = f"photo_{msg.id}.jpg"
-        elif msg.voice:
-            filename = f"voice_{msg.id}.ogg"
-        elif msg.video_note:
-            filename = f"videonote_{msg.id}.mp4"
-        else:
-            filename = f"file_{msg.id}.{ext}"
-
         caption = msg.caption or ""
-
-        # 4. Foydalanuvchi sozlamasidan upload_mode olish
         from utils.db import db_load
         settings = await db_load(user_id)
-        upload_mode = settings.get("upload_mode", "document")
 
-        # 5. Bot orqali yuborish (send_file: <50MB PTB, >50MB Pyrogram bot client)
-        # send_file context kutadi — uni bypass qilish uchun fake context ishlatamiz
         class _FakeCtx:
             user_data = {"settings": settings, "_settings_loaded": True, "_user_id": user_id}
-        fake_message = status_msg
+
+        target_chat = dest_chat_id or status_msg.chat_id
         await send_file(
-            message=fake_message,
+            message=status_msg,
             file_path=tmp_path,
             filename=filename,
             caption=caption,
             context=_FakeCtx(),
+            force_document=True,
+            target_chat_id=target_chat if target_chat != status_msg.chat_id else None,
+            message_thread_id=dest_thread_id,
         )
-        # ✅ Agar fayl R2 ga yuklangan bo'lsa, _r2_pending faylni ishlatadi.
-        # Shuning uchun bu yerda o'chirmaymiz — r2_browser.py "Telegramga yuklash"
-        # tugmasi bosilganda o'chiradi. Aks holda (Telegram ga to'g'ri yuklangan) — o'chiramiz.
-        from utils.sender import _r2_pending, PYROGRAM_LIMIT
-        import hashlib
+
         short_key = hashlib.md5(f"{user_id}:{filename}".encode()).hexdigest()[:8]
         if short_key in _r2_pending:
-            # R2 ga yuklangan — faylni saqlab qolamiz, r2_browser o'chiradi
-            tmp_path = None  # finally da o'chirilmasin
+            tmp_path = None
         return True
 
     except Exception as e:
-        logger.error(f"_download_and_send xato: {e}", exc_info=True)
+        logger.error("_download_and_send xato: %s", e, exc_info=True)
         return False
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
 
 
+async def _get_album_messages(client: Client, chat_id, msg) -> list:
+    """Media group (album) barcha qismlarini oladi."""
+    mgid = getattr(msg, "media_group_id", None)
+    if not mgid:
+        return [msg]
+    parts = []
+    async for m in client.get_chat_history(chat_id, limit=50):
+        if getattr(m, "media_group_id", None) == mgid and m.media:
+            parts.append(m)
+    if not parts:
+        return [msg]
+    parts.sort(key=lambda x: x.id)
+    return parts
+
+
 async def _download_and_send_one(
     client: Client,
-    to_chat: int,
     from_chat,
     msg_id: int,
     status_msg,
+    user_id: int,
+    dest_chat_id: int,
+    dest_thread_id: int | None,
+    bot,
     _retry: int = 0,
 ) -> bool:
     try:
@@ -271,44 +296,90 @@ async def _download_and_send_one(
         msg = await client.get_messages(from_chat, msg_id)
         if not msg or msg.empty or not msg.media:
             return False
-        return await _download_and_send(client, msg, to_chat, status_msg, user_id=to_chat)
+
+        album = await _get_album_messages(client, from_chat, msg)
+        ok_any = False
+        for part in album:
+            if is_cancelled(user_id):
+                break
+            if await _download_and_send(
+                client, part, status_msg, user_id,
+                dest_chat_id, dest_thread_id, bot,
+            ):
+                ok_any = True
+            await asyncio.sleep(0.8)
+        return ok_any
 
     except FloodWait as e:
-        logger.warning(f"FloodWait {e.value}s")
         await asyncio.sleep(e.value)
-        return await _download_and_send_one(client, to_chat, from_chat, msg_id, status_msg, _retry)
+        return await _download_and_send_one(
+            client, from_chat, msg_id, status_msg, user_id,
+            dest_chat_id, dest_thread_id, bot, _retry,
+        )
     except OSError as e:
         if _retry < 3:
-            logger.warning(f"OSError msg {msg_id}, retry {_retry+1}/3: {e}")
             await asyncio.sleep(2 * (_retry + 1))
-            return await _download_and_send_one(client, to_chat, from_chat, msg_id, status_msg, _retry + 1)
-        logger.error(f"msg {msg_id} OSError (3 retry): {e}")
+            return await _download_and_send_one(
+                client, from_chat, msg_id, status_msg, user_id,
+                dest_chat_id, dest_thread_id, bot, _retry + 1,
+            )
+        logger.error("msg %s OSError: %s", msg_id, e)
         return False
     except Exception as e:
-        logger.error(f"msg {msg_id} xato: {e}", exc_info=True)
+        logger.error("msg %s xato: %s", msg_id, e, exc_info=True)
         return False
 
 
-async def _send_batch(client: Client, to_chat: int, from_chat, ids: list, status_msg):
+async def _send_batch(
+    client: Client, from_chat, ids: list, status_msg,
+    user_id: int, dest_chat_id: int, dest_thread_id: int | None, bot,
+):
     sent = 0
     total = len(ids)
     for i, mid in enumerate(ids):
-        if i % 5 == 0:
-            try:
-                await status_msg.edit_text(
-                    f"📥 Yuklanmoqda... {i}/{total}\n"
-                    f"{_progress_bar(int(i / total * 100))}"
-                )
-            except Exception:
-                pass
-        ok = await _download_and_send_one(client, to_chat, from_chat, mid, status_msg)
+        if is_cancelled(user_id):
+            await status_msg.edit_text(f"❌ Bekor qilindi. {sent}/{total} yuborildi.")
+            return
+        try:
+            await status_msg.edit_text(
+                f"📥 *{i + 1}/{total}* yuklanmoqda...\n{_progress_bar(int(i / total * 100))}",
+                parse_mode="Markdown",
+                reply_markup=_refresh_kb(status_msg.message_id),
+            )
+        except Exception:
+            pass
+        ok = await _download_and_send_one(
+            client, from_chat, mid, status_msg, user_id,
+            dest_chat_id, dest_thread_id, bot,
+        )
         if ok:
             sent += 1
         await asyncio.sleep(1.2)
-    await status_msg.edit_text(f"✅ {sent}/{total} ta media yuborildi.")
+    archive_note = f"\n☁️ Arxiv guruhi: `{dest_chat_id}`" if ARCHIVE_GROUP_ID else ""
+    await status_msg.edit_text(f"✅ {sent}/{total} ta media yuborildi.{archive_note}")
 
 
-# ── Telegram handler'lari ──────────────────────────────────────────────────
+async def _prepare_destination(update: Update, context: ContextTypes.DEFAULT_TYPE, label: str):
+    """Manzil chat va topic ni aniqlaydi."""
+    user_id = update.effective_user.id
+    register_task(user_id, label=f"Save: {label}")
+
+    dest_chat = update.effective_chat.id
+    dest_thread = getattr(update.message, "message_thread_id", None)
+
+    if ARCHIVE_GROUP_ID:
+        dest_chat, dest_thread = await _ensure_archive_topic(context.bot, label)
+        if dest_chat:
+            try:
+                await update.message.reply_text(
+                    f"📁 Arxiv: topic *{label[:60]}* ga saqlanmoqda...",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+
+    return user_id, dest_chat, dest_thread
+
 
 async def save_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -319,36 +390,39 @@ async def save_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     client = await get_user_client()
     if client is None:
         await update.message.reply_text(
-            "⚠️ Save Restricted funksiyasi hozircha sozlanmagan.\n"
-            "Admin bilan bog'laning."
+            "⚠️ Save Restricted sozlanmagan.\n`SESSION_STRING` kerak.",
+            parse_mode="Markdown",
         )
         return True
 
     status = await update.message.reply_text("⏳ Tekshirilmoqda...")
+    user_id = update.effective_user.id
+
     try:
         await _resolve_peer_safe(client, chat_id)
         msg = await client.get_messages(chat_id, msg_id)
         if not msg or msg.empty:
-            await status.edit_text("❌ Xabar topilmadi. Havola to'g'riligini tekshiring.")
+            await status.edit_text("❌ Xabar topilmadi.")
             return True
         if not msg.media:
-            await status.edit_text(
-                f"📝 *Xabar matni:*\n\n{msg.text or '(bosh)'}",
-                parse_mode="Markdown"
-            )
+            await status.edit_text(f"📝 *Matn:*\n\n{msg.text or '(bosh)'}", parse_mode="Markdown")
             return True
+
+        label = _resolve_filename(msg)
+        uid, dest_chat, dest_thread = await _prepare_destination(update, context, label)
 
         _progress_state[status.message_id] = "⬇️ *Yuklanmoqda...*"
         await status.edit_text(
             "⬇️ *Yuklanmoqda...*",
             parse_mode="Markdown",
-            reply_markup=_refresh_kb(status.message_id)
+            reply_markup=_refresh_kb(status.message_id),
         )
 
         ok = await _download_and_send_one(
-            client, update.effective_chat.id, chat_id, msg_id, status
+            client, chat_id, msg_id, status, uid, dest_chat, dest_thread, context.bot,
         )
         _progress_state.pop(status.message_id, None)
+        clear_task(uid)
 
         if ok:
             try:
@@ -356,10 +430,12 @@ async def save_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
         else:
-            await status.edit_text("❌ Yuklab bo'lmadi. Log'da xatoni tekshiring.")
+            err = "Bekor qilindi." if is_cancelled(uid) else "Yuklab bo'lmadi."
+            await status.edit_text(f"❌ {err}")
 
     except Exception as e:
-        logger.error(f"save_link_handler xato: {e}", exc_info=True)
+        logger.error("save_link_handler: %s", e, exc_info=True)
+        clear_task(user_id)
         try:
             await status.edit_text(f"❌ Xato: {e}")
         except Exception:
@@ -372,38 +448,33 @@ async def save_topic_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     args = update.message.text.split(maxsplit=1)
     if len(args) < 2:
         await update.message.reply_text(
-            "❗ Foydalanish:\n`/save https://t.me/c/1234567890/456`",
-            parse_mode="Markdown"
+            "❗ Foydalanish:\n`/save https://t.me/c/1234567890/456`\n"
+            "yoki havolani to'g'ridan yuboring.",
+            parse_mode="Markdown",
         )
         return
 
     client = await get_user_client()
     if client is None:
-        await update.message.reply_text("⚠️ Save Restricted funksiyasi sozlanmagan.")
+        await update.message.reply_text("⚠️ Save Restricted sozlanmagan.")
         return
 
     chat_id, thread_id = parse_topic_link(args[1])
     if not chat_id or not thread_id:
-        await update.message.reply_text(
-            "❌ Havola xato.\nFormat: `https://t.me/c/CHATID/TOPICID` yoki `https://t.me/c/CHATID/TOPICID/MSGID`",
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text("❌ Havola xato.", parse_mode="Markdown")
         return
 
     status = await update.message.reply_text("🔍 Topik skanlanmoqda...")
+    user_id = update.effective_user.id
+
     try:
         await _resolve_peer_safe(client, chat_id)
-
         media_ids = []
-        async for m in client.get_chat_history(chat_id, limit=1000):
+        async for m in client.get_chat_history(chat_id, limit=2000):
             if not m.media:
                 continue
-            # Forum supergroup: reply_to_top_message_id → topic ID
-            msg_thread = (
-                getattr(m, "reply_to_top_message_id", None)
-                or getattr(m, "reply_to_message_id", None)
-            )
-            if msg_thread == thread_id or m.id == thread_id:
+            top = getattr(m, "reply_to_top_message_id", None)
+            if top == thread_id or m.id == thread_id:
                 media_ids.append(m.id)
         media_ids.sort()
 
@@ -412,23 +483,33 @@ async def save_topic_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         count = len(media_ids)
+        label = f"Topic_{thread_id}_{count}files"
+        uid, dest_chat, dest_thread = await _prepare_destination(update, context, label)
+
         if count <= 30:
-            await status.edit_text(f"📦 {count} ta media yuklanmoqda...")
-            await _send_batch(client, update.effective_chat.id, chat_id, media_ids, status)
+            await status.edit_text(
+                f"📦 {count} ta media yuklanmoqda...",
+                reply_markup=_refresh_kb(status.message_id),
+            )
+            await _send_batch(client, chat_id, media_ids, status, uid, dest_chat, dest_thread, context.bot)
         else:
-            key = f"sr_ids_{update.effective_chat.id}"
-            context.bot_data[key] = {"chat_id": chat_id, "ids": media_ids}
+            key = f"sr_ids_{update.effective_chat.id}_{user_id}"
+            context.bot_data[key] = {
+                "chat_id": chat_id, "ids": media_ids,
+                "user_id": uid, "dest_chat": dest_chat, "dest_thread": dest_thread,
+            }
             kb = InlineKeyboardMarkup([[
                 InlineKeyboardButton("✅ Ha, yuborsin", callback_data=f"sr_confirm|{key}"),
                 InlineKeyboardButton("❌ Bekor", callback_data="sr_cancel"),
             ]])
             await status.edit_text(
                 f"⚠️ Topikda *{count}* ta media bor.\nHammasi yuklab yuborilsinmi?",
-                reply_markup=kb,
-                parse_mode="Markdown"
+                reply_markup=kb, parse_mode="Markdown",
             )
+        clear_task(uid)
     except Exception as e:
-        logger.error(f"save_topic_handler xato: {e}", exc_info=True)
+        logger.error("save_topic_handler: %s", e, exc_info=True)
+        clear_task(user_id)
         await status.edit_text(f"❌ Xato: {e}")
 
 
@@ -441,6 +522,16 @@ async def save_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer(txt[:200], show_alert=True)
         return
 
+    if query.data == "sr_cancel_run":
+        uid = query.from_user.id
+        await cancel_task(uid)
+        await query.answer("❌ Bekor qilindi")
+        try:
+            await query.edit_message_text("❌ Yuklash bekor qilindi.")
+        except Exception:
+            pass
+        return
+
     await query.answer()
 
     if query.data == "sr_cancel":
@@ -450,7 +541,7 @@ async def save_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TY
     _, key = query.data.split("|", 1)
     data = context.bot_data.get(key)
     if not data:
-        await query.edit_message_text("❌ Ma'lumot topilmadi. /save qayta yuboring.")
+        await query.edit_message_text("❌ Ma'lumot topilmadi.")
         return
 
     client = await get_user_client()
@@ -458,13 +549,17 @@ async def save_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text("⚠️ Userbot ulanmagan.")
         return
 
+    uid = data.get("user_id", query.from_user.id)
+    register_task(uid, label="Save batch")
     _progress_state[query.message.message_id] = "📦 *Yuklanmoqda...*"
     await query.edit_message_text(
         "📦 *Yuklanmoqda...*",
         parse_mode="Markdown",
-        reply_markup=_refresh_kb(query.message.message_id)
+        reply_markup=_refresh_kb(query.message.message_id),
     )
     context.bot_data.pop(key, None)
     await _send_batch(
-        client, query.message.chat.id, data["chat_id"], data["ids"], query.message
+        client, data["chat_id"], data["ids"], query.message,
+        uid, data["dest_chat"], data["dest_thread"], context.bot,
     )
+    clear_task(uid)
