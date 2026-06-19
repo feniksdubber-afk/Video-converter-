@@ -60,7 +60,10 @@ async def handle_subtitle_file(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data["state"] = None
     await status.edit_text("⏳ *Subtitr stream sifatida birlashtirilmoqda...*", parse_mode="Markdown")
 
-    ok, output_path, err = await softsub_video_async(video_path, sub_path, status_msg=status)
+    ok, output_path, err = await softsub_video_async(
+        video_path, sub_path, status_msg=status,
+        user_id=update.effective_user.id,
+    )
 
     if os.path.exists(sub_path):
         os.remove(sub_path)
