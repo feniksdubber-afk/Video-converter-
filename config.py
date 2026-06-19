@@ -34,5 +34,23 @@ else:
 
 DB_PATH = os.path.join(DATA_DIR, "settings.db")
 
+# ── Ruxsat (whitelist) ───────────────────────────────────────────────────────
+ALLOWED_USER_IDS_ENV = os.environ.get("ALLOWED_USER_IDS", "")
+ADMIN_USER_IDS_ENV   = os.environ.get("ADMIN_USER_IDS", "")
+
+# ── Save → arxiv guruhi (forum topic) ───────────────────────────────────────
+# Bo'sh bo'lsa → buyruq yuborilgan chatga saqlanadi
+ARCHIVE_GROUP_ID = os.environ.get("ARCHIVE_GROUP_ID", "").strip()
+if ARCHIVE_GROUP_ID.lstrip("-").isdigit():
+    ARCHIVE_GROUP_ID = int(ARCHIVE_GROUP_ID)
+else:
+    ARCHIVE_GROUP_ID = None
+
+# Har save uchun yangi forum topic yaratish (ARCHIVE_GROUP_ID kerak)
+AUTO_CREATE_TOPIC = os.environ.get("AUTO_CREATE_TOPIC", "true").lower() in ("1", "true", "yes")
+
+# R2 upload default papka prefiksi (users/{user_id}/uploads/)
+R2_USER_PREFIX = os.environ.get("R2_USER_PREFIX", "users")
+
 os.makedirs(TEMP_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
