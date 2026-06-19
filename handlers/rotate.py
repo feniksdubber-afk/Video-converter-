@@ -80,6 +80,7 @@ async def handle_rotate_choice(update: Update, context: ContextTypes.DEFAULT_TYP
 
     ok, err = await run_ffmpeg_async(
         args, status_msg, label=label, input_path=video_path,
+        user_id=context.user_data.get("_user_id", query.from_user.id),
     )
 
     if ok and os.path.exists(output_path):
