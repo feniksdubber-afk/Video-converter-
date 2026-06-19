@@ -78,8 +78,11 @@ from handlers.batch import (
     handle_batch_use_template, handle_batch_delete_template,
     handle_batch_clear_files, handle_batch_run,
 )
-from handlers.r2_browser import r2_command, r2_callback, r2_rename_text, _show_r2_list_cb
+from handlers.r2_browser import r2_command, r2_callback, r2_rename_text, r2_mkdir_text, _show_r2_list_cb
 from handlers.save_restricted import save_link_handler, save_topic_handler, save_confirm_callback
+from handlers.auth_handlers import auth_gate, allow_handler, deny_handler, users_handler
+from utils.auth import reload_auth
+from utils.task_manager import cancel_task, clear_task
 from utils.keyboards import main_menu_keyboard
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -95,9 +98,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["_user_id"] = user_id
     await ensure_loaded(user_id, context)
 
-    # ── Save Restricted confirm ────────────────────────────────────────────────
-    if data.startswith("sr_confirm|") or data == "sr_cancel" or data.startswith("sr_progress|"):
+    # ── Save Restricted confirm / cancel ───────────────────────────────────────
+    if data.startswith("sr_confirm|") or data in ("sr_cancel", "sr_cancel_run") or data.startswith("sr_progress|"):
         await save_confirm_callback(update, context)
+        return
+
+    # ── Vazifa bekor qilish (FFmpeg, yuklash) ─────────────────────────────────
+    if data == "task_cancel":
+        uid = query.from_user.id
+        if await cancel_task(uid):
+            await query.answer("❌ Bekor qilindi")
+            try:
+                await query.edit_message_text("❌ Jarayon bekor qilindi.")
+            except Exception:
+                pass
+        else:
+            await query.answer("Faol vazifa yo'q", show_alert=True)
         return
 
     # ── Post-action (yuborish / davom etish / versiya tanlash) ──
@@ -343,9 +359,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "crop_custom":         handle_crop_custom_text,
     }
 
-    # R2 rename matn
+    # R2 rename / papka yaratish
     if state == "r2_rename_input":
         await r2_rename_text(update, context)
+        return
+    if state == "r2_mkdir_input":
+        await r2_mkdir_text(update, context)
         return
 
     # Batch shablon nomi kiritish
@@ -482,7 +501,9 @@ def _cleanup_temp_dir():
 async def _post_init(app):
     """Bot ishga tushganda SQLite bazasini initsializatsiya qiladi."""
     await init_db()
+    reload_auth()
     logger.info("✅ SQLite DB tayyor.")
+    logger.info("✅ Auth whitelist yuklandi.")
     _cleanup_temp_dir()
 
 
@@ -507,11 +528,18 @@ def main():
 
     app = builder.build()
 
+    # Ruxsat tekshiruvi — barcha handlerlardan oldin (group -1)
+    from telegram.ext import TypeHandler
+    app.add_handler(TypeHandler(Update, auth_gate), group=-1)
+
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("help", help_handler))
     app.add_handler(CommandHandler("settings", show_settings))
     app.add_handler(CommandHandler("r2", r2_command))
     app.add_handler(CommandHandler("save", save_topic_handler))
+    app.add_handler(CommandHandler("allow", allow_handler))
+    app.add_handler(CommandHandler("deny", deny_handler))
+    app.add_handler(CommandHandler("users", users_handler))
 
     app.add_handler(MessageHandler(filters.VIDEO, document_handler))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
