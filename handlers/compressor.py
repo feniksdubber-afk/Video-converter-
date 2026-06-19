@@ -37,7 +37,10 @@ async def handle_compress_quality(update: Update, context: ContextTypes.DEFAULT_
     )
     await query.edit_message_text(f"⏳ Siqish boshlandi ({label})...")
 
-    ok, output_path, err = await compress_video_async(video_path, quality, status_msg)
+    ok, output_path, err = await compress_video_async(
+        video_path, quality, status_msg,
+        user_id=context.user_data.get("_user_id", query.from_user.id),
+    )
 
     if ok and os.path.exists(output_path):
         orig_size = os.path.getsize(video_path)
