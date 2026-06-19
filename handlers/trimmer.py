@@ -99,7 +99,10 @@ async def handle_trim_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
         )
 
-        ok, output_path, err = await trim_video_async(video_path, start, parsed, status_msg=status)
+        ok, output_path, err = await trim_video_async(
+            video_path, start, parsed, status_msg=status,
+            user_id=update.effective_user.id,
+        )
 
         if ok and os.path.exists(output_path):
             video_name = context.user_data.get("video_name", "video")
