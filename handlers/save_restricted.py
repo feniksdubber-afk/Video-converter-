@@ -11,6 +11,7 @@ Yangi imkoniyatlar:
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -21,12 +22,67 @@ from pyrogram.errors import FloodWait
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 
-from config import API_ID, API_HASH, SESSION_STRING, TEMP_DIR, ARCHIVE_GROUP_ID, AUTO_CREATE_TOPIC
+from config import API_ID, API_HASH, SESSION_STRING, TEMP_DIR, ARCHIVE_GROUP_ID, AUTO_CREATE_TOPIC, DATA_DIR
 from utils.task_manager import (
     register_task, is_cancelled, clear_task, progress_keyboard, cancel_task,
 )
 
 logger = logging.getLogger(__name__)
+
+# ── Oddiy link saqlash (save_link_handler) uchun BITTA umumiy topic ─────────
+# Har bir foydalanuvchi/fayl uchun emas — hamma uchun bir xil joy.
+SHARED_TOPIC_NAME = "📥 Saqlangan medialar"
+_SHARED_TOPIC_FILE = os.path.join(DATA_DIR, "shared_topic.json")
+_shared_topic_cache: dict | None = None
+
+
+def _load_shared_topic() -> dict:
+    global _shared_topic_cache
+    if _shared_topic_cache is not None:
+        return _shared_topic_cache
+    data = {"chat_id": None, "thread_id": None}
+    if os.path.isfile(_SHARED_TOPIC_FILE):
+        try:
+            with open(_SHARED_TOPIC_FILE, encoding="utf-8") as f:
+                saved = json.load(f)
+            if isinstance(saved, dict):
+                data.update(saved)
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("shared_topic o'qish xato: %s", e)
+    _shared_topic_cache = data
+    return data
+
+
+def _save_shared_topic(chat_id: int, thread_id: int | None) -> None:
+    global _shared_topic_cache
+    _shared_topic_cache = {"chat_id": chat_id, "thread_id": thread_id}
+    try:
+        with open(_SHARED_TOPIC_FILE, "w", encoding="utf-8") as f:
+            json.dump(_shared_topic_cache, f)
+    except OSError as e:
+        logger.warning("shared_topic saqlash xato: %s", e)
+
+
+async def _ensure_shared_topic(bot) -> tuple[int | None, int | None]:
+    """save_link_handler uchun bitta doimiy topic qaytaradi (kerak bo'lsa yaratadi)."""
+    if not ARCHIVE_GROUP_ID:
+        return None, None
+
+    cached = _load_shared_topic()
+    if cached.get("chat_id") == ARCHIVE_GROUP_ID and (cached.get("thread_id") or not AUTO_CREATE_TOPIC):
+        return cached["chat_id"], cached.get("thread_id")
+
+    chat_id = ARCHIVE_GROUP_ID
+    thread_id = None
+    if AUTO_CREATE_TOPIC:
+        try:
+            topic = await bot.create_forum_topic(chat_id=chat_id, name=SHARED_TOPIC_NAME)
+            thread_id = topic.message_thread_id
+        except Exception as e:
+            logger.warning("Umumiy topic yaratish xato: %s", e)
+
+    _save_shared_topic(chat_id, thread_id)
+    return chat_id, thread_id
 
 _user_client: Client | None = None
 _user_lock = asyncio.Lock()
@@ -408,8 +464,12 @@ async def save_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status.edit_text(f"📝 *Matn:*\n\n{msg.text or '(bosh)'}", parse_mode="Markdown")
             return True
 
-        label = _resolve_filename(msg)
-        uid, dest_chat, dest_thread = await _prepare_destination(update, context, label)
+        uid = user_id
+        register_task(uid, label=f"Save: {_resolve_filename(msg)}")
+        dest_chat, dest_thread = await _ensure_shared_topic(context.bot)
+        if not dest_chat:
+            dest_chat = update.effective_chat.id
+            dest_thread = getattr(update.message, "message_thread_id", None)
 
         _progress_state[status.message_id] = "⬇️ *Yuklanmoqda...*"
         await status.edit_text(
