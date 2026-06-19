@@ -196,3 +196,164 @@ async def generate_presigned_url(object_key: str, expires: int = 3600) -> str | 
             return None
 
     return await asyncio.get_running_loop().run_in_executor(None, _do)
+
+
+# ── Papka tizimi (prefix-based) ─────────────────────────────────────────────
+
+def join_key(*parts: str) -> str:
+    """S3/R2 kaliti — har doim `/` bilan (Windows muammosiz)."""
+    cleaned = []
+    for p in parts:
+        if not p:
+            continue
+        cleaned.extend(x for x in p.replace("\\", "/").split("/") if x)
+    return "/".join(cleaned)
+
+
+def user_upload_key(user_id: int, filename: str, base_prefix: str = "users") -> str:
+    """Foydalanuvchi upload yo'li: users/{id}/uploads/{filename}"""
+    import uuid
+    from utils.ffmpeg_utils import sanitize_filename
+    safe = sanitize_filename(filename)
+    unique = uuid.uuid4().hex[:8]
+    return join_key(base_prefix, str(user_id), "uploads", f"{unique}_{safe}")
+
+
+async def list_prefix(prefix: str = "", delimiter: str = "/") -> dict:
+    """
+    Papka va fayllarni ajratib qaytaradi.
+    {"folders": [{"prefix", "name"}], "files": [{key, size, ...}]}
+    """
+    cfg = _get_config()
+    norm_prefix = prefix.replace("\\", "/")
+    if norm_prefix and not norm_prefix.endswith("/"):
+        norm_prefix += "/"
+
+    def _do():
+        try:
+            c = _client()
+            resp = c.list_objects_v2(
+                Bucket=cfg["bucket"],
+                Prefix=norm_prefix,
+                Delimiter=delimiter,
+                MaxKeys=1000,
+            )
+            folders = []
+            for cp in resp.get("CommonPrefixes", []):
+                p = cp["Prefix"]
+                name = p.rstrip("/").split("/")[-1]
+                folders.append({"prefix": p, "name": name})
+
+            files = []
+            for obj in resp.get("Contents", []):
+                key = obj["Key"]
+                if key.endswith("/") or key.endswith(".keep"):
+                    continue
+                if norm_prefix and key == norm_prefix.rstrip("/"):
+                    continue
+                files.append({
+                    "key": key,
+                    "size": obj["Size"],
+                    "size_str": fmt_size(obj["Size"]),
+                    "last_modified": obj["LastModified"],
+                    "url": get_public_url(key),
+                })
+            files.sort(key=lambda x: x["last_modified"], reverse=True)
+            folders.sort(key=lambda x: x["name"].lower())
+            return {"folders": folders, "files": files}
+        except ClientError as e:
+            logger.warning(f"R2 list_prefix xato: {e}")
+            return {"folders": [], "files": []}
+
+    return await asyncio.get_running_loop().run_in_executor(None, _do)
+
+
+async def list_all_files(prefix: str = "", max_total: int = 500) -> list[dict]:
+    """Barcha fayllarni pagination bilan yig'adi."""
+    cfg = _get_config()
+
+    def _do():
+        items = []
+        token = None
+        try:
+            c = _client()
+            while len(items) < max_total:
+                kwargs = {"Bucket": cfg["bucket"], "MaxKeys": min(1000, max_total - len(items))}
+                if prefix:
+                    kwargs["Prefix"] = prefix
+                if token:
+                    kwargs["ContinuationToken"] = token
+                resp = c.list_objects_v2(**kwargs)
+                for obj in resp.get("Contents", []):
+                    key = obj["Key"]
+                    if key.endswith("/") or key.endswith(".keep"):
+                        continue
+                    items.append({
+                        "key": key,
+                        "size": obj["Size"],
+                        "size_str": fmt_size(obj["Size"]),
+                        "last_modified": obj["LastModified"],
+                        "url": get_public_url(key),
+                    })
+                if not resp.get("IsTruncated"):
+                    break
+                token = resp.get("NextContinuationToken")
+            items.sort(key=lambda x: x["last_modified"], reverse=True)
+            return items
+        except ClientError as e:
+            logger.warning(f"R2 list_all xato: {e}")
+            return items
+
+    return await asyncio.get_running_loop().run_in_executor(None, _do)
+
+
+async def create_folder(prefix: str) -> bool:
+    """Bo'sh papka (.keep marker fayl)."""
+    cfg = _get_config()
+    folder = prefix.replace("\\", "/").rstrip("/") + "/.keep"
+
+    def _do():
+        try:
+            _client().put_object(Bucket=cfg["bucket"], Key=folder, Body=b"")
+            return True
+        except ClientError as e:
+            logger.warning(f"R2 create_folder xato: {e}")
+            return False
+
+    return await asyncio.get_running_loop().run_in_executor(None, _do)
+
+
+async def delete_prefix(prefix: str) -> int:
+    """Papka va ichidagi barcha obyektlarni o'chiradi. O'chirilgan soni."""
+    cfg = _get_config()
+    norm = prefix.replace("\\", "/").rstrip("/") + "/"
+
+    def _do():
+        try:
+            c = _client()
+            deleted = 0
+            token = None
+            while True:
+                kwargs = {"Bucket": cfg["bucket"], "Prefix": norm, "MaxKeys": 1000}
+                if token:
+                    kwargs["ContinuationToken"] = token
+                resp = c.list_objects_v2(**kwargs)
+                keys = [{"Key": o["Key"]} for o in resp.get("Contents", [])]
+                if keys:
+                    c.delete_objects(Bucket=cfg["bucket"], Delete={"Objects": keys})
+                    deleted += len(keys)
+                if not resp.get("IsTruncated"):
+                    break
+                token = resp.get("NextContinuationToken")
+            return deleted
+        except ClientError as e:
+            logger.warning(f"R2 delete_prefix xato: {e}")
+            return 0
+
+    return await asyncio.get_running_loop().run_in_executor(None, _do)
+
+
+async def move_file(old_key: str, new_key: str) -> str | None:
+    """rename_file alias — ko'chirish."""
+    return await rename_file(old_key, new_key)
+
