@@ -105,6 +105,7 @@ async def handle_speed_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
         args, status_msg,
         label=f"Tezlik: {label}",
         input_path=video_path,
+        user_id=context.user_data.get("_user_id", query.from_user.id),
     )
 
     if ok and os.path.exists(output_path):
