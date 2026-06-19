@@ -530,13 +530,25 @@ async def save_topic_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         await _resolve_peer_safe(client, chat_id)
         media_ids = []
-        async for m in client.get_chat_history(chat_id, limit=2000):
-            if not m.media:
-                continue
-            top = getattr(m, "reply_to_top_message_id", None)
-            if top == thread_id or m.id == thread_id:
+
+        # Topikning ildiz (root) xabari ham media bo'lishi mumkin
+        try:
+            root = await client.get_messages(chat_id, thread_id)
+            if root and not root.empty and root.media:
+                media_ids.append(root.id)
+        except Exception:
+            pass
+
+        # Eski usul (get_chat_history, limit=2000) butun chatning eng so'nggi
+        # 2000 xabarini skanlardi — agar chatda boshqa topiklarda ko'p
+        # yozishma bo'lsa, kerakli topik shu oynadan chiqib qolib,
+        # "media topilmadi" deb noto'g'ri javob berardi.
+        # get_discussion_replies thread bo'yicha to'g'ridan-to'g'ri so'raydi,
+        # shuning uchun chat qancha katta bo'lishidan qat'i nazar ishlaydi.
+        async for m in client.get_discussion_replies(chat_id, thread_id):
+            if m.media:
                 media_ids.append(m.id)
-        media_ids.sort()
+        media_ids = sorted(set(media_ids))
 
         if not media_ids:
             await status.edit_text("❌ Topikda media topilmadi.")
