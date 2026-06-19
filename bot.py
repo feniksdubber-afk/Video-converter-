@@ -77,6 +77,7 @@ from handlers.batch import (
     handle_batch_save_ask, handle_batch_start_nosave,
     handle_batch_use_template, handle_batch_delete_template,
     handle_batch_clear_files, handle_batch_run,
+    batch_command, handle_batch_abort, handle_batch_remove_file,
 )
 from handlers.r2_browser import r2_command, r2_callback, r2_rename_text, r2_mkdir_text, _show_r2_list_cb
 from handlers.save_restricted import save_link_handler, save_topic_handler, save_confirm_callback
@@ -328,7 +329,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "batch_save_ask":         await handle_batch_save_ask(update, context)
     elif data == "batch_start_nosave":     await handle_batch_start_nosave(update, context)
     elif data == "batch_clear_files":      await handle_batch_clear_files(update, context)
+    elif data == "batch_abort":            await handle_batch_abort(update, context)
     elif data == "batch_run":              await handle_batch_run(update, context)
+    elif data.startswith("batch_rm_"):     await handle_batch_remove_file(update, context, int(data[9:]))
     elif data.startswith("batch_step_"):   await handle_batch_step_toggle(update, context, data[11:])
     elif data.startswith("batch_use_"):    await handle_batch_use_template(update, context, int(data[10:]))
     elif data.startswith("batch_del_"):    await handle_batch_delete_template(update, context, int(data[10:]))
@@ -536,6 +539,7 @@ def main():
     app.add_handler(CommandHandler("help", help_handler))
     app.add_handler(CommandHandler("settings", show_settings))
     app.add_handler(CommandHandler("r2", r2_command))
+    app.add_handler(CommandHandler("batch", batch_command))
     app.add_handler(CommandHandler("save", save_topic_handler))
     app.add_handler(CommandHandler("allow", allow_handler))
     app.add_handler(CommandHandler("deny", deny_handler))
