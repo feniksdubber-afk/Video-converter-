@@ -47,7 +47,10 @@ async def handle_format_choice(update: Update, context: ContextTypes.DEFAULT_TYP
     )
     await query.edit_message_text(f"⏳ Konvertatsiya boshlandi → {fmt.upper()}...")
 
-    ok, output_path, err = await convert_video_async(video_path, fmt, status_msg)
+    ok, output_path, err = await convert_video_async(
+        video_path, fmt, status_msg,
+        user_id=context.user_data.get("_user_id", query.from_user.id),
+    )
 
     if ok and os.path.exists(output_path):
         video_name = context.user_data.get("video_name", "video")
@@ -140,7 +143,10 @@ async def handle_resolution_choice(update: Update, context: ContextTypes.DEFAULT
     )
     await query.edit_message_text(f"⏳ O'lcham o'zgartirilmoqda → {label}...")
 
-    ok, output_path, err = await change_resolution_async(video_path, height, status_msg)
+    ok, output_path, err = await change_resolution_async(
+        video_path, height, status_msg,
+        user_id=context.user_data.get("_user_id", query.from_user.id),
+    )
 
     if ok and os.path.exists(output_path):
         video_name = context.user_data.get("video_name", "video")
