@@ -609,7 +609,8 @@ async def handle_batch_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         pass
 
                     _ok_ds, _ds_path, _ds_err = await downscale_for_telegram_async(
-                        current_path, _target_h, status_msg
+                        current_path, _target_h, status_msg,
+                        user_id=context.user_data.get("_user_id", query.from_user.id),
                     )
                     if not _ok_ds or not os.path.exists(_ds_path):
                         continue
