@@ -49,10 +49,17 @@ def summary(context) -> str:
     thumb   = s.get("custom_thumbnail", DEFAULTS["custom_thumbnail"])
     sample  = s.get("sample_duration",  DEFAULTS["sample_duration"])
     split   = s.get("split_duration",   DEFAULTS["split_duration"])
+    largefd = s.get("large_file_dest",  DEFAULTS["large_file_dest"])
 
     upload_label = {"document": "📄 Dokument", "video": "🎬 Video", "audio": "🎵 Audio"}.get(upload, upload)
     rename_label = "✅ Yoqiq" if rename else "❌ O'chiq"
     thumb_label  = "✅ Bor" if thumb else "❌ Yo'q"
+    largefd_label = {
+        "auto": "🔄 Avto (R2/Gofile)",
+        "telegram": "✈️ Telegram (Premium, 4GB)",
+        "r2": "☁️ R2",
+        "gofile": "🌐 Gofile",
+    }.get(largefd, largefd)
     return (
         f"⚙️ *Joriy sozlamalar:*\n\n"
         f"📤 Upload rejimi: {upload_label}\n"
@@ -60,4 +67,5 @@ def summary(context) -> str:
         f"🖼 Custom thumbnail: {thumb_label}\n"
         f"🎬 Sample davomiyligi: `{sample}` soniya\n"
         f"✂️ Split davomiyligi: `{split}` soniya\n"
+        f"📦 2GB+ fayllar: {largefd_label}\n"
     )
