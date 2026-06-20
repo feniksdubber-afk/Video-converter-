@@ -32,6 +32,19 @@ logger = logging.getLogger(__name__)
 
 _BATCH_CONCURRENCY = 2  # bir vaqtda nechta fayl yuklanadi/yuboriladi (Pyrogram client bilan ham moslashtirilgan)
 
+# bot_session uchun "Peer id invalid" xatosini oldini olish: muvaffaqiyatli
+# resolve qilingan chat_id'larni xotirada saqlaymiz, har xabarda qayta
+# get_chat() chaqirmaslik uchun. (Konteyner qayta tiklanganda/process qayta
+# ishga tushganda bu to'plam tozalanadi va birinchi yuborishda qayta
+# resolve qilinadi — bu normal holat.)
+_resolved_peers: set[int] = set()
+
+# ARCHIVE_GROUP_ID guruhi private (username'siz) bo'lsa, bot_session
+# peer cache'ini "noldan" tiklash uchun ishlatiladigan invite link.
+# Bot bu guruhga allaqachon a'zo/admin bo'lsa ham, get_chat(invite_link)
+# xavfsiz — qayta join qilmaydi, faqat peer ma'lumotini cache'ga yozadi.
+ARCHIVE_GROUP_INVITE_LINK = "https://t.me/+MvoGF_hfj6Y0YjZi"
+
 # ── Oddiy link saqlash (save_link_handler) uchun BITTA umumiy topic ─────────
 # Har bir foydalanuvchi/fayl uchun emas — hamma uchun bir xil joy.
 SHARED_TOPIC_NAME = "📥 Saqlangan medialar"
@@ -127,7 +140,13 @@ async def _fetch_live_topics(client: Client, chat_id: int) -> list[dict] | None:
     bo'lsa None qaytaradi (registrydagi eski ro'yxat saqlanib qoladi)."""
     try:
         from pyrogram.raw.functions.channels import GetForumTopics
-        peer = await client.resolve_peer(chat_id)
+        try:
+            peer = await client.resolve_peer(chat_id)
+        except Exception:
+            # user_session bu guruhni hali "tanimasa" — invite link orqali
+            # tanishtiramiz (agar a'zo bo'lsa xavfsiz, qayta join qilmaydi).
+            await client.get_chat(ARCHIVE_GROUP_INVITE_LINK)
+            peer = await client.resolve_peer(chat_id)
         result = await client.invoke(
             GetForumTopics(channel=peer, offset_date=0, offset_id=0, offset_topic=0, limit=100)
         )
@@ -520,13 +539,24 @@ async def _download_and_send(
         # bot_session (Pyrogram) dest_chat peer'ini bilmasa send_video/send_document
         # "Peer id invalid" xatosi beradi. send_file() chaqirishdan oldin
         # bot_session'ga bu chat'ni cache'laymiz.
-        if target_chat != status_msg.chat_id:
+        #
+        # MUHIM: get_chat(int(target_chat)) ham ichida resolve_peer() ni
+        # chaqiradi — agar bot_session bu chatni hali umuman "tanimasa",
+        # bare raqamli ID bilan bu chaqiruv ham xato beradi (oldingi versiyada
+        # aynan shu sabab patch ishlamagan edi). Shuning uchun muvaffaqiyatsiz
+        # bo'lganda invite link orqali qayta tanishtiramiz — bot guruhga
+        # allaqachon a'zo bo'lsa ham bu xavfsiz (qayta join qilmaydi).
+        if target_chat != status_msg.chat_id and int(target_chat) not in _resolved_peers:
             try:
                 from handlers.video_handler import get_pyrogram_client
                 _bot_pyro = await get_pyrogram_client()
-                await _bot_pyro.get_chat(int(target_chat))
+                try:
+                    await _bot_pyro.get_chat(int(target_chat))
+                except Exception:
+                    await _bot_pyro.get_chat(ARCHIVE_GROUP_INVITE_LINK)
+                _resolved_peers.add(int(target_chat))
             except Exception as _pe:
-                logger.warning("bot_session peer cache xato (muhim emas): %s", _pe)
+                logger.warning("bot_session peer cache xato: %s", _pe)
 
         await send_file(
             message=status_msg,
