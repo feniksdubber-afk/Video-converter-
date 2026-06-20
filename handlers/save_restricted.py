@@ -119,6 +119,65 @@ def _add_topic(thread_id: int, name: str) -> None:
     _save_topics(topics[:50])
 
 
+async def _fetch_live_topics(client: Client, chat_id: int) -> list[dict] | None:
+    """ARCHIVE_GROUP_ID guruhidagi haqiqiy (Telegram'dagi) topiclarni userbot
+    orqali (raw API — channels.getForumTopics) o'qiydi. Muvaffaqiyatsiz
+    bo'lsa None qaytaradi (registrydagi eski ro'yxat saqlanib qoladi)."""
+    try:
+        from pyrogram.raw.functions.channels import GetForumTopics
+        peer = await client.resolve_peer(chat_id)
+        result = await client.invoke(
+            GetForumTopics(channel=peer, offset_date=0, offset_id=0, offset_topic=0, limit=100)
+        )
+        topics: list[dict] = []
+        for t in getattr(result, "topics", []):
+            tid = getattr(t, "id", None)
+            title = getattr(t, "title", None)
+            if tid and title:
+                topics.append({"thread_id": tid, "name": title[:64]})
+        return topics
+    except Exception as e:
+        logger.warning("Live topics olish xato: %s", e)
+        return None
+
+
+def _topics_list_kb(key: str, topics: list[dict]) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(t.get("name", "Topic")[:32], callback_data=f"sr_dest_pick|{key}|{t['thread_id']}"),
+            InlineKeyboardButton("🗑", callback_data=f"sr_dest_rm|{key}|{t['thread_id']}"),
+        ]
+        for t in topics
+    ]
+    rows.append([
+        InlineKeyboardButton("🔄 Yangilash", callback_data=f"sr_dest_refresh|{key}"),
+        InlineKeyboardButton("🔙 Orqaga", callback_data=f"sr_dest_back|{key}"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _render_topics_list(query, key: str, note: str = "") -> None:
+    """'Mavjud topicga' ro'yxatini (yoki bo'sh holatini) qayta chizadi."""
+    prefix = f"{note}\n\n" if note else ""
+    topics = _load_topics()
+    if not topics:
+        await query.edit_message_text(
+            f"{prefix}ℹ️ Hali birorta topic yaratilmagan.\n🆕 Yangi topic yarating.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🆕 Yangi topicga", callback_data=f"sr_dest_new|{key}")],
+                [InlineKeyboardButton("🔄 Yangilash", callback_data=f"sr_dest_refresh|{key}")],
+                [InlineKeyboardButton("❌ Bekor", callback_data=f"sr_dest_cancel|{key}")],
+            ]),
+        )
+        return
+    await query.edit_message_text(
+        f"{prefix}📂 *Mavjud topiclar:*\n_🗑 — ro'yxatdan olib tashlash (Telegram'dagi topic o'chmaydi)_",
+        parse_mode="Markdown",
+        reply_markup=_topics_list_kb(key, topics),
+    )
+
+
 def _new_pending_key() -> str:
     return secrets.token_hex(4)
 
@@ -815,7 +874,25 @@ async def handle_save_new_topic_name(update: Update, context: ContextTypes.DEFAU
         thread_id = topic.message_thread_id
     except Exception as e:
         logger.warning("Yangi topic yaratish xato: %s", e)
-        await update.message.reply_text(f"❌ Topic yaratilmadi: {e}")
+        err_text = str(e).lower()
+        if "not a forum" in err_text:
+            await update.message.reply_text(
+                "❌ Bu guruhda *Topics (Mavzular)* funksiyasi yoqilmagan.\n\n"
+                "Tuzatish:\n"
+                "1. Guruhni Telegram'da oching (admin sifatida)\n"
+                "2. Guruh nomi → ✏️ Edit → *Topics* ni yoqing\n"
+                "3. Qaytadan urinib ko'ring",
+                parse_mode="Markdown",
+            )
+        elif "not enough rights" in err_text or "chat_admin_required" in err_text:
+            await update.message.reply_text(
+                "❌ Botda topic yaratish huquqi yo'q.\n\n"
+                "Tuzatish: Botni guruhda *admin* qiling va "
+                "*\"Manage Topics\"* huquqini yoqing.",
+                parse_mode="Markdown",
+            )
+        else:
+            await update.message.reply_text(f"❌ Topic yaratilmadi: {e}")
         return
 
     _add_topic(thread_id, name)
@@ -858,26 +935,39 @@ async def save_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TY
         if key not in context.bot_data:
             await query.edit_message_text("❌ Ma'lumot topilmadi yoki eskirgan.")
             return
-        topics = _load_topics()
-        if not topics:
-            await query.edit_message_text(
-                "ℹ️ Hali birorta topic yaratilmagan.\n🆕 Yangi topic yarating.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🆕 Yangi topicga", callback_data=f"sr_dest_new|{key}")],
-                    [InlineKeyboardButton("❌ Bekor", callback_data=f"sr_dest_cancel|{key}")],
-                ]),
+        await _render_topics_list(query, key)
+        return
+
+    if query.data.startswith("sr_dest_refresh|"):
+        await query.answer("🔄 Yangilanmoqda...")
+        key = query.data.split("|", 1)[1]
+        if key not in context.bot_data:
+            await query.edit_message_text("❌ Ma'lumot topilmadi yoki eskirgan.")
+            return
+        client = await get_user_client()
+        if client is None:
+            await query.edit_message_text("⚠️ Userbot ulanmagan.")
+            return
+        live = await _fetch_live_topics(client, ARCHIVE_GROUP_ID)
+        if live is None:
+            await _render_topics_list(
+                query, key,
+                note="⚠️ Telegram'dan yangilab bo'lmadi — joriy ro'yxat ko'rsatilmoqda.",
             )
             return
-        rows = [
-            [InlineKeyboardButton(t.get("name", "Topic")[:40], callback_data=f"sr_dest_pick|{key}|{t['thread_id']}")]
-            for t in topics
-        ]
-        rows.append([InlineKeyboardButton("🔙 Orqaga", callback_data=f"sr_dest_back|{key}")])
-        await query.edit_message_text(
-            "📂 *Mavjud topiclar:*",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(rows),
-        )
+        _save_topics(live[:50])
+        await _render_topics_list(query, key, note="✅ Ro'yxat yangilandi.")
+        return
+
+    if query.data.startswith("sr_dest_rm|"):
+        await query.answer("🗑 Ro'yxatdan olib tashlandi")
+        _, key, thread_id_s = query.data.split("|", 2)
+        if key not in context.bot_data:
+            await query.edit_message_text("❌ Ma'lumot topilmadi yoki eskirgan.")
+            return
+        thread_id = int(thread_id_s)
+        _save_topics([t for t in _load_topics() if t.get("thread_id") != thread_id])
+        await _render_topics_list(query, key)
         return
 
     if query.data.startswith("sr_dest_back|"):
