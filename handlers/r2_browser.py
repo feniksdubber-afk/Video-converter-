@@ -186,7 +186,7 @@ async def _estimate_sizes(file_path: str, orig_height: int) -> dict:
 
 
 async def _handle_r2_send_tg(query, context, short_key: str):
-    from utils.sender import _r2_pending, PYROGRAM_LIMIT, send_file
+    from utils.sender import _r2_pending, PYROGRAM_LIMIT, send_file, _persist_r2_pending
     from utils.ffmpeg_utils import get_video_resolution
 
     entry = _r2_pending.get(short_key)
@@ -218,6 +218,7 @@ async def _handle_r2_send_tg(query, context, short_key: str):
             if os.path.exists(file_path):
                 os.remove(file_path)
             _r2_pending.pop(short_key, None)
+            _persist_r2_pending()
         except Exception:
             pass
         return
@@ -250,7 +251,7 @@ async def _handle_r2_send_tg(query, context, short_key: str):
 
 async def _handle_r2_compress(query, context, data: str):
     from utils.ffmpeg_utils import downscale_for_telegram_async
-    from utils.sender import send_file, _r2_pending
+    from utils.sender import send_file, _r2_pending, _persist_r2_pending
 
     if data.startswith("r2_compress_tog_"):
         rest = data[len("r2_compress_tog_"):]
@@ -329,6 +330,7 @@ async def _handle_r2_compress(query, context, data: str):
             except Exception:
                 pass
         _r2_pending.pop(short_key, None)
+        _persist_r2_pending()
         await query.message.reply_text(f"✅ {success_count}/{len(targets)} yuborildi.", parse_mode="HTML")
         return
 
