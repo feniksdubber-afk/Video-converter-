@@ -172,7 +172,10 @@ async def _upload_to_gofile(file_path: str) -> str:
                 return result["data"]["downloadPage"]
 
 
-async def _upload_to_r2(message: Message, file_path: str, filename: str, file_size: int, user_id: int = 0) -> str | None:
+async def _upload_to_r2(
+    message: Message, file_path: str, filename: str, file_size: int,
+    user_id: int = 0, r2_object_key: str | None = None,
+) -> str | None:
     """R2 ga yuklab, tugmali xabar yuboradi. URL qaytaradi yoki None."""
     status_msg = await message.reply_text(
         f"☁️ *R2 ga yuklanmoqda...*\n\n"
@@ -296,7 +299,7 @@ async def send_file(
     _user_id = context.user_data.get("_user_id", 0) if context else 0
     if file_size > PYROGRAM_LIMIT or force_r2:
         if r2_ok():
-            await _upload_to_r2(message, file_path, filename, file_size, user_id=_user_id)
+            await _upload_to_r2(message, file_path, filename, file_size, user_id=_user_id, r2_object_key=r2_object_key)
         else:
             # Fallback: Gofile
             status_msg = await message.reply_text(
@@ -377,6 +380,20 @@ async def send_file(
     # ─── 50 MB – 2 GB → Pyrogram MTProto ─────────────────────────────────
     status_msg = await message.reply_text("📤 Yuborilmoqda... 0%")
     client = await get_pyrogram_client()
+
+    # Himoya: agar chaqiruvchi kod (masalan save_restricted.py) dest_chat
+    # peer'ini oldindan cache'lamagan bo'lsa, shu yerda urinib ko'ramiz —
+    # muvaffaqiyatsiz bo'lsa ham keyingi send chaqiruvi aniq xato bilan
+    # qulaydi (silent emas), shuning uchun bu faqat qo'shimcha himoya.
+    if dest_chat != message.chat_id:
+        try:
+            await client.get_chat(dest_chat)
+        except Exception as _pe:
+            logger.warning(
+                "Pyrogram bot_session '%s' chatini cache'lay olmadi: %s — "
+                "send chaqiruvi 'Peer id invalid' bilan qulashi mumkin.",
+                dest_chat, _pe,
+            )
 
     last_percent = [-1]
     total_mb = file_size / 1024 / 1024
