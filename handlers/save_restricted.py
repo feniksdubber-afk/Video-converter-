@@ -1700,7 +1700,15 @@ async def _download_to_temp(
             return None, None, None
 
         media_obj = _media_obj(msg)
-        if not media_obj:
+        # _media_obj video/document/audio/voice/video_note/photo'dan birortasi
+        # topilmasa, oxirgi holatda msg'ning o'zini qaytaradi (eski kodda bu
+        # "umumiy holat" sifatida ishlatilgan edi). Lekin bu yerda — audio
+        # ajratish oqimida — agar tanish media turi topilmasa, demak bu
+        # webpage preview, poll, location kabi yuklab bo'lmaydigan narsa.
+        # media_obj ni msg bilan solishtirib, bunday holatni rad etamiz —
+        # aks holda Pyrogram "This message doesn't contain any downloadable
+        # media" xatosini beradi.
+        if not media_obj or media_obj is msg:
             return None, None, None
 
         filename = _resolve_filename(msg)
@@ -1876,6 +1884,34 @@ async def _extract_and_send_audio_for_one(
                 report(f"📤 audio #{idx} yuborilmoqda...")
             try:
                 target_chat = dest_chat_id or status_msg.chat_id
+
+                # bot_session (Pyrogram) dest_chat peer'ini bilmasa
+                # send_document "Peer id invalid" xatosi beradi — xuddi
+                # _download_and_send'dagi kabi: ARCHIVE_GROUP_ID kabi
+                # -100... guruhlar uchun bot hech qachon get_dialogs() orqali
+                # o'rganolmaydi (botlarga taqiqlangan), shu sababli avval
+                # bot_session orqali cache'lashga urinamiz, muvaffaqiyatsiz
+                # bo'lsa userbot (user_session) clientini ishlatamiz.
+                _use_user_client_for_send = False
+                if target_chat != status_msg.chat_id and int(target_chat) not in _resolved_peers:
+                    try:
+                        from handlers.video_handler import get_pyrogram_client
+                        _bot_pyro = await get_pyrogram_client()
+                        await _bot_pyro.get_chat(int(target_chat))
+                        _resolved_peers.add(int(target_chat))
+                    except Exception as _pe:
+                        logger.warning(
+                            "bot_session peer cache xato (kutilgan holat -100 kanallar "
+                            "uchun): %s — userbot orqali yuboriladi.", _pe,
+                        )
+                        _use_user_client_for_send = True
+
+                _send_kwargs = {}
+                if _use_user_client_for_send:
+                    _user_pyro = await get_user_client()
+                    if _user_pyro is not None:
+                        _send_kwargs["pyro_client_override"] = _user_pyro
+
                 await send_file(
                     message=status_msg,
                     file_path=out_path,
@@ -1885,6 +1921,7 @@ async def _extract_and_send_audio_for_one(
                     force_document=False,
                     target_chat_id=target_chat if target_chat != status_msg.chat_id else None,
                     message_thread_id=dest_thread_id,
+                    **_send_kwargs,
                 )
                 sent_any = True
             except Exception as e:
