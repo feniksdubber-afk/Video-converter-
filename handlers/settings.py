@@ -9,7 +9,14 @@ from utils.keyboards import main_menu_keyboard
 def _settings_keyboard(context):
     upload = get(context, "upload_mode")
     rename = get(context, "rename_file")
+    largefd = get(context, "large_file_dest")
     upload_label = {"document": "📄 Dokument", "video": "🎬 Video", "audio": "🎵 Audio"}.get(upload, upload)
+    largefd_label = {
+        "auto": "🔄 Avto",
+        "telegram": "✈️ Telegram",
+        "r2": "☁️ R2",
+        "gofile": "🌐 Gofile",
+    }.get(largefd, largefd)
 
     keyboard = [
         [InlineKeyboardButton(f"📤 Upload rejimi: {upload_label}", callback_data="cfg_upload_cycle")],
@@ -17,6 +24,7 @@ def _settings_keyboard(context):
             "✏️ Fayl nomini o'zgartirish: " + ("✅ Yoqiq" if rename else "❌ O'chiq"),
             callback_data="cfg_rename_toggle",
         )],
+        [InlineKeyboardButton(f"📦 2GB+ fayllar: {largefd_label}", callback_data="cfg_largefd_cycle")],
         [InlineKeyboardButton("🖼 Custom Thumbnail o'rnatish",  callback_data="cfg_thumb_set")],
         [InlineKeyboardButton("🖼 Custom Thumbnail o'chirish",  callback_data="cfg_thumb_clear")],
         [InlineKeyboardButton("🎬 Sample davomiyligi",          callback_data="cfg_sample_dur")],
@@ -57,6 +65,14 @@ async def handle_settings_callback(update: Update, context: ContextTypes.DEFAULT
         current = get(context, "rename_file")
         await set_(user_id, context, "rename_file", not current)
         await query.answer("O'zgartirildi")
+        await query.edit_message_text(summary(context), reply_markup=_settings_keyboard(context), parse_mode="Markdown")
+
+    elif data == "cfg_largefd_cycle":
+        modes = ["auto", "telegram", "r2", "gofile"]
+        current = get(context, "large_file_dest")
+        next_mode = modes[(modes.index(current) + 1) % len(modes)] if current in modes else modes[0]
+        await set_(user_id, context, "large_file_dest", next_mode)
+        await query.answer(f"2GB+ fayllar: {next_mode}")
         await query.edit_message_text(summary(context), reply_markup=_settings_keyboard(context), parse_mode="Markdown")
 
     elif data == "cfg_thumb_set":
