@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import secrets
+import subprocess
 import time
 
 from pyrogram import Client
@@ -1414,6 +1415,10 @@ async def handle_save_new_topic_name(update: Update, context: ContextTypes.DEFAU
 
     if pending["kind"] == "link":
         await _continue_link_save(key, ARCHIVE_GROUP_ID, thread_id, context.bot, status_ref, context.bot_data)
+    elif pending["kind"] == "audio_link":
+        await _continue_audio_link_save(key, ARCHIVE_GROUP_ID, thread_id, context.bot, status_ref, context.bot_data)
+    elif pending["kind"] == "audio_topic":
+        await _continue_audio_topic_save(key, ARCHIVE_GROUP_ID, thread_id, context.bot, status_ref, context.bot_data)
     else:
         await _continue_topic_save(key, ARCHIVE_GROUP_ID, thread_id, context.bot, status_ref, context.bot_data)
 
@@ -1551,6 +1556,10 @@ async def save_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TY
         thread_id = int(thread_id_s)
         if pending["kind"] == "link":
             await _continue_link_save(key, ARCHIVE_GROUP_ID, thread_id, context.bot, query.message, context.bot_data)
+        elif pending["kind"] == "audio_link":
+            await _continue_audio_link_save(key, ARCHIVE_GROUP_ID, thread_id, context.bot, query.message, context.bot_data)
+        elif pending["kind"] == "audio_topic":
+            await _continue_audio_topic_save(key, ARCHIVE_GROUP_ID, thread_id, context.bot, query.message, context.bot_data)
         else:
             await _continue_topic_save(key, ARCHIVE_GROUP_ID, thread_id, context.bot, query.message, context.bot_data)
         return
@@ -1589,3 +1598,654 @@ async def save_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TY
         chunk_delay=_smart_chunk_delay(),
     )
     clear_task(uid)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Audio strim ajratuvchi: /a (bitta xabar) va /savea (butun topic)
+#
+# Vazifasi bir xil: restricted kanal/guruhdagi videoni TO'LIQ yuborish
+# o'rniga, undagi audio strimlarni (ko'pincha bir nechta til/dublyaj
+# bo'lishi mumkin) ffprobe orqali aniqlab, har birini ffmpeg bilan
+# (-map 0:a:N -c copy, qayta kodlashsiz — tez) alohida audio faylga
+# ajratib, o'shalarni yuboradi.
+#
+#   /a <link>      — link qanday bo'lishidan qat'i nazar (bitta yoki ikkita
+#                     raqamli), ENG OXIRGI (eng konkret) xabarni oladi va
+#                     FAQAT o'sha bitta faylning audio strimlarini yuboradi.
+#   /savea <link>  — /save bilan bir xil: topic ichidagi BARCHA mediani
+#                     skanlaydi, lekin har birini to'liq yubormasdan,
+#                     audio strimlarini ajratib yuboradi.
+#
+# Ikkalasi ham xuddi /save kabi ARCHIVE_GROUP_ID/topic tanlash oqimidan
+# foydalanadi (agar arxiv guruh sozlanmagan bo'lsa — joriy chatga).
+# ══════════════════════════════════════════════════════════════════════════
+
+def _audio_stream_ext(codec: str) -> str:
+    """streams.py dagi _audio_ext bilan bir xil mantiq — ffmpeg orqali
+    qayta kodlashsiz (-c copy) ajratib bo'ladigan formatlarga mos kengaytma."""
+    return {
+        "aac": "aac", "mp3": "mp3", "opus": "opus", "vorbis": "ogg",
+        "flac": "flac", "pcm_s16le": "wav", "ac3": "ac3", "eac3": "eac3",
+        "dts": "dts", "truehd": "thd",
+    }.get(codec, "mka")
+
+
+def _probe_audio_streams(file_path: str) -> list[dict]:
+    """Berilgan faylning faqat audio strimlarini ffprobe orqali qaytaradi.
+    Sinxron (blocking) — chaqiruvchi run_in_executor orqali ishlatishi kerak."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "a",
+                "-show_entries", "stream=index,codec_type,codec_name,channels,bit_rate",
+                "-show_entries", "stream_tags=language,title",
+                "-of", "json", file_path,
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        data = json.loads(result.stdout)
+        return data.get("streams", [])
+    except Exception as e:
+        logger.warning("_probe_audio_streams xato: %s", e)
+        return []
+
+
+async def _extract_audio_streams(file_path: str) -> list[dict]:
+    """_probe_audio_streams ni non-blocking qilib chaqiradi."""
+    return await asyncio.get_running_loop().run_in_executor(None, _probe_audio_streams, file_path)
+
+
+def _extract_one_audio_stream(src_path: str, stream_index: int, out_path: str) -> tuple[bool, str]:
+    """Bitta audio strimni ffmpeg bilan -c copy (qayta kodlashsiz) ajratadi.
+    Sinxron — run_in_executor orqali chaqiriladi. (ok, stderr_tail) qaytaradi."""
+    cmd = [
+        "ffmpeg", "-y", "-i", src_path,
+        "-map", f"0:{stream_index}",
+        "-vn", "-c", "copy",
+        out_path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if result.returncode != 0:
+            return False, result.stderr[-800:]
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+async def _download_to_temp(
+    client: Client,
+    from_chat,
+    msg_id: int,
+    status_msg,
+    user_id: int,
+    report=None,
+) -> tuple[str | None, str | None, object | None]:
+    """Faylni vaqtinchalik diskka yuklaydi (SEND QILMASDAN).
+
+    _download_and_send'dagi yuklash bosqichi bilan bir xil mantiq (progress,
+    "to'liq yuklanmadimi" tekshiruvi), lekin Telegramga yuborish qismi yo'q —
+    chunki bu funksiya audio-ajratish oqimi uchun ishlatiladi: avval butun
+    faylni diskka tushiramiz, keyin undan audio strimlarni ajratib alohida
+    yuboramiz, asl (katta) faylning o'zi hech qachon yuborilmaydi.
+
+    Qaytaradi: (tmp_path, filename, msg) — xato bo'lsa (None, None, None).
+    Chaqiruvchi tmp_path faylini ishlatib bo'lgach albatta o'chirishi kerak.
+    """
+    try:
+        await _resolve_peer_safe(client, from_chat)
+        msg = await client.get_messages(from_chat, msg_id)
+        if not msg or msg.empty or not msg.media:
+            return None, None, None
+
+        media_obj = _media_obj(msg)
+        if not media_obj:
+            return None, None, None
+
+        filename = _resolve_filename(msg)
+        short_name = filename if len(filename) <= 22 else filename[:19] + "..."
+        ext = os.path.splitext(filename)[1].lstrip(".") or "bin"
+        file_size = getattr(media_obj, "file_size", 0) or 0
+        total_mb = file_size / 1024 / 1024 if file_size else 0
+        last_pct = [-1]
+
+        async def _dl_progress(current, total):
+            if is_cancelled(user_id):
+                return
+            if not total:
+                return
+            pct = min(int(current / total * 100), 99)
+            if report:
+                report(f"⬇️ {short_name} {pct}%")
+            cur_mb = current / 1024 / 1024
+            txt = f"⬇️ *Yuklanmoqda (audio uchun)...*\n\n`{pct}%`\n`{cur_mb:.1f}` / `{total_mb:.1f}` MB"
+            if pct - last_pct[0] < 10:
+                return
+            last_pct[0] = pct
+            try:
+                await status_msg.edit_text(txt, parse_mode="Markdown")
+            except Exception:
+                pass
+
+        tmp_path = os.path.join(TEMP_DIR, f"sra_{msg.id}_{user_id}_{int(time.time()*1000)}.{ext}")
+        await client.download_media(media_obj, file_name=tmp_path, progress=_dl_progress)
+
+        if is_cancelled(user_id):
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            return None, None, None
+
+        if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
+            return None, None, None
+
+        downloaded_size = os.path.getsize(tmp_path)
+        if file_size and downloaded_size < file_size * 0.95:
+            logger.error(
+                "Audio uchun yuklash tugallanmagan: %s — kutilgan %s, olingan %s",
+                filename, file_size, downloaded_size,
+            )
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            return None, None, None
+
+        return tmp_path, filename, msg
+
+    except FloodWait as e:
+        _record_flood_event()
+        if report:
+            report(f"⏳ flood {e.value}s kutilmoqda")
+        await asyncio.sleep(e.value)
+        return await _download_to_temp(client, from_chat, msg_id, status_msg, user_id, report=report)
+    except Exception as e:
+        logger.error("_download_to_temp xato (msg %s): %s", msg_id, e, exc_info=True)
+        return None, None, None
+
+
+async def _extract_and_send_audio_for_one(
+    client: Client,
+    from_chat,
+    msg_id: int,
+    status_msg,
+    user_id: int,
+    dest_chat_id: int,
+    dest_thread_id: int | None,
+    bot,
+    silent: bool = False,
+    report=None,
+    send_gate=None,
+    mark_db: bool = True,
+) -> bool:
+    """Bitta xabarni yuklab, undagi BARCHA audio strimlarni alohida fayl
+    sifatida ajratib, ketma-ket yuboradi. Kamida bitta audio muvaffaqiyatli
+    yuborilsa True qaytaradi.
+
+    send_gate berilgan bo'lsa (_BoundTurnGate), faqat haqiqiy yuborish
+    bosqichida navbatini kutadi — eski guruh mavzusidagi tartib /savea
+    ishlatilganda ham buzilmaydi (xuddi oddiy /save kabi)."""
+    from utils.sender import send_file
+    from utils.db import is_already_saved, mark_saved
+
+    _gate_released = False
+
+    def _release_gate():
+        nonlocal _gate_released
+        if send_gate is not None and not _gate_released:
+            _gate_released = True
+            send_gate.advance()
+
+    tmp_path = None
+    extracted_paths: list[str] = []
+    try:
+        if is_cancelled(user_id):
+            return False
+
+        source_chat_id = from_chat if isinstance(from_chat, int) else None
+        if mark_db and source_chat_id is not None and await is_already_saved(source_chat_id, msg_id, dest_thread_id):
+            if report:
+                report("⏭ allaqachon saqlangan")
+            return True
+
+        tmp_path, filename, msg = await _download_to_temp(
+            client, from_chat, msg_id, status_msg, user_id, report=report,
+        )
+        if not tmp_path:
+            return False
+
+        if report:
+            report("🔎 audio strimlar qidirilmoqda...")
+        audio_streams = await _extract_audio_streams(tmp_path)
+        if not audio_streams:
+            if report:
+                report("⚠️ audio strim topilmadi")
+            if not silent:
+                try:
+                    await status_msg.edit_text(f"⚠️ *{filename}* ichida audio strim topilmadi.", parse_mode="Markdown")
+                except Exception:
+                    pass
+            return False
+
+        base = os.path.splitext(filename)[0]
+        loop = asyncio.get_running_loop()
+        sent_any = False
+
+        # ── Navbat darvozasi: ajratilgan audio strimlar ham TARTIB BILAN
+        # yuborilishi kerak (masalan 1-til, 2-til ketma-ketligi saqlansin).
+        # send_gate faqat tashqi (xabarlar orasidagi) tartibni boshqaradi —
+        # shu sababli bitta xabar ichidagi bir nechta audio strim faqat
+        # BIRINCHISI uchun navbatni kutadi, qolganlari o'sha worker ichida
+        # baribir ketma-ket (parallelsiz) yuboriladi.
+        for i, s in enumerate(audio_streams):
+            if is_cancelled(user_id):
+                break
+            idx = s.get("index")
+            codec = s.get("codec_name", "")
+            ext = _audio_stream_ext(codec)
+            out_path = os.path.join(TEMP_DIR, f"sra_out_{msg_id}_{idx}_{int(time.time()*1000)}.{ext}")
+
+            if report:
+                report(f"🎚 audio #{idx} ajratilmoqda...")
+            ok, err = await loop.run_in_executor(None, _extract_one_audio_stream, tmp_path, idx, out_path)
+            if not ok:
+                logger.error("Audio strim ajratish xato (msg %s, stream %s): %s", msg_id, idx, err)
+                if os.path.exists(out_path):
+                    os.remove(out_path)
+                continue
+
+            extracted_paths.append(out_path)
+
+            tags = s.get("tags", {})
+            lang = tags.get("language", "")
+            title = tags.get("title", "")
+            name_suffix = f"_{lang}" if lang else (f"_{idx}" if len(audio_streams) > 1 else "")
+            out_name = f"{base}{name_suffix}.{ext}"
+            caption_bits = [f"🎧 {base}"]
+            if lang:
+                caption_bits.append(f"[{lang}]")
+            if title:
+                caption_bits.append(title)
+            caption = " ".join(caption_bits)
+
+            part_gate = send_gate if i == 0 else None
+            if part_gate is not None:
+                if report:
+                    report(f"⏳ audio #{idx} navbatda...")
+                await part_gate.wait_turn()
+
+            if report:
+                report(f"📤 audio #{idx} yuborilmoqda...")
+            try:
+                target_chat = dest_chat_id or status_msg.chat_id
+                await send_file(
+                    message=status_msg,
+                    file_path=out_path,
+                    filename=out_name,
+                    caption=caption,
+                    context=None,
+                    force_document=False,
+                    target_chat_id=target_chat if target_chat != status_msg.chat_id else None,
+                    message_thread_id=dest_thread_id,
+                )
+                sent_any = True
+            except Exception as e:
+                logger.error("Audio yuborish xato (msg %s, stream %s): %s", msg_id, idx, e, exc_info=True)
+            finally:
+                if part_gate is not None:
+                    _release_gate()
+                if out_path in extracted_paths:
+                    extracted_paths.remove(out_path)
+                if os.path.exists(out_path):
+                    os.remove(out_path)
+
+        if sent_any and mark_db and source_chat_id is not None:
+            await mark_saved(source_chat_id, msg_id, dest_chat_id, dest_thread_id)
+
+        return sent_any
+
+    except Exception as e:
+        logger.error("_extract_and_send_audio_for_one xato (msg %s): %s", msg_id, e, exc_info=True)
+        return False
+    finally:
+        _release_gate()
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        for p in extracted_paths:
+            if os.path.exists(p):
+                os.remove(p)
+
+
+async def _send_audio_batch(
+    client: Client, from_chat, ids: list, status_msg,
+    user_id: int, dest_chat_id: int, dest_thread_id: int | None, bot,
+    bot_data: dict | None = None,
+    batch_concurrency: int = _DEFAULT_BATCH_CONCURRENCY,
+):
+    """_send_batch bilan bir xil arxitektura (parallel download + Event
+    zanjiri orqali tartibli yuborish), lekin har bir worker to'liq faylni
+    emas, undan ajratilgan audio strimlarni yuboradi. /savea shu yerga
+    keladi."""
+    total = len(ids)
+    if total == 0:
+        await status_msg.edit_text("❌ Audio ajratish uchun media yo'q.")
+        return
+
+    sem = asyncio.Semaphore(batch_concurrency)
+    send_gate = _TurnGate(total)
+    done = 0
+    sent = 0
+    failed_ids: list[int] = []
+    lock = asyncio.Lock()
+    cancelled_flag = False
+    slots: dict[int, str] = {}
+
+    async def _worker(mid: int, slot: int, turn: int):
+        nonlocal done, sent, cancelled_flag
+
+        def _report(text: str):
+            slots[slot] = text
+
+        async with sem:
+            if is_cancelled(user_id):
+                cancelled_flag = True
+                send_gate.release_all_from(turn)
+                return
+            slots[slot] = "⏳ navbatda..."
+            ok = await _extract_and_send_audio_for_one(
+                client, from_chat, mid, status_msg, user_id,
+                dest_chat_id, dest_thread_id, bot, silent=True, report=_report,
+                send_gate=send_gate.bind(turn),
+            )
+            slots.pop(slot, None)
+            async with lock:
+                done += 1
+                if ok:
+                    sent += 1
+                else:
+                    failed_ids.append(mid)
+
+    async def _progress_reporter():
+        last_render = ""
+        while done < total and not cancelled_flag:
+            if is_cancelled(user_id):
+                return
+            bar = _progress_bar(int(done / total * 100))
+            lines = [f"🎧 *{done}/{total}* fayl ishlandi ({batch_concurrency} parallel, tartib bilan)", bar]
+            for s in sorted(slots.keys()):
+                lines.append(f"`{slots[s]}`")
+            render = "\n".join(lines)
+            if render != last_render:
+                last_render = render
+                _progress_state[status_msg.message_id] = render
+                try:
+                    await status_msg.edit_text(
+                        render, parse_mode="Markdown",
+                        reply_markup=_refresh_kb(status_msg.message_id),
+                    )
+                except Exception:
+                    pass
+            await asyncio.sleep(2.0)
+
+    reporter_task = asyncio.create_task(_progress_reporter())
+    try:
+        await asyncio.gather(*[
+            _worker(mid, i % batch_concurrency, i) for i, mid in enumerate(ids)
+        ])
+    finally:
+        reporter_task.cancel()
+        try:
+            await reporter_task
+        except asyncio.CancelledError:
+            pass
+
+    if cancelled_flag or is_cancelled(user_id):
+        await status_msg.edit_text(f"❌ Bekor qilindi. {sent}/{total} fayldan audio yuborildi.")
+        return
+
+    archive_note = f"\n☁️ Arxiv guruhi: `{dest_chat_id}`" if ARCHIVE_GROUP_ID else ""
+    fail_note = f"\n⚠️ Audio topilmadi/xato: *{len(failed_ids)}* ta" if failed_ids else ""
+    await status_msg.edit_text(
+        f"✅ {sent}/{total} fayldan audio strimlar yuborildi.{archive_note}{fail_note}",
+        parse_mode="Markdown",
+    )
+
+
+async def audio_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/a <link> — link ichidagi ENG OXIRGI (eng konkret) xabar ID'sini
+    oladi va FAQAT o'sha bitta faylning audio strimlarini ajratib yuboradi.
+    Topic bo'lishi shart emas — oddiy guruh/kanal xabariga ham ishlaydi."""
+    args = update.message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await update.message.reply_text(
+            "❗ Foydalanish:\n`/a https://t.me/c/1234567890/456`\n"
+            "(bitta xabardagi faylning audio strimlarini ajratib yuboradi)",
+            parse_mode="Markdown",
+        )
+        return
+
+    client = await get_user_client()
+    if client is None:
+        await update.message.reply_text("⚠️ Save Restricted sozlanmagan.")
+        return
+
+    # parse_tme_link ikkala formatni ham qo'llab-quvvatlaydi:
+    #   t.me/c/CHAT/MSG          → msg_id = MSG
+    #   t.me/c/CHAT/A/B          → msg_id = B (eng oxirgi/konkret segment)
+    chat_id, msg_id = parse_tme_link(args[1])
+    if not chat_id or not msg_id:
+        await update.message.reply_text("❌ Havola xato.", parse_mode="Markdown")
+        return
+
+    user_id = update.effective_user.id
+    register_task(user_id, label="Audio extract (1 file)")
+    status = await update.message.reply_text("⏳ Fayl tekshirilmoqda...")
+
+    if not ARCHIVE_GROUP_ID:
+        dest_chat = update.effective_chat.id
+        dest_thread = getattr(update.message, "message_thread_id", None)
+        ok = await _extract_and_send_audio_for_one(
+            client, chat_id, msg_id, status, user_id, dest_chat, dest_thread, context.bot,
+        )
+        clear_task(user_id)
+        if ok:
+            try:
+                await status.delete()
+            except Exception:
+                pass
+        else:
+            err = "Bekor qilindi." if is_cancelled(user_id) else "Audio strim topilmadi yoki yuklab bo'lmadi."
+            await status.edit_text(f"❌ {err}")
+        return
+
+    # Arxiv guruh bor — qaysi topicga saqlashni so'raymiz (xuddi /save kabi)
+    clear_task(user_id)
+    key = _new_pending_key()
+    context.bot_data[key] = {
+        "kind": "audio_link",
+        "chat_id": chat_id,
+        "msg_id": msg_id,
+        "user_id": user_id,
+        "status_chat_id": status.chat_id,
+        "status_message_id": status.message_id,
+    }
+    await status.edit_text(
+        "🎧 *Audio ajratish*\n\n📌 Qaysi topicga yuboramiz?",
+        parse_mode="Markdown",
+        reply_markup=_dest_choice_kb(key),
+    )
+
+
+async def save_audio_topic_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/savea <link> — /save bilan bir xil tarzda butun topicni skanlaydi,
+    lekin har bir faylning to'liq nusxasi o'rniga audio strimlarini
+    ajratib yuboradi."""
+    args = update.message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await update.message.reply_text(
+            "❗ Foydalanish:\n`/savea https://t.me/c/1234567890/456`\n"
+            "(topicdagi barcha fayllarning audio strimlarini ajratib yuboradi)",
+            parse_mode="Markdown",
+        )
+        return
+
+    client = await get_user_client()
+    if client is None:
+        await update.message.reply_text("⚠️ Save Restricted sozlanmagan.")
+        return
+
+    chat_id, thread_id, from_msg_id = parse_topic_link(args[1])
+    if not chat_id or not thread_id:
+        await update.message.reply_text("❌ Havola xato.", parse_mode="Markdown")
+        return
+
+    status = await update.message.reply_text("🔍 Topik skanlanmoqda (audio uchun)...")
+    user_id = update.effective_user.id
+
+    try:
+        await _resolve_peer_safe(client, chat_id)
+        media_ids = []
+
+        try:
+            root = await client.get_messages(chat_id, thread_id)
+            if root and not root.empty and root.media:
+                media_ids.append(root.id)
+        except Exception:
+            pass
+
+        scanned = 0
+        last_update = time.monotonic()
+        async for m in client.get_discussion_replies(chat_id, thread_id):
+            scanned += 1
+            if m.media:
+                media_ids.append(m.id)
+            now = time.monotonic()
+            if now - last_update >= 2.0:
+                last_update = now
+                try:
+                    await status.edit_text(
+                        f"🔍 *{scanned}* xabar tekshirildi, *{len(media_ids)}* ta media topildi..."
+                        + (f"\n📍 {from_msg_id} xabardan boshlab" if from_msg_id else ""),
+                        parse_mode="Markdown",
+                    )
+                except Exception:
+                    pass
+        media_ids = sorted(set(media_ids))
+
+        if from_msg_id:
+            media_ids = [mid for mid in media_ids if mid >= from_msg_id]
+
+        if not media_ids:
+            note = " (berilgan xabardan keyin)" if from_msg_id else ""
+            await status.edit_text(f"❌ Topikda media topilmadi{note}.")
+            return
+
+        count = len(media_ids)
+        range_note = f"\n📍 *{from_msg_id}* xabardan boshlab" if from_msg_id else ""
+        label = f"AudioTopic_{thread_id}_{count}files"
+
+        if not ARCHIVE_GROUP_ID:
+            uid, dest_chat, dest_thread = await _prepare_destination(update, context, label)
+            sr_cfg = await _load_sr_settings(uid)
+            batch_conc = await _smart_batch_concurrency(sr_cfg["parallel"])
+            await status.edit_text(
+                f"🎧 {count} ta fayldan audio ajratilmoqda...",
+                reply_markup=_refresh_kb(status.message_id),
+            )
+            await _send_audio_batch(
+                client, chat_id, media_ids, status, uid, dest_chat, dest_thread, context.bot,
+                context.bot_data, batch_concurrency=batch_conc,
+            )
+            clear_task(uid)
+            return
+
+        # Arxiv guruh bor — qaysi topicga saqlashni so'raymiz
+        key = _new_pending_key()
+        context.bot_data[key] = {
+            "kind": "audio_topic",
+            "from_chat": chat_id,
+            "ids": media_ids,
+            "label": label,
+            "user_id": user_id,
+            "status_chat_id": status.chat_id,
+            "status_message_id": status.message_id,
+        }
+        await status.edit_text(
+            f"🎧 *{count}* ta fayl topildi (audio ajratiladi).{range_note}\n\n📌 Qaysi topicga yuboramiz?",
+            parse_mode="Markdown",
+            reply_markup=_dest_choice_kb(key),
+        )
+    except Exception as e:
+        logger.error("save_audio_topic_handler: %s", e, exc_info=True)
+        clear_task(user_id)
+        await status.edit_text(f"❌ Xato: {e}")
+
+
+async def _continue_audio_link_save(key: str, dest_chat: int, dest_thread: int | None, bot, status_ref, bot_data: dict):
+    """Topic tanlangandan keyin — /a (bitta fayl, audio) ni davom ettiradi."""
+    pending = bot_data.pop(key, None)
+    if not pending:
+        await status_ref.edit_text("❌ Ma'lumot topilmadi yoki eskirgan.")
+        return
+
+    client = await get_user_client()
+    if client is None:
+        await status_ref.edit_text("⚠️ Userbot ulanmagan.")
+        return
+
+    user_id = pending["user_id"]
+    register_task(user_id, label="Audio extract (1 file)")
+
+    try:
+        await status_ref.edit_text("⬇️ *Yuklanmoqda (audio uchun)...*", parse_mode="Markdown")
+    except Exception:
+        pass
+
+    ok = await _extract_and_send_audio_for_one(
+        client, pending["chat_id"], pending["msg_id"], status_ref, user_id,
+        dest_chat, dest_thread, bot,
+    )
+    clear_task(user_id)
+
+    if ok:
+        try:
+            await status_ref.delete()
+        except Exception:
+            pass
+    else:
+        err = "Bekor qilindi." if is_cancelled(user_id) else "Audio strim topilmadi yoki yuklab bo'lmadi."
+        await status_ref.edit_text(f"❌ {err}")
+
+
+async def _continue_audio_topic_save(key: str, dest_chat: int, dest_thread: int | None, bot, status_ref, bot_data: dict):
+    """Topic tanlangandan keyin — /savea (butun topic, audio) ni davom ettiradi."""
+    pending = bot_data.pop(key, None)
+    if not pending:
+        await status_ref.edit_text("❌ Ma'lumot topilmadi yoki eskirgan.")
+        return
+
+    client = await get_user_client()
+    if client is None:
+        await status_ref.edit_text("⚠️ Userbot ulanmagan.")
+        return
+
+    user_id = pending["user_id"]
+    ids = pending["ids"]
+    from_chat = pending["from_chat"]
+    count = len(ids)
+    register_task(user_id, label=f"Audio extract: {pending.get('label', '')}")
+
+    sr_cfg = await _load_sr_settings(user_id)
+    batch_conc = await _smart_batch_concurrency(sr_cfg["parallel"])
+
+    try:
+        await status_ref.edit_text(
+            f"🎧 {count} ta fayldan audio ajratilmoqda...",
+            reply_markup=_refresh_kb(status_ref.message_id),
+        )
+    except Exception:
+        pass
+    await _send_audio_batch(
+        client, from_chat, ids, status_ref, user_id, dest_chat, dest_thread, bot,
+        bot_data, batch_concurrency=batch_conc,
+    )
+    clear_task(user_id)
+
