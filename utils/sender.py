@@ -68,7 +68,8 @@ def _cleanup_r2_pending():
         _persist_r2_pending()
 
 TELEGRAM_LIMIT = 50 * 1024 * 1024        # 50 MB
-PYROGRAM_LIMIT = 2 * 1024 * 1024 * 1024  # 2 GB
+PYROGRAM_LIMIT = 2 * 1024 * 1024 * 1024  # 2 GB — oddiy akkaunt/bot limiti
+PYROGRAM_PREMIUM_LIMIT = 4 * 1024 * 1024 * 1024  # 4 GB — Telegram Premium akkaunt limiti
 
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".m4v", ".ts", ".wmv"}
 AUDIO_EXTENSIONS = {".mp3", ".aac", ".ogg", ".wav", ".flac", ".m4a", ".opus", ".wma"}
@@ -310,10 +311,53 @@ async def send_file(
             thumb_path = await _make_thumb(file_path, meta["duration"])
             custom_thumb_tmp = thumb_path
 
-    # ─── > 2 GB → R2 yoki Gofile ─────────────────────────────────────────
+    # ─── > 2 GB → sozlamaga qarab: Telegram (Premium) / R2 / Gofile ───────
     _user_id = context.user_data.get("_user_id", 0) if context else 0
-    if file_size > PYROGRAM_LIMIT or force_r2:
-        if r2_ok():
+
+    _large_file_dest = "auto"
+    if context is not None:
+        from utils.user_settings import get as _get_setting
+        _large_file_dest = _get_setting(context, "large_file_dest") or "auto"
+
+    # "telegram" tanlangan va Premium userbot limitiga (4GB) sig'sa — pastdagi
+    # Pyrogram MTProto bosqichiga o'tamiz (force_r2 yo'q, hech narsa qaytarmaymiz).
+    _go_telegram_premium = (
+        not force_r2
+        and _large_file_dest == "telegram"
+        and file_size > PYROGRAM_LIMIT
+        and file_size <= PYROGRAM_PREMIUM_LIMIT
+    )
+
+    if (file_size > PYROGRAM_LIMIT or force_r2) and not _go_telegram_premium:
+        if _large_file_dest == "gofile" and not force_r2:
+            # Foydalanuvchi aniq Gofile'ni tanlagan — R2 sozlangan bo'lsa ham
+            # to'g'ridan-to'g'ri Gofile'ga yuboramiz.
+            status_msg = await message.reply_text(
+                "🌐 *Gofile.io ga yuklanmoqda...*",
+                parse_mode="Markdown",
+            )
+            try:
+                link = await _upload_to_gofile(file_path)
+                await status_msg.edit_text(
+                    f"✅ *Fayl tayyor!*\n\n"
+                    f"📦 Hajmi: `{_fmt_size(file_size)}`\n"
+                    f"📁 Nom: `{filename}`\n\n"
+                    f"🔗 {link}\n\n_(Link 10 kun faol)_",
+                    parse_mode="Markdown",
+                )
+            except Exception as e:
+                await status_msg.edit_text(
+                    f"❌ Gofile.io ga yuklashda xato:\n`{e}`",
+                    parse_mode="Markdown",
+                )
+        elif r2_ok():
+            note = ""
+            if _large_file_dest == "telegram" and file_size > PYROGRAM_PREMIUM_LIMIT:
+                note = "ℹ️ Fayl Premium limitidan (4GB) ham katta — R2 ga yuklanadi.\n\n"
+            elif _large_file_dest == "telegram":
+                note = "⚠️ Telegram tanlangan, lekin Premium userbot mavjud emas — R2 ga yuklanadi.\n\n"
+            if note:
+                await message.reply_text(note, parse_mode="Markdown")
             await _upload_to_r2(message, file_path, filename, file_size, user_id=_user_id, r2_object_key=r2_object_key)
         else:
             # Fallback: Gofile
@@ -392,9 +436,32 @@ async def send_file(
                 os.remove(custom_thumb_tmp)
         return
 
-    # ─── 50 MB – 2 GB → Pyrogram MTProto ─────────────────────────────────
+    # ─── 50 MB – 4 GB → Pyrogram MTProto ─────────────────────────────────
     status_msg = await message.reply_text("📤 Yuborilmoqda... 0%")
-    client = pyro_client_override or await get_pyrogram_client()
+
+    if file_size > PYROGRAM_LIMIT:
+        # Bot akkaunti (yoki Premium'siz oddiy akkaunt) hech qachon 2 GB dan
+        # ortig'ini yubora olmaydi — bu Telegram'ning qattiq cheklovi, kod
+        # bilan aylanib o'tib bo'lmaydi. Shu sababli bu yerga faqat
+        # large_file_dest="telegram" + Premium userbot mavjud bo'lgandagina
+        # yetib kelamiz (yuqoridagi _go_telegram_premium tekshiruvi orqali).
+        client = pyro_client_override
+        if client is None:
+            from handlers.save_restricted import get_user_client as _get_user_client
+            client = await _get_user_client()
+        if client is None:
+            await status_msg.edit_text(
+                "⚠️ Fayl 2 GB dan katta — Telegram orqali yuborish uchun "
+                "Premium userbot kerak, lekin u ulanmagan.\n\n"
+                "Sozlamalardan «2GB+ fayllar» rejimini «R2» yoki «Gofile»ga "
+                "o'zgartiring.",
+                parse_mode="Markdown",
+            )
+            if custom_thumb_tmp and os.path.exists(custom_thumb_tmp):
+                os.remove(custom_thumb_tmp)
+            return
+    else:
+        client = pyro_client_override or await get_pyrogram_client()
 
     # Himoya: agar chaqiruvchi kod (masalan save_restricted.py) dest_chat
     # peer'ini oldindan cache'lamagan bo'lsa, shu yerda urinib ko'ramiz —

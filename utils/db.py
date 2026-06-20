@@ -13,6 +13,11 @@ DEFAULTS = {
     "custom_thumbnail":  None,
     "sample_duration":   30,
     "split_duration":    60,
+    # "auto" — R2 sozlangan bo'lsa R2, aks holda Gofile (eski xulq-atvor)
+    # "telegram" — Premium userbot orqali Telegram'ga (4GB gacha)
+    # "r2" — majburan R2
+    # "gofile" — majburan Gofile
+    "large_file_dest":   "auto",
 }
 
 _CREATE_TABLE = """
@@ -23,6 +28,7 @@ CREATE TABLE IF NOT EXISTS user_settings (
     custom_thumbnail TEXT             DEFAULT NULL,
     sample_duration  INTEGER NOT NULL DEFAULT 30,
     split_duration   INTEGER NOT NULL DEFAULT 60,
+    large_file_dest  TEXT    NOT NULL DEFAULT 'auto',
     updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """
@@ -55,6 +61,15 @@ async def init_db():
         await db.execute(_CREATE_TABLE)
         await db.execute(_CREATE_BATCH_TABLE)
         await db.execute(_CREATE_SAVED_MEDIA_TABLE)
+        # Migratsiya: eski (yangilanishdan oldingi) bazalarda yangi ustun
+        # bo'lmasligi mumkin — bo'lsa xato yutiladi (ustun allaqachon bor).
+        try:
+            await db.execute(
+                "ALTER TABLE user_settings ADD COLUMN large_file_dest "
+                "TEXT NOT NULL DEFAULT 'auto'"
+            )
+        except Exception:
+            pass
         await db.commit()
 
 
@@ -114,6 +129,7 @@ async def db_load(user_id: int) -> dict:
         "custom_thumbnail":  row["custom_thumbnail"],
         "sample_duration":   row["sample_duration"],
         "split_duration":    row["split_duration"],
+        "large_file_dest":   row["large_file_dest"] if "large_file_dest" in row.keys() else "auto",
     }
 
 
@@ -150,8 +166,8 @@ async def db_set(user_id: int, key: str, value) -> None:
             defaults[key] = value
             await db.execute(
                 "INSERT INTO user_settings "
-                "(user_id, upload_mode, rename_file, custom_thumbnail, sample_duration, split_duration) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(user_id, upload_mode, rename_file, custom_thumbnail, sample_duration, split_duration, large_file_dest) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     user_id,
                     defaults["upload_mode"],
@@ -159,6 +175,7 @@ async def db_set(user_id: int, key: str, value) -> None:
                     defaults["custom_thumbnail"],
                     defaults["sample_duration"],
                     defaults["split_duration"],
+                    defaults["large_file_dest"],
                 ),
             )
         await db.commit()
@@ -169,8 +186,8 @@ async def db_reset(user_id: int) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "INSERT OR REPLACE INTO user_settings "
-            "(user_id, upload_mode, rename_file, custom_thumbnail, sample_duration, split_duration) "
-            "VALUES (?, 'document', 0, NULL, 30, 60)",
+            "(user_id, upload_mode, rename_file, custom_thumbnail, sample_duration, split_duration, large_file_dest) "
+            "VALUES (?, 'document', 0, NULL, 30, 60, 'auto')",
             (user_id,),
         )
         await db.commit()
