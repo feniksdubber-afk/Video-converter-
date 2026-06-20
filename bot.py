@@ -80,7 +80,7 @@ from handlers.batch import (
     batch_command, handle_batch_abort, handle_batch_remove_file,
 )
 from handlers.r2_browser import r2_command, r2_callback, r2_rename_text, r2_mkdir_text, _show_r2_list_cb
-from handlers.save_restricted import save_link_handler, save_topic_handler, save_confirm_callback
+from handlers.save_restricted import save_link_handler, save_topic_handler, save_confirm_callback, handle_save_new_topic_name
 from utils.auth_handlers import auth_gate, allow_handler, deny_handler, users_handler
 from utils.auth import reload_auth
 from utils.task_manager import cancel_task, clear_task
@@ -99,8 +99,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["_user_id"] = user_id
     await ensure_loaded(user_id, context)
 
-    # ── Save Restricted confirm / cancel ───────────────────────────────────────
-    if data.startswith("sr_confirm|") or data in ("sr_cancel", "sr_cancel_run") or data.startswith("sr_progress|"):
+    # ── Save Restricted confirm / cancel / topic tanlash ────────────────────────
+    if data.startswith("sr_"):
         await save_confirm_callback(update, context)
         return
 
@@ -360,6 +360,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "settings_split_dur":  handle_settings_text,
         "watermark_text":      handle_watermark_text,
         "crop_custom":         handle_crop_custom_text,
+        "save_new_topic_name": handle_save_new_topic_name,
     }
 
     # R2 rename / papka yaratish
