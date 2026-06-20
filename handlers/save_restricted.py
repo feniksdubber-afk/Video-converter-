@@ -796,7 +796,7 @@ async def _send_batch(
     reporter_task = asyncio.create_task(_progress_reporter())
     try:
         await asyncio.gather(*[
-            _worker(mid, i % _BATCH_CONCURRENCY) for i, mid in enumerate(ids)
+            _worker(mid, i % batch_concurrency) for i, mid in enumerate(ids)
         ])
     finally:
         reporter_task.cancel()
