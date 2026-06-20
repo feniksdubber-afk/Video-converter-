@@ -30,7 +30,7 @@ from utils.task_manager import (
 
 logger = logging.getLogger(__name__)
 
-_BATCH_CONCURRENCY = 3  # bir vaqtda nechta fayl yuklanadi/yuboriladi (Pyrogram client bilan ham moslashtirilgan)
+_BATCH_CONCURRENCY = 5  # bir vaqtda nechta fayl yuklanadi/yuboriladi (Pyrogram client bilan ham moslashtirilgan)
 
 # ── Oddiy link saqlash (save_link_handler) uchun BITTA umumiy topic ─────────
 # Har bir foydalanuvchi/fayl uchun emas — hamma uchun bir xil joy.
