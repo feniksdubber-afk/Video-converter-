@@ -282,13 +282,17 @@ def parse_tme_link(text: str):
 
 
 def parse_topic_link(text: str):
+    """chat_id, thread_id, from_msg_id ni qaytaradi.
+    from_msg_id — havolada 3-segment (konkret xabar) bo'lsa shu, aks holda None.
+    Masalan: t.me/c/123/12616/12617 → thread_id=12616, from_msg_id=12617
+             t.me/c/123/12616        → thread_id=12616, from_msg_id=None"""
     m = re.search(r"https?://t\.me/c/(\d+)/(\d+)(?:/(\d+))?", text)
     if m:
         chat_id = int("-100" + m.group(1))
-        if m.group(3):
-            return chat_id, int(m.group(2))
-        return chat_id, int(m.group(2))
-    return None, None
+        thread_id = int(m.group(2))
+        from_msg_id = int(m.group(3)) if m.group(3) else None
+        return chat_id, thread_id, from_msg_id
+    return None, None, None
 
 
 async def _resolve_peer_safe(client: Client, chat_id):
@@ -463,6 +467,15 @@ async def _download_and_send(
 
     except Exception as e:
         logger.error("_download_and_send xato: %s", e, exc_info=True)
+        try:
+            await status_msg.edit_text(
+                f"⚠️ *{filename}* yuborilmadi:\n`{e}`",
+                parse_mode="Markdown",
+                reply_markup=_refresh_kb(status_msg.message_id),
+            )
+            await asyncio.sleep(2)
+        except Exception:
+            pass
         return False
     finally:
         if tmp_path and os.path.exists(tmp_path):
@@ -697,7 +710,7 @@ async def save_topic_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("⚠️ Save Restricted sozlanmagan.")
         return
 
-    chat_id, thread_id = parse_topic_link(args[1])
+    chat_id, thread_id, from_msg_id = parse_topic_link(args[1])
     if not chat_id or not thread_id:
         await update.message.reply_text("❌ Havola xato.", parse_mode="Markdown")
         return
@@ -728,11 +741,18 @@ async def save_topic_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 media_ids.append(m.id)
         media_ids = sorted(set(media_ids))
 
+        # Havolada konkret xabar ko'rsatilgan bo'lsa (3-segment) —
+        # faqat shu xabardan boshlab oxirigacha bo'lganlarini olamiz.
+        if from_msg_id:
+            media_ids = [mid for mid in media_ids if mid >= from_msg_id]
+
         if not media_ids:
-            await status.edit_text("❌ Topikda media topilmadi.")
+            note = " (berilgan xabardan keyin)" if from_msg_id else ""
+            await status.edit_text(f"❌ Topikda media topilmadi{note}.")
             return
 
         count = len(media_ids)
+        range_note = f"\n📍 *{from_msg_id}* xabardan boshlab" if from_msg_id else ""
         label = f"Topic_{thread_id}_{count}files"
 
         if not ARCHIVE_GROUP_ID:
@@ -755,7 +775,7 @@ async def save_topic_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     InlineKeyboardButton("❌ Bekor", callback_data="sr_cancel"),
                 ]])
                 await status.edit_text(
-                    f"⚠️ Topikda *{count}* ta media bor.\nHammasi yuklab yuborilsinmi?",
+                    f"⚠️ Topikda *{count}* ta media bor.{range_note}\nHammasi yuklab yuborilsinmi?",
                     reply_markup=kb, parse_mode="Markdown",
                 )
             clear_task(uid)
@@ -773,7 +793,7 @@ async def save_topic_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "status_message_id": status.message_id,
         }
         await status.edit_text(
-            f"📦 *{count}* ta media topildi.\n\n📌 Qaysi topicga saqlaymiz?",
+            f"📦 *{count}* ta media topildi.{range_note}\n\n📌 Qaysi topicga saqlaymiz?",
             parse_mode="Markdown",
             reply_markup=_dest_choice_kb(key),
         )
