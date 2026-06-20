@@ -50,6 +50,8 @@ def summary(context) -> str:
     sample  = s.get("sample_duration",  DEFAULTS["sample_duration"])
     split   = s.get("split_duration",   DEFAULTS["split_duration"])
     largefd = s.get("large_file_dest",  DEFAULTS["large_file_dest"])
+    sr_par  = s.get("sr_parallel",      DEFAULTS["sr_parallel"])
+    sr_del  = s.get("sr_chunk_delay",   DEFAULTS["sr_chunk_delay"])
 
     upload_label = {"document": "📄 Dokument", "video": "🎬 Video", "audio": "🎵 Audio"}.get(upload, upload)
     rename_label = "✅ Yoqiq" if rename else "❌ O'chiq"
@@ -60,6 +62,8 @@ def summary(context) -> str:
         "r2": "☁️ R2",
         "gofile": "🌐 Gofile",
     }.get(largefd, largefd)
+    sr_par_label = "✅ Yoqiq (2 parallel)" if sr_par else "❌ O'chiq (ketma-ket)"
+    sr_del_label = f"{sr_del:.1f}s" if sr_del else "0.0s (to'liq tezlik)"
     return (
         f"⚙️ *Joriy sozlamalar:*\n\n"
         f"📤 Upload rejimi: {upload_label}\n"
@@ -68,4 +72,7 @@ def summary(context) -> str:
         f"🎬 Sample davomiyligi: `{sample}` soniya\n"
         f"✂️ Split davomiyligi: `{split}` soniya\n"
         f"📦 2GB+ fayllar: {largefd_label}\n"
+        f"\n📥 *Save Restricted:*\n"
+        f"🔀 Parallel yuklash: {sr_par_label}\n"
+        f"⏱ Chunk oraliq: `{sr_del_label}`\n"
     )

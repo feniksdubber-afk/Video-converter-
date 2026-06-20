@@ -18,6 +18,14 @@ DEFAULTS = {
     # "r2" — majburan R2
     # "gofile" — majburan Gofile
     "large_file_dest":   "auto",
+    # ── Save Restricted yuklab olish sozlamalari ──────────────────────────
+    # 1 = parallel (bir vaqtda 2 ta fayl), 0 = ketma-ket (1 ta fayl)
+    # Parallel rejimda flood wait ehtimoli yuqori — sekin bo'lsa o'chiring.
+    "sr_parallel":       1,
+    # Har bir chunk (bo'lak) yuklanib bo'lgandan keyin kutish (soniya).
+    # 0.0 = to'liq tezlik; 0.5 = tavsiya; 1.0 = sekin/xavfsiz; 2.0+ = juda sekin.
+    # Telegram flood limit bilan kurashish uchun ko'paytiring.
+    "sr_chunk_delay":    0.0,
 }
 
 _CREATE_TABLE = """
@@ -29,6 +37,8 @@ CREATE TABLE IF NOT EXISTS user_settings (
     sample_duration  INTEGER NOT NULL DEFAULT 30,
     split_duration   INTEGER NOT NULL DEFAULT 60,
     large_file_dest  TEXT    NOT NULL DEFAULT 'auto',
+    sr_parallel      INTEGER NOT NULL DEFAULT 1,
+    sr_chunk_delay   REAL    NOT NULL DEFAULT 0.0,
     updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """
@@ -67,6 +77,20 @@ async def init_db():
             await db.execute(
                 "ALTER TABLE user_settings ADD COLUMN large_file_dest "
                 "TEXT NOT NULL DEFAULT 'auto'"
+            )
+        except Exception:
+            pass
+        try:
+            await db.execute(
+                "ALTER TABLE user_settings ADD COLUMN sr_parallel "
+                "INTEGER NOT NULL DEFAULT 1"
+            )
+        except Exception:
+            pass
+        try:
+            await db.execute(
+                "ALTER TABLE user_settings ADD COLUMN sr_chunk_delay "
+                "REAL NOT NULL DEFAULT 0.0"
             )
         except Exception:
             pass
