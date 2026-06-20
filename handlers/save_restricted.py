@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import time
 
 from pyrogram import Client
@@ -64,25 +65,94 @@ def _save_shared_topic(chat_id: int, thread_id: int | None) -> None:
 
 
 async def _ensure_shared_topic(bot) -> tuple[int | None, int | None]:
-    """save_link_handler uchun bitta doimiy topic qaytaradi (kerak bo'lsa yaratadi)."""
+    """Eski (yagona) umumiy topic — endi ishlatilmaydi, faqat orqaga moslik
+    (_load_topics migratsiyasi) uchun _load_shared_topic/_save_shared_topic
+    bilan birga saqlanib qolmoqda."""
     if not ARCHIVE_GROUP_ID:
         return None, None
-
     cached = _load_shared_topic()
-    if cached.get("chat_id") == ARCHIVE_GROUP_ID and (cached.get("thread_id") or not AUTO_CREATE_TOPIC):
-        return cached["chat_id"], cached.get("thread_id")
+    return cached.get("chat_id"), cached.get("thread_id")
 
-    chat_id = ARCHIVE_GROUP_ID
-    thread_id = None
-    if AUTO_CREATE_TOPIC:
+
+# ── "Qaysi topicga?" tanlovi uchun yaratilgan topiclar ro'yxati ─────────────
+_TOPICS_FILE = os.path.join(DATA_DIR, "archive_topics.json")
+_topics_cache: list[dict] | None = None
+
+
+def _load_topics() -> list[dict]:
+    """Tanlov tugmalari uchun saqlangan topiclar ro'yxatini qaytaradi."""
+    global _topics_cache
+    if _topics_cache is not None:
+        return _topics_cache
+    topics: list[dict] = []
+    if os.path.isfile(_TOPICS_FILE):
         try:
-            topic = await bot.create_forum_topic(chat_id=chat_id, name=SHARED_TOPIC_NAME)
-            thread_id = topic.message_thread_id
-        except Exception as e:
-            logger.warning("Umumiy topic yaratish xato: %s", e)
+            with open(_TOPICS_FILE, encoding="utf-8") as f:
+                saved = json.load(f)
+            if isinstance(saved, list):
+                topics = [t for t in saved if isinstance(t, dict) and t.get("thread_id")]
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("topics ro'yxati o'qish xato: %s", e)
+    if not topics:
+        # Eski (yagona) umumiy topic bo'lsa — ro'yxatga moslab qo'shamiz
+        old = _load_shared_topic()
+        if old.get("thread_id"):
+            topics = [{"thread_id": old["thread_id"], "name": SHARED_TOPIC_NAME}]
+    _topics_cache = topics
+    return topics
 
-    _save_shared_topic(chat_id, thread_id)
-    return chat_id, thread_id
+
+def _save_topics(topics: list[dict]) -> None:
+    global _topics_cache
+    _topics_cache = topics
+    try:
+        with open(_TOPICS_FILE, "w", encoding="utf-8") as f:
+            json.dump(topics, f, ensure_ascii=False)
+    except OSError as e:
+        logger.warning("topics ro'yxati saqlash xato: %s", e)
+
+
+def _add_topic(thread_id: int, name: str) -> None:
+    """Yangi yaratilgan topicni ro'yxat boshiga qo'shadi (eskirgan nusxalarni olib tashlaydi)."""
+    topics = [t for t in _load_topics() if t.get("thread_id") != thread_id]
+    topics.insert(0, {"thread_id": thread_id, "name": name[:64] or f"Topic {thread_id}"})
+    _save_topics(topics[:50])
+
+
+def _new_pending_key() -> str:
+    return secrets.token_hex(4)
+
+
+def _dest_choice_kb(key: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📂 Mavjud topicga", callback_data=f"sr_dest_list|{key}")],
+        [InlineKeyboardButton("🆕 Yangi topicga", callback_data=f"sr_dest_new|{key}")],
+        [InlineKeyboardButton("❌ Bekor", callback_data=f"sr_dest_cancel|{key}")],
+    ])
+
+
+class _MsgRef:
+    """Callback orqali emas, matn (state) orqali davom etilganda ham xuddi
+    PTB Message obyekti kabi (.edit_text/.delete/.message_id/.chat_id)
+    saqlangan status xabarga murojaat qilish uchun yengil wrapper."""
+
+    def __init__(self, bot, chat_id: int, message_id: int):
+        self.bot = bot
+        self.chat_id = chat_id
+        self.message_id = message_id
+
+    async def edit_text(self, text, parse_mode=None, reply_markup=None):
+        return await self.bot.edit_message_text(
+            chat_id=self.chat_id, message_id=self.message_id,
+            text=text, parse_mode=parse_mode, reply_markup=reply_markup,
+        )
+
+    async def delete(self):
+        try:
+            await self.bot.delete_message(chat_id=self.chat_id, message_id=self.message_id)
+        except Exception:
+            pass
+
 
 _user_client: Client | None = None
 _user_lock = asyncio.Lock()
@@ -477,32 +547,51 @@ async def save_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         uid = user_id
         register_task(uid, label=f"Save: {_resolve_filename(msg)}")
-        dest_chat, dest_thread = await _ensure_shared_topic(context.bot)
-        if not dest_chat:
+
+        if not ARCHIVE_GROUP_ID:
+            # Arxiv guruh sozlanmagan — tanlov mantiqsiz, joriy chatga saqlaymiz
             dest_chat = update.effective_chat.id
             dest_thread = getattr(update.message, "message_thread_id", None)
 
-        _progress_state[status.message_id] = "⬇️ *Yuklanmoqda...*"
-        await status.edit_text(
-            "⬇️ *Yuklanmoqda...*",
-            parse_mode="Markdown",
-            reply_markup=_refresh_kb(status.message_id),
-        )
+            _progress_state[status.message_id] = "⬇️ *Yuklanmoqda...*"
+            await status.edit_text(
+                "⬇️ *Yuklanmoqda...*",
+                parse_mode="Markdown",
+                reply_markup=_refresh_kb(status.message_id),
+            )
 
-        ok = await _download_and_send_one(
-            client, chat_id, msg_id, status, uid, dest_chat, dest_thread, context.bot,
-        )
-        _progress_state.pop(status.message_id, None)
+            ok = await _download_and_send_one(
+                client, chat_id, msg_id, status, uid, dest_chat, dest_thread, context.bot,
+            )
+            _progress_state.pop(status.message_id, None)
+            clear_task(uid)
+
+            if ok:
+                try:
+                    await status.delete()
+                except Exception:
+                    pass
+            else:
+                err = "Bekor qilindi." if is_cancelled(uid) else "Yuklab bo'lmadi."
+                await status.edit_text(f"❌ {err}")
+            return True
+
+        # Arxiv guruh bor — qaysi topicga saqlashni so'raymiz
         clear_task(uid)
-
-        if ok:
-            try:
-                await status.delete()
-            except Exception:
-                pass
-        else:
-            err = "Bekor qilindi." if is_cancelled(uid) else "Yuklab bo'lmadi."
-            await status.edit_text(f"❌ {err}")
+        key = _new_pending_key()
+        context.bot_data[key] = {
+            "kind": "link",
+            "chat_id": chat_id,
+            "msg_id": msg_id,
+            "user_id": uid,
+            "status_chat_id": status.chat_id,
+            "status_message_id": status.message_id,
+        }
+        await status.edit_text(
+            f"📁 *{_resolve_filename(msg)}*\n\n📌 Qaysi topicga saqlaymiz?",
+            parse_mode="Markdown",
+            reply_markup=_dest_choice_kb(key),
+        )
 
     except Exception as e:
         logger.error("save_link_handler: %s", e, exc_info=True)
@@ -567,33 +656,180 @@ async def save_topic_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         count = len(media_ids)
         label = f"Topic_{thread_id}_{count}files"
-        uid, dest_chat, dest_thread = await _prepare_destination(update, context, label)
 
-        if count <= 30:
-            await status.edit_text(
-                f"📦 {count} ta media yuklanmoqda...",
-                reply_markup=_refresh_kb(status.message_id),
-            )
-            await _send_batch(client, chat_id, media_ids, status, uid, dest_chat, dest_thread, context.bot)
-        else:
-            key = f"sr_ids_{update.effective_chat.id}_{user_id}"
-            context.bot_data[key] = {
-                "chat_id": chat_id, "ids": media_ids,
-                "user_id": uid, "dest_chat": dest_chat, "dest_thread": dest_thread,
-            }
-            kb = InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Ha, yuborsin", callback_data=f"sr_confirm|{key}"),
-                InlineKeyboardButton("❌ Bekor", callback_data="sr_cancel"),
-            ]])
-            await status.edit_text(
-                f"⚠️ Topikda *{count}* ta media bor.\nHammasi yuklab yuborilsinmi?",
-                reply_markup=kb, parse_mode="Markdown",
-            )
-        clear_task(uid)
+        if not ARCHIVE_GROUP_ID:
+            # Arxiv guruh sozlanmagan — eski xatti-harakat (tanlovsiz)
+            uid, dest_chat, dest_thread = await _prepare_destination(update, context, label)
+            if count <= 30:
+                await status.edit_text(
+                    f"📦 {count} ta media yuklanmoqda...",
+                    reply_markup=_refresh_kb(status.message_id),
+                )
+                await _send_batch(client, chat_id, media_ids, status, uid, dest_chat, dest_thread, context.bot)
+            else:
+                key = f"sr_ids_{update.effective_chat.id}_{user_id}"
+                context.bot_data[key] = {
+                    "chat_id": chat_id, "ids": media_ids,
+                    "user_id": uid, "dest_chat": dest_chat, "dest_thread": dest_thread,
+                }
+                kb = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Ha, yuborsin", callback_data=f"sr_confirm|{key}"),
+                    InlineKeyboardButton("❌ Bekor", callback_data="sr_cancel"),
+                ]])
+                await status.edit_text(
+                    f"⚠️ Topikda *{count}* ta media bor.\nHammasi yuklab yuborilsinmi?",
+                    reply_markup=kb, parse_mode="Markdown",
+                )
+            clear_task(uid)
+            return
+
+        # Arxiv guruh bor — qaysi topicga saqlashni so'raymiz
+        key = _new_pending_key()
+        context.bot_data[key] = {
+            "kind": "topic",
+            "from_chat": chat_id,
+            "ids": media_ids,
+            "label": label,
+            "user_id": user_id,
+            "status_chat_id": status.chat_id,
+            "status_message_id": status.message_id,
+        }
+        await status.edit_text(
+            f"📦 *{count}* ta media topildi.\n\n📌 Qaysi topicga saqlaymiz?",
+            parse_mode="Markdown",
+            reply_markup=_dest_choice_kb(key),
+        )
     except Exception as e:
         logger.error("save_topic_handler: %s", e, exc_info=True)
         clear_task(user_id)
         await status.edit_text(f"❌ Xato: {e}")
+
+
+async def _continue_link_save(key: str, dest_chat: int, dest_thread: int | None, bot, status_ref, bot_data: dict):
+    """Topic tanlangandan keyin — bitta havola (link) saqlashni davom ettiradi."""
+    pending = bot_data.pop(key, None)
+    if not pending:
+        await status_ref.edit_text("❌ Ma'lumot topilmadi yoki eskirgan.")
+        return
+
+    client = await get_user_client()
+    if client is None:
+        await status_ref.edit_text("⚠️ Userbot ulanmagan.")
+        return
+
+    user_id = pending["user_id"]
+    register_task(user_id, label="Save link")
+    _progress_state[status_ref.message_id] = "⬇️ *Yuklanmoqda...*"
+    try:
+        await status_ref.edit_text(
+            "⬇️ *Yuklanmoqda...*", parse_mode="Markdown",
+            reply_markup=_refresh_kb(status_ref.message_id),
+        )
+    except Exception:
+        pass
+
+    ok = await _download_and_send_one(
+        client, pending["chat_id"], pending["msg_id"], status_ref, user_id,
+        dest_chat, dest_thread, bot,
+    )
+    _progress_state.pop(status_ref.message_id, None)
+    clear_task(user_id)
+
+    if ok:
+        try:
+            await status_ref.delete()
+        except Exception:
+            pass
+    else:
+        err = "Bekor qilindi." if is_cancelled(user_id) else "Yuklab bo'lmadi."
+        await status_ref.edit_text(f"❌ {err}")
+
+
+async def _continue_topic_save(key: str, dest_chat: int, dest_thread: int | None, bot, status_ref, bot_data: dict):
+    """Topic tanlangandan keyin — butun topikdan saqlashni davom ettiradi."""
+    pending = bot_data.pop(key, None)
+    if not pending:
+        await status_ref.edit_text("❌ Ma'lumot topilmadi yoki eskirgan.")
+        return
+
+    client = await get_user_client()
+    if client is None:
+        await status_ref.edit_text("⚠️ Userbot ulanmagan.")
+        return
+
+    user_id = pending["user_id"]
+    ids = pending["ids"]
+    from_chat = pending["from_chat"]
+    count = len(ids)
+    register_task(user_id, label=f"Save: {pending.get('label', '')}")
+
+    if count <= 30:
+        try:
+            await status_ref.edit_text(
+                f"📦 {count} ta media yuklanmoqda...",
+                reply_markup=_refresh_kb(status_ref.message_id),
+            )
+        except Exception:
+            pass
+        await _send_batch(client, from_chat, ids, status_ref, user_id, dest_chat, dest_thread, bot)
+        clear_task(user_id)
+    else:
+        confirm_key = f"sr_ids_{status_ref.chat_id}_{user_id}_{secrets.token_hex(3)}"
+        bot_data[confirm_key] = {
+            "chat_id": from_chat, "ids": ids,
+            "user_id": user_id, "dest_chat": dest_chat, "dest_thread": dest_thread,
+        }
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Ha, yuborsin", callback_data=f"sr_confirm|{confirm_key}"),
+            InlineKeyboardButton("❌ Bekor", callback_data="sr_cancel"),
+        ]])
+        await status_ref.edit_text(
+            f"⚠️ Topikda *{count}* ta media bor.\nHammasi yuklab yuborilsinmi?",
+            reply_markup=kb, parse_mode="Markdown",
+        )
+        clear_task(user_id)
+
+
+async def handle_save_new_topic_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """'🆕 Yangi topicga' bosilgandan keyin foydalanuvchi yozgan nomni qabul qiladi,
+    yangi forum topic yaratadi va kutilayotgan saqlashni davom ettiradi."""
+    name = (update.message.text or "").strip()
+    key = context.user_data.get("save_pending_key")
+    pending = context.bot_data.get(key) if key else None
+
+    if not pending:
+        context.user_data.pop("state", None)
+        context.user_data.pop("save_pending_key", None)
+        await update.message.reply_text("❌ Ma'lumot topilmadi yoki eskirgan. Havolani qaytadan yuboring.")
+        return
+
+    if not name or name.startswith("/"):
+        await update.message.reply_text("❗ Iltimos, topic uchun matn ko'rinishida nom yuboring.")
+        return
+
+    context.user_data.pop("state", None)
+    context.user_data.pop("save_pending_key", None)
+
+    try:
+        topic = await context.bot.create_forum_topic(chat_id=ARCHIVE_GROUP_ID, name=name[:128])
+        thread_id = topic.message_thread_id
+    except Exception as e:
+        logger.warning("Yangi topic yaratish xato: %s", e)
+        await update.message.reply_text(f"❌ Topic yaratilmadi: {e}")
+        return
+
+    _add_topic(thread_id, name)
+
+    status_ref = _MsgRef(context.bot, pending["status_chat_id"], pending["status_message_id"])
+    try:
+        await status_ref.edit_text(f"✅ Topic yaratildi: *{name[:60]}*", parse_mode="Markdown")
+    except Exception:
+        pass
+
+    if pending["kind"] == "link":
+        await _continue_link_save(key, ARCHIVE_GROUP_ID, thread_id, context.bot, status_ref, context.bot_data)
+    else:
+        await _continue_topic_save(key, ARCHIVE_GROUP_ID, thread_id, context.bot, status_ref, context.bot_data)
 
 
 async def save_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -613,6 +849,84 @@ async def save_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TY
             await query.edit_message_text("❌ Yuklash bekor qilindi.")
         except Exception:
             pass
+        return
+
+    # ── "Qaysi topicga?" tanlovi ────────────────────────────────────────────
+    if query.data.startswith("sr_dest_list|"):
+        await query.answer()
+        key = query.data.split("|", 1)[1]
+        if key not in context.bot_data:
+            await query.edit_message_text("❌ Ma'lumot topilmadi yoki eskirgan.")
+            return
+        topics = _load_topics()
+        if not topics:
+            await query.edit_message_text(
+                "ℹ️ Hali birorta topic yaratilmagan.\n🆕 Yangi topic yarating.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🆕 Yangi topicga", callback_data=f"sr_dest_new|{key}")],
+                    [InlineKeyboardButton("❌ Bekor", callback_data=f"sr_dest_cancel|{key}")],
+                ]),
+            )
+            return
+        rows = [
+            [InlineKeyboardButton(t.get("name", "Topic")[:40], callback_data=f"sr_dest_pick|{key}|{t['thread_id']}")]
+            for t in topics
+        ]
+        rows.append([InlineKeyboardButton("🔙 Orqaga", callback_data=f"sr_dest_back|{key}")])
+        await query.edit_message_text(
+            "📂 *Mavjud topiclar:*",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return
+
+    if query.data.startswith("sr_dest_back|"):
+        await query.answer()
+        key = query.data.split("|", 1)[1]
+        if key not in context.bot_data:
+            await query.edit_message_text("❌ Ma'lumot topilmadi yoki eskirgan.")
+            return
+        await query.edit_message_text(
+            "📌 Qaysi topicga saqlaymiz?",
+            reply_markup=_dest_choice_kb(key),
+        )
+        return
+
+    if query.data.startswith("sr_dest_cancel|"):
+        await query.answer("❌ Bekor qilindi")
+        key = query.data.split("|", 1)[1]
+        context.bot_data.pop(key, None)
+        await query.edit_message_text("❌ Bekor qilindi.")
+        return
+
+    if query.data.startswith("sr_dest_new|"):
+        await query.answer()
+        key = query.data.split("|", 1)[1]
+        if key not in context.bot_data:
+            await query.edit_message_text("❌ Ma'lumot topilmadi yoki eskirgan.")
+            return
+        context.user_data["state"] = "save_new_topic_name"
+        context.user_data["save_pending_key"] = key
+        await query.edit_message_text(
+            "🆕 Yangi topic uchun nom yuboring (matn sifatida):",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Bekor", callback_data=f"sr_dest_cancel|{key}"),
+            ]]),
+        )
+        return
+
+    if query.data.startswith("sr_dest_pick|"):
+        await query.answer()
+        _, key, thread_id_s = query.data.split("|", 2)
+        if key not in context.bot_data:
+            await query.edit_message_text("❌ Ma'lumot topilmadi yoki eskirgan.")
+            return
+        pending = context.bot_data[key]
+        thread_id = int(thread_id_s)
+        if pending["kind"] == "link":
+            await _continue_link_save(key, ARCHIVE_GROUP_ID, thread_id, context.bot, query.message, context.bot_data)
+        else:
+            await _continue_topic_save(key, ARCHIVE_GROUP_ID, thread_id, context.bot, query.message, context.bot_data)
         return
 
     await query.answer()
