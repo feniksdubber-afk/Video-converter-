@@ -11,7 +11,6 @@ def _settings_keyboard(context):
     rename = get(context, "rename_file")
     largefd = get(context, "large_file_dest")
     sr_par = get(context, "sr_parallel")
-    sr_del = get(context, "sr_chunk_delay")
     upload_label = {"document": "📄 Dokument", "video": "🎬 Video", "audio": "🎵 Audio"}.get(upload, upload)
     largefd_label = {
         "auto": "🔄 Avto",
@@ -20,7 +19,6 @@ def _settings_keyboard(context):
         "gofile": "🌐 Gofile",
     }.get(largefd, largefd)
     sr_par_label = "✅ Parallel" if sr_par else "❌ Ketma-ket"
-    sr_del_label = f"{sr_del:.1f}s" if sr_del else "0s"
 
     keyboard = [
         [InlineKeyboardButton(f"📤 Upload rejimi: {upload_label}", callback_data="cfg_upload_cycle")],
@@ -34,8 +32,9 @@ def _settings_keyboard(context):
         [InlineKeyboardButton("🎬 Sample davomiyligi",          callback_data="cfg_sample_dur")],
         [InlineKeyboardButton("✂️ Split davomiyligi",           callback_data="cfg_split_dur")],
         # ── Save Restricted sozlamalari ──────────────────────────────────
+        # Eslatma: tezlik (chunk oraliq) endi qo'lda emas — bot avtomatik
+        # eng tezini tanlaydi, faqat flood tez-tez tushsa o'zi sekinlashtiradi.
         [InlineKeyboardButton(f"🔀 Save parallel: {sr_par_label}", callback_data="cfg_sr_parallel_toggle")],
-        [InlineKeyboardButton(f"⏱ Save chunk oraliq: {sr_del_label}", callback_data="cfg_sr_chunk_cycle")],
         [InlineKeyboardButton("🔄 Sozlamalarni tiklash",        callback_data="cfg_reset")],
         [InlineKeyboardButton("❌ Yopish",                      callback_data="cfg_close")],
     ]
@@ -123,26 +122,8 @@ async def handle_settings_callback(update: Update, context: ContextTypes.DEFAULT
         current = get(context, "sr_parallel")
         await set_(user_id, context, "sr_parallel", 0 if current else 1)
         new_val = get(context, "sr_parallel")
-        label = "✅ Parallel yoqildi (2 ta bir vaqtda)" if new_val else "❌ Parallel o'chirildi (ketma-ket)"
+        label = "✅ Parallel yoqildi (aqlli: Premium bo'lsa 4, aks holda 2 ta)" if new_val else "❌ Parallel o'chirildi (ketma-ket)"
         await query.answer(label)
-        await query.edit_message_text(summary(context), reply_markup=_settings_keyboard(context), parse_mode="Markdown")
-
-    elif data == "cfg_sr_chunk_cycle":
-        # 0.0 → 0.5 → 1.0 → 2.0 → 3.0 → 0.0
-        delays = [0.0, 0.5, 1.0, 2.0, 3.0]
-        current = float(get(context, "sr_chunk_delay") or 0.0)
-        # Eng yaqin qiymatni topib, keyingisiga o'tamiz
-        closest = min(delays, key=lambda x: abs(x - current))
-        next_delay = delays[(delays.index(closest) + 1) % len(delays)]
-        await set_(user_id, context, "sr_chunk_delay", next_delay)
-        hint = {
-            0.0: "to'liq tezlik (flood risk baland)",
-            0.5: "tavsiya etiladi",
-            1.0: "sekin, xavfsiz",
-            2.0: "juda sekin",
-            3.0: "minimal flood risk",
-        }.get(next_delay, "")
-        await query.answer(f"⏱ Chunk oraliq: {next_delay:.1f}s — {hint}")
         await query.edit_message_text(summary(context), reply_markup=_settings_keyboard(context), parse_mode="Markdown")
 
     elif data == "cfg_close":

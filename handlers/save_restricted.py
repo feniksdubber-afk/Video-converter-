@@ -44,16 +44,17 @@ _resolved_peers: set[int] = set()
 # ── Foydalanuvchi Save Restricted sozlamalarini yuklash ─────────────────────
 
 async def _load_sr_settings(user_id: int) -> dict:
-    """Foydalanuvchining sr_parallel va sr_chunk_delay sozlamalarini qaytaradi."""
+    """Foydalanuvchining sr_parallel sozlamasini qaytaradi.
+    (chunk_delay endi qo'lda sozlanmaydi — _smart_chunk_delay() avtomatik
+    hisoblaydi, _FLOOD_THRESHOLD/_smart_chunk_delay() ga qarang.)"""
     from utils.db import db_load, DEFAULTS
     try:
         settings = await db_load(user_id)
         return {
-            "parallel":    bool(int(settings.get("sr_parallel",    DEFAULTS.get("sr_parallel",    1)))),
-            "chunk_delay": float(settings.get("sr_chunk_delay",   DEFAULTS.get("sr_chunk_delay",  0.0))),
+            "parallel": bool(int(settings.get("sr_parallel", DEFAULTS.get("sr_parallel", 1)))),
         }
     except Exception:
-        return {"parallel": True, "chunk_delay": 0.0}
+        return {"parallel": True}
 
 # Bot allaqachon a'zo bo'lgan, lekin username/invite-link orqali "tanishtirib"
 # bo'lmaydigan (BOT_METHOD_INVALID: messages.CheckChatInvite faqat user
@@ -282,12 +283,13 @@ class _MsgRef:
 
 _user_client: Client | None = None
 _user_lock = asyncio.Lock()
+_user_client_premium: bool | None = None
 
 _progress_state: dict = {}
 
 
 async def get_user_client() -> Client | None:
-    global _user_client
+    global _user_client, _user_client_premium
     if not SESSION_STRING:
         return None
     async with _user_lock:
@@ -297,15 +299,74 @@ async def get_user_client() -> Client | None:
                 api_id=API_ID,
                 api_hash=API_HASH,
                 session_string=SESSION_STRING,
-                # MUHIM: Pyrogram default'da bir vaqtda faqat 1 ta transmissiyaga
-                # (yuklash/yuborish) ruxsat beradi — _BATCH_CONCURRENCY qancha
-                # bo'lishidan qat'i nazar, fayllar MTProto darajasida navbatda
-                # kutib, ketma-ket bajariladi ("⏳ navbatda..." shu sababdan
-                # uzoq turib qoladi). Buni _BATCH_CONCURRENCY bilan moslashtiramiz.
-                max_concurrent_transmissions=1,  # fayl darajasida parallel (_BATCH_CONCURRENCY) bor, chunk darajasida 1 yetarli — flood kamayadi
+                # MUHIM: bu qiymat _smart_batch_concurrency() qaytarishi mumkin
+                # bo'lgan eng katta parallel sondan past bo'lmasligi kerak —
+                # aks holda Pyrogram fayllarni MTProto darajasida (media
+                # session pool) navbatda kutib, ketma-ket bajaradi va
+                # yuqori darajadagi "parallel" sozlama amalda ishlamaydi.
+                max_concurrent_transmissions=4,
             )
             await _user_client.start()
+            try:
+                me = await _user_client.get_me()
+                _user_client_premium = bool(getattr(me, "is_premium", False))
+                logger.info(
+                    "Userbot ulandi: %s (Premium: %s)",
+                    getattr(me, "first_name", "?"), _user_client_premium,
+                )
+            except Exception as e:
+                logger.warning("Userbot Premium holatini tekshirib bo'lmadi: %s", e)
+                _user_client_premium = False
     return _user_client
+
+
+async def is_user_premium() -> bool:
+    """Userbot Telegram Premium akkauntmi — bir martalik tekshirib keshlaydi.
+    Premium bo'lsa: 4GB yuklab yuborish limiti va ko'proq parallel oqim
+    xavfsiz hisoblanadi."""
+    global _user_client_premium
+    if _user_client_premium is None:
+        await get_user_client()
+    return bool(_user_client_premium)
+
+
+# ── Aqlli (adaptiv) tezlik boshqaruvi ────────────────────────────────────────
+# Foydalanuvchi qo'lda "chunk oraliq" tanlashi o'rniga bot o'zi:
+#   - oxirgi bir necha daqiqada FloodWait qancha tez-tez tushganini kuzatadi
+#     va shunga moslab juda kichik xavfsizlik kutishini avtomatik yoqadi —
+#     aks holda doim 0.0 (to'liq tezlik);
+#   - userbot Premium ekanligiga qarab parallel yuklab olish sonini tanlaydi.
+_flood_events: list[float] = []
+_FLOOD_WINDOW = 60.0   # shu oraliqdagi flood'lar hisobga olinadi (soniya)
+_FLOOD_THRESHOLD = 2   # shu oraliqda kamida shuncha flood bo'lsa — sekinlashtiramiz
+
+
+def _record_flood_event() -> None:
+    """FloodWait tushganda chaqiriladi — adaptiv sekinlashtirish uchun."""
+    now = time.time()
+    _flood_events.append(now)
+    cutoff = now - _FLOOD_WINDOW
+    while _flood_events and _flood_events[0] < cutoff:
+        _flood_events.pop(0)
+
+
+def _smart_chunk_delay() -> float:
+    """So'nggi _FLOOD_WINDOW soniyada _FLOOD_THRESHOLD'dan ko'p (yoki teng)
+    flood bo'lgan bo'lsa — kichik xavfsizlik kutishi qo'shamiz, aks holda
+    0.0 (sun'iy sekinlashtirishsiz, to'liq tezlik)."""
+    now = time.time()
+    cutoff = now - _FLOOD_WINDOW
+    recent = sum(1 for t in _flood_events if t >= cutoff)
+    return 1.0 if recent >= _FLOOD_THRESHOLD else 0.0
+
+
+async def _smart_batch_concurrency(parallel: bool) -> int:
+    """Foydalanuvchi sozlamadan "parallel" yoqgan bo'lsa, userbot Premium
+    ekanligiga qarab bir vaqtda nechta fayl yuklanishini tanlaydi."""
+    if not parallel:
+        return 1
+    premium = await is_user_premium()
+    return 4 if premium else 2
 
 
 
@@ -691,6 +752,7 @@ async def _download_and_send_one(
         return ok_any
 
     except FloodWait as e:
+        _record_flood_event()
         if _retry >= 5:
             logger.error("msg %s FloodWait: retry limiti tugadi (%s s)", msg_id, e.value)
             return False
@@ -884,7 +946,7 @@ async def save_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Foydalanuvchi sozlamalarini yuklab olamiz
         sr_cfg = await _load_sr_settings(uid)
-        chunk_delay = sr_cfg["chunk_delay"]
+        chunk_delay = _smart_chunk_delay()
 
         if not ARCHIVE_GROUP_ID:
             # Arxiv guruh sozlanmagan — tanlov mantiqsiz, joriy chatga saqlaymiz
@@ -1022,8 +1084,8 @@ async def save_topic_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             uid, dest_chat, dest_thread = await _prepare_destination(update, context, label)
             # Foydalanuvchi sozlamalarini yuklab olamiz
             sr_cfg = await _load_sr_settings(uid)
-            batch_conc = 2 if sr_cfg["parallel"] else 1
-            chunk_delay = sr_cfg["chunk_delay"]
+            batch_conc = await _smart_batch_concurrency(sr_cfg["parallel"])
+            chunk_delay = _smart_chunk_delay()
             if count <= 30:
                 await status.edit_text(
                     f"📦 {count} ta media yuklanmoqda...",
@@ -1089,7 +1151,7 @@ async def _continue_link_save(key: str, dest_chat: int, dest_thread: int | None,
 
     # Foydalanuvchi sozlamalarini yuklab olamiz
     sr_cfg = await _load_sr_settings(user_id)
-    chunk_delay = sr_cfg["chunk_delay"]
+    chunk_delay = _smart_chunk_delay()
 
     _progress_state[status_ref.message_id] = "⬇️ *Yuklanmoqda...*"
     try:
@@ -1137,8 +1199,8 @@ async def _continue_topic_save(key: str, dest_chat: int, dest_thread: int | None
 
     # Foydalanuvchi sozlamalarini yuklab olamiz
     sr_cfg = await _load_sr_settings(user_id)
-    batch_conc = 2 if sr_cfg["parallel"] else 1
-    chunk_delay = sr_cfg["chunk_delay"]
+    batch_conc = await _smart_batch_concurrency(sr_cfg["parallel"])
+    chunk_delay = _smart_chunk_delay()
 
     if count <= 30:
         try:
@@ -1254,8 +1316,8 @@ async def save_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await _send_batch(
             client, data["chat_id"], data["ids"], query.message,
             uid, data["dest_chat"], data["dest_thread"], context.bot, context.bot_data,
-            batch_concurrency=2 if sr_cfg["parallel"] else 1,
-            chunk_delay=sr_cfg["chunk_delay"],
+            batch_concurrency=await _smart_batch_concurrency(sr_cfg["parallel"]),
+            chunk_delay=_smart_chunk_delay(),
         )
         clear_task(uid)
         return
@@ -1397,7 +1459,7 @@ async def save_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await _send_batch(
         client, data["chat_id"], data["ids"], query.message,
         uid, data["dest_chat"], data["dest_thread"], context.bot, context.bot_data,
-        batch_concurrency=2 if sr_cfg["parallel"] else 1,
-        chunk_delay=sr_cfg["chunk_delay"],
+        batch_concurrency=await _smart_batch_concurrency(sr_cfg["parallel"]),
+        chunk_delay=_smart_chunk_delay(),
     )
     clear_task(uid)
