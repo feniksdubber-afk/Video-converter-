@@ -369,7 +369,7 @@ async def send_file(
     try:
         pyro_kw = {}
         if message_thread_id:
-            pyro_kw["reply_to_message_id"] = message_thread_id  # Pyrogram forum topic
+            pyro_kw["message_thread_id"] = message_thread_id  # Pyrogram forum topic
         if upload_mode == "video" and is_video:
             await asyncio.wait_for(
                 client.send_video(
