@@ -551,26 +551,34 @@ async def _download_and_send(
         # "Peer id invalid" xatosi beradi. send_file() chaqirishdan oldin
         # bot_session'ga bu chat'ni cache'laymiz.
         #
-        # MUHIM: get_chat(int(target_chat)) ham ichida resolve_peer() ni
-        # chaqiradi — agar bot_session bu chatni hali umuman "tanimasa",
-        # bare raqamli ID bilan bu chaqiruv ham xato beradi. Invite link
-        # ham BOTLAR uchun ishlamaydi (Telegram: "messages.CheckChatInvite"
-        # faqat user akkauntlarga ruxsat etilgan — BOT_METHOD_INVALID).
-        # Shuning uchun bot allaqachon a'zo bo'lgan chatlar uchun
-        # get_dialogs() orqali peer cache'ni to'ldiramiz (bu botlar uchun
-        # ham ishlaydi, chunki faqat o'zi a'zo bo'lgan chatlarni sanaydi).
+        # MUHIM: ARCHIVE_GROUP_ID kabi -100... (kanal/supergroup) turidagi
+        # chatlar uchun bu DOIM muvaffaqiyatsiz bo'ladi — get_dialogs()
+        # botlar uchun taqiqlangan (BOT_METHOD_INVALID), va kanal turidagi
+        # peer'lar faqat avval resolve qilingan bo'lsagina o'z update
+        # oqimiga (channel_pts) "obuna" bo'ladi — bot bu oqimga hech qachon
+        # ulanmagani uchun o'z-o'zidan ham hech qachon o'rganib ololmaydi
+        # (tuxum-tovuq holati). Shu sababli muvaffaqiyatsizlik kutilgan holat
+        # va warning yutiladi, keyin pastda userbot (user_session) ishlatiladi
+        # — chunki u GetDialogs orqali bu chatni allaqachon biladi.
+        _use_user_client_for_send = False
         if target_chat != status_msg.chat_id and int(target_chat) not in _resolved_peers:
             try:
                 from handlers.video_handler import get_pyrogram_client
                 _bot_pyro = await get_pyrogram_client()
-                try:
-                    await _bot_pyro.get_chat(int(target_chat))
-                except Exception:
-                    await _bootstrap_bot_peer_cache(_bot_pyro)
-                    await _bot_pyro.get_chat(int(target_chat))
+                await _bot_pyro.get_chat(int(target_chat))
                 _resolved_peers.add(int(target_chat))
             except Exception as _pe:
-                logger.warning("bot_session peer cache xato: %s", _pe)
+                logger.warning(
+                    "bot_session peer cache xato (kutilgan holat -100 kanallar "
+                    "uchun): %s — userbot orqali yuboriladi.", _pe,
+                )
+                _use_user_client_for_send = True
+
+        _send_kwargs = {}
+        if _use_user_client_for_send:
+            _user_pyro = await get_user_client()
+            if _user_pyro is not None:
+                _send_kwargs["pyro_client_override"] = _user_pyro
 
         await send_file(
             message=status_msg,
@@ -581,6 +589,7 @@ async def _download_and_send(
             force_document=not is_video_file,
             target_chat_id=target_chat if target_chat != status_msg.chat_id else None,
             message_thread_id=dest_thread_id,
+            **_send_kwargs,
         )
 
         short_key = hashlib.md5(f"{user_id}:{filename}".encode()).hexdigest()[:8]
