@@ -256,7 +256,7 @@ async def get_user_client() -> Client | None:
                 # bo'lishidan qat'i nazar, fayllar MTProto darajasida navbatda
                 # kutib, ketma-ket bajariladi ("⏳ navbatda..." shu sababdan
                 # uzoq turib qoladi). Buni _BATCH_CONCURRENCY bilan moslashtiramiz.
-                max_concurrent_transmissions=_BATCH_CONCURRENCY,
+                max_concurrent_transmissions=1,  # fayl darajasida parallel (_BATCH_CONCURRENCY) bor, chunk darajasida 1 yetarli — flood kamayadi
             )
             await _user_client.start()
     return _user_client
@@ -516,6 +516,18 @@ async def _download_and_send(
             user_data = {"settings": settings, "_settings_loaded": True, "_user_id": user_id}
 
         target_chat = dest_chat_id or status_msg.chat_id
+
+        # bot_session (Pyrogram) dest_chat peer'ini bilmasa send_video/send_document
+        # "Peer id invalid" xatosi beradi. send_file() chaqirishdan oldin
+        # bot_session'ga bu chat'ni cache'laymiz.
+        if target_chat != status_msg.chat_id:
+            try:
+                from handlers.video_handler import get_pyrogram_client
+                _bot_pyro = await get_pyrogram_client()
+                await _bot_pyro.get_chat(int(target_chat))
+            except Exception as _pe:
+                logger.warning("bot_session peer cache xato (muhim emas): %s", _pe)
+
         await send_file(
             message=status_msg,
             file_path=tmp_path,
