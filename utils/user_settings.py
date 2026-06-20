@@ -51,19 +51,17 @@ def summary(context) -> str:
     split   = s.get("split_duration",   DEFAULTS["split_duration"])
     largefd = s.get("large_file_dest",  DEFAULTS["large_file_dest"])
     sr_par  = s.get("sr_parallel",      DEFAULTS["sr_parallel"])
-    sr_del  = s.get("sr_chunk_delay",   DEFAULTS["sr_chunk_delay"])
 
     upload_label = {"document": "📄 Dokument", "video": "🎬 Video", "audio": "🎵 Audio"}.get(upload, upload)
     rename_label = "✅ Yoqiq" if rename else "❌ O'chiq"
     thumb_label  = "✅ Bor" if thumb else "❌ Yo'q"
     largefd_label = {
-        "auto": "🔄 Avto (R2/Gofile)",
+        "auto": "🔄 Avto (2GB+ → Premium bo'lsa Telegram, aks holda R2/Gofile)",
         "telegram": "✈️ Telegram (Premium, 4GB)",
         "r2": "☁️ R2",
         "gofile": "🌐 Gofile",
     }.get(largefd, largefd)
-    sr_par_label = "✅ Yoqiq (2 parallel)" if sr_par else "❌ O'chiq (ketma-ket)"
-    sr_del_label = f"{sr_del:.1f}s" if sr_del else "0.0s (to'liq tezlik)"
+    sr_par_label = "✅ Yoqiq (aqlli: Premium bo'lsa 4, aks holda 2 parallel)" if sr_par else "❌ O'chiq (ketma-ket)"
     return (
         f"⚙️ *Joriy sozlamalar:*\n\n"
         f"📤 Upload rejimi: {upload_label}\n"
@@ -74,5 +72,6 @@ def summary(context) -> str:
         f"📦 2GB+ fayllar: {largefd_label}\n"
         f"\n📥 *Save Restricted:*\n"
         f"🔀 Parallel yuklash: {sr_par_label}\n"
-        f"⏱ Chunk oraliq: `{sr_del_label}`\n"
+        f"⚡ Tezlik: `Avtomatik (aqlli)` — bot o'zi eng tezini tanlaydi,\n"
+        f"   flood tez-tez tushsagina o'zi sekinlashtiradi.\n"
     )

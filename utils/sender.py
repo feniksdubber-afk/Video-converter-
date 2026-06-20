@@ -319,14 +319,27 @@ async def send_file(
         from utils.user_settings import get as _get_setting
         _large_file_dest = _get_setting(context, "large_file_dest") or "auto"
 
-    # "telegram" tanlangan va Premium userbot limitiga (4GB) sig'sa — pastdagi
-    # Pyrogram MTProto bosqichiga o'tamiz (force_r2 yo'q, hech narsa qaytarmaymiz).
-    _go_telegram_premium = (
+    # 2-4 GB oraliqdagi fayllar uchun: "auto" (standart) yoki aniq "telegram"
+    # tanlangan bo'lsa — Premium userbot mavjudligini tekshirib, agar
+    # mavjud bo'lsa, AVTOMATIK shu orqali yuboramiz (R2/Gofile'ga
+    # o'tkazmasdan). Premium userbot ulanmagan/Premium emas bo'lsa —
+    # pastdagi R2/Gofile yo'liga muqobil ravishda o'tamiz.
+    _premium_client = None
+    if (
         not force_r2
-        and _large_file_dest == "telegram"
+        and _large_file_dest in ("auto", "telegram")
         and file_size > PYROGRAM_LIMIT
         and file_size <= PYROGRAM_PREMIUM_LIMIT
-    )
+    ):
+        try:
+            from handlers.save_restricted import get_user_client as _get_user_client, is_user_premium as _is_user_premium
+            _candidate = pyro_client_override or await _get_user_client()
+            if _candidate is not None and await _is_user_premium():
+                _premium_client = _candidate
+        except Exception as _pe:
+            logger.warning("Premium userbot tekshiruvida xato: %s", _pe)
+
+    _go_telegram_premium = _premium_client is not None
 
     if (file_size > PYROGRAM_LIMIT or force_r2) and not _go_telegram_premium:
         if _large_file_dest == "gofile" and not force_r2:
@@ -442,17 +455,14 @@ async def send_file(
     if file_size > PYROGRAM_LIMIT:
         # Bot akkaunti (yoki Premium'siz oddiy akkaunt) hech qachon 2 GB dan
         # ortig'ini yubora olmaydi — bu Telegram'ning qattiq cheklovi, kod
-        # bilan aylanib o'tib bo'lmaydi. Shu sababli bu yerga faqat
-        # large_file_dest="telegram" + Premium userbot mavjud bo'lgandagina
-        # yetib kelamiz (yuqoridagi _go_telegram_premium tekshiruvi orqali).
-        client = pyro_client_override
-        if client is None:
-            from handlers.save_restricted import get_user_client as _get_user_client
-            client = await _get_user_client()
+        # bilan aylanib o'tib bo'lmaydi. Bu yerga faqat yuqorida Premium
+        # userbot mavjudligi tasdiqlangan bo'lsagina (_premium_client)
+        # yetib kelamiz — shuning uchun qayta tekshirmasdan o'shani ishlatamiz.
+        client = _premium_client
         if client is None:
             await status_msg.edit_text(
                 "⚠️ Fayl 2 GB dan katta — Telegram orqali yuborish uchun "
-                "Premium userbot kerak, lekin u ulanmagan.\n\n"
+                "Premium userbot kerak, lekin u ulanmagan yoki Premium emas.\n\n"
                 "Sozlamalardan «2GB+ fayllar» rejimini «R2» yoki «Gofile»ga "
                 "o'zgartiring.",
                 parse_mode="Markdown",
