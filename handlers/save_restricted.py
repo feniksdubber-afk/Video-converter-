@@ -504,71 +504,86 @@ async def _download_and_send(
     silent: bool = False,
     report=None,
     chunk_delay: float = 0.0,
+    send_gate=None,
 ) -> bool:
     from utils.sender import send_file, _r2_pending
     from utils.db import is_already_saved, mark_saved
 
-    if is_cancelled(user_id):
-        return False
+    # MUHIM: send_gate har qanday chiqish yo'lida (erta return, istisno,
+    # muvaffaqiyatli yuborish) albatta bo'shatilishi shart — aks holda undan
+    # keyingi navbatdagi barcha workerlar abadiy kutib qoladi. _gate_released
+    # bayrog'i orqali advance() faqat bir marta chaqirilishi ta'minlanadi.
+    _gate_released = False
 
-    media_obj = _media_obj(msg)
-    if not media_obj:
-        return False
+    def _release_gate():
+        nonlocal _gate_released
+        if send_gate is not None and not _gate_released:
+            _gate_released = True
+            send_gate.advance()
 
-    source_chat_id = getattr(getattr(msg, "chat", None), "id", None)
-    if source_chat_id is not None and await is_already_saved(source_chat_id, msg.id, dest_thread_id):
-        if report:
-            report("⏭ allaqachon saqlangan")
-        if not silent:
+    tmp_path = None
+    filename = "fayl"
+    try:
+        if is_cancelled(user_id):
+            return False
+
+        media_obj = _media_obj(msg)
+        if not media_obj:
+            return False
+
+        source_chat_id = getattr(getattr(msg, "chat", None), "id", None)
+        if source_chat_id is not None and await is_already_saved(source_chat_id, msg.id, dest_thread_id):
+            if report:
+                report("⏭ allaqachon saqlangan")
+            if not silent:
+                try:
+                    await status_msg.edit_text(
+                        "⏭ Allaqachon saqlangan, o'tkazib yuborildi.",
+                        reply_markup=_refresh_kb(status_msg.message_id),
+                    )
+                except Exception:
+                    pass
+            return True
+
+        filename = _resolve_filename(msg)
+        short_name = filename if len(filename) <= 22 else filename[:19] + "..."
+        ext = os.path.splitext(filename)[1].lstrip(".") or "bin"
+        file_size = getattr(media_obj, "file_size", 0) or 0
+        total_mb = file_size / 1024 / 1024 if file_size else 0
+        last_pct = [-1]
+
+        async def _dl_progress(current, total):
+            if is_cancelled(user_id):
+                return
+            if not total:
+                return
+            # chunk_delay > 0 bo'lsa — har bir chunk yuklanib bo'lgandan keyin
+            # shu qancha soniya kutiladi. Bu Telegram flood limit bilan kurashadi:
+            # progress callback kutilayotganda Pyrogram keyingi GetFile so'rovini
+            # YUBORMAYDI, ya'ni biz download tezligini sun'iy pasaytiramiz.
+            if chunk_delay > 0.0:
+                await asyncio.sleep(chunk_delay)
+            pct = min(int(current / total * 100), 99)
+            cur_mb = current / 1024 / 1024
+            bar = _progress_bar(pct)
+            if report:
+                report(f"⬇️ {short_name} {pct}%")
+            if silent:
+                return
+            txt = f"⬇️ *Yuklanmoqda...*\n\n{bar} `{pct}%`\n`{cur_mb:.1f}` / `{total_mb:.1f}` MB"
+            _progress_state[status_msg.message_id] = txt
+            if pct - last_pct[0] < 10:
+                return
+            last_pct[0] = pct
             try:
                 await status_msg.edit_text(
-                    "⏭ Allaqachon saqlangan, o'tkazib yuborildi.",
+                    txt, parse_mode="Markdown",
                     reply_markup=_refresh_kb(status_msg.message_id),
                 )
             except Exception:
                 pass
-        return True
 
-    filename = _resolve_filename(msg)
-    short_name = filename if len(filename) <= 22 else filename[:19] + "..."
-    ext = os.path.splitext(filename)[1].lstrip(".") or "bin"
-    file_size = getattr(media_obj, "file_size", 0) or 0
-    total_mb = file_size / 1024 / 1024 if file_size else 0
-    last_pct = [-1]
-
-    async def _dl_progress(current, total):
-        if is_cancelled(user_id):
-            return
-        if not total:
-            return
-        # chunk_delay > 0 bo'lsa — har bir chunk yuklanib bo'lgandan keyin
-        # shu qancha soniya kutiladi. Bu Telegram flood limit bilan kurashadi:
-        # progress callback kutilayotganda Pyrogram keyingi GetFile so'rovini
-        # YUBORMAYDI, ya'ni biz download tezligini sun'iy pasaytiramiz.
-        if chunk_delay > 0.0:
-            await asyncio.sleep(chunk_delay)
-        pct = min(int(current / total * 100), 99)
-        cur_mb = current / 1024 / 1024
-        bar = _progress_bar(pct)
-        if report:
-            report(f"⬇️ {short_name} {pct}%")
-        if silent:
-            return
-        txt = f"⬇️ *Yuklanmoqda...*\n\n{bar} `{pct}%`\n`{cur_mb:.1f}` / `{total_mb:.1f}` MB"
-        _progress_state[status_msg.message_id] = txt
-        if pct - last_pct[0] < 10:
-            return
-        last_pct[0] = pct
-        try:
-            await status_msg.edit_text(
-                txt, parse_mode="Markdown",
-                reply_markup=_refresh_kb(status_msg.message_id),
-            )
-        except Exception:
-            pass
-
-    tmp_path = os.path.join(TEMP_DIR, f"sr_{msg.id}_{user_id}_{int(time.time()*1000)}.{ext}")
-    try:
+        tmp_path = os.path.join(TEMP_DIR, f"sr_{msg.id}_{user_id}_{int(time.time()*1000)}.{ext}")
         await pyro_client.download_media(media_obj, file_name=tmp_path, progress=_dl_progress)
 
         if is_cancelled(user_id):
@@ -599,6 +614,18 @@ async def _download_and_send(
                 except Exception:
                     pass
             return False
+
+        # ── Tartibni saqlash uchun "navbat darvozasi" ───────────────────────
+        # Download paralleldir (tez), lekin guruhga jo'natish (send_file)
+        # qat'iy ketma-ket bo'lishi shart — eski guruh mavzusidagi tartib
+        # buzilmasligi uchun. send_gate (_TurnGate) shu yerda o'z navbatini
+        # kutadi: undan oldingi barcha xabarlar yuborilib bo'lgunicha
+        # to'xtab turadi, kichik fayl tezroq yuklansa ham guruhga otilib
+        # ketmaydi.
+        if send_gate is not None:
+            if report:
+                report(f"⏳ {short_name} navbatda (yuborish uchun)")
+            await send_gate.wait_turn()
 
         if report:
             report(f"📤 {short_name} yuborilmoqda")
@@ -676,6 +703,10 @@ async def _download_and_send(
             **_send_kwargs,
         )
 
+        # Yuborish muvaffaqiyatli tugadi — navbatni darhol keyingi workerga
+        # uzatamiz (boshqa worker tmp_path tozalanishini kutib o'tirmasin).
+        _release_gate()
+
         short_key = hashlib.md5(f"{user_id}:{filename}".encode()).hexdigest()[:8]
         if short_key in _r2_pending:
             tmp_path = None
@@ -698,6 +729,12 @@ async def _download_and_send(
                 pass
         return False
     finally:
+        # Xavfsizlik to'ri: yuqorida hech qaysi yo'lda advance() chaqirilmagan
+        # bo'lsa (masalan media yo'q, allaqachon saqlangan, FloodWait, yoki
+        # boshqa xato send_file dan OLDIN sodir bo'lsa), navbat shu yerda
+        # baribir bo'shatiladi — aks holda qolgan barcha workerlar abadiy
+        # kutib qoladi.
+        _release_gate()
         if tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
 
@@ -730,22 +767,35 @@ async def _download_and_send_one(
     silent: bool = False,
     report=None,
     chunk_delay: float = 0.0,
+    send_gate=None,
 ) -> bool:
     try:
         await _resolve_peer_safe(client, from_chat)
         msg = await client.get_messages(from_chat, msg_id)
         if not msg or msg.empty or not msg.media:
+            # Bu msg_id uchun hech qachon send_file chaqirilmaydi — navbat
+            # shu yerda bo'shatiladi, aks holda keyingilar abadiy kutadi.
+            if send_gate is not None:
+                send_gate.advance()
             return False
 
         album = await _get_album_messages(client, from_chat, msg)
         ok_any = False
-        for part in album:
+        for i, part in enumerate(album):
             if is_cancelled(user_id):
+                # Bekor qilinganda ham navbat tiqilib qolmasligi kerak.
+                if send_gate is not None:
+                    send_gate.advance()
                 break
+            # Albom bir nechta qismdan iborat bo'lsa ham, ular bitta worker
+            # ichida allaqachon ketma-ket yuboriladi (parallel emas) — shu
+            # sababli faqat BIRINCHI qism navbatni kutadi/bo'shatadi. Qolgan
+            # qismlar send_gate'siz, lekin baribir tartibli yuboriladi.
+            part_gate = send_gate if i == 0 else None
             if await _download_and_send(
                 client, part, status_msg, user_id,
                 dest_chat_id, dest_thread_id, bot, silent=silent, report=report,
-                chunk_delay=chunk_delay,
+                chunk_delay=chunk_delay, send_gate=part_gate,
             ):
                 ok_any = True
             await asyncio.sleep(0.8)
@@ -789,6 +839,72 @@ async def _download_and_send_one(
         return False
 
 
+class _TurnGate:
+    """Tartibli yuborish uchun "navbat darvozasi".
+
+    Download'lar (asyncio.Semaphore orqali) parallel ketadi — qaysi fayl
+    avval tugasa, o'sha avval tayyor bo'ladi. Lekin guruhga JO'NATISH
+    (send_file) eski guruh mavzusidagi ketma-ketlikni saqlashi kerak.
+
+    Har bir worker o'zining "turn" raqamiga ega (ids ro'yxatidagi indeksi).
+    Har bir turn uchun alohida asyncio.Event yaratiladi: wait_turn(turn) shu
+    turn'ning Event'i set bo'lguncha kutadi (oldingi barcha turnlar
+    advance() chaqirganda navbat bilan set bo'ladi). Bu yondashuv har bir
+    turn mustaqil signalga ega bo'lgani uchun "barcha kutuvchilarni
+    uyg'otib, keyin qaytadan yopish" kabi noziklik bilan bog'liq xatolardan
+    holi — eng oddiy va ishonchli variant.
+    """
+
+    def __init__(self, total: int):
+        self._total = total
+        self._events = [asyncio.Event() for _ in range(total)]
+        if total > 0:
+            self._events[0].set()  # turn=0 darhol yuborishi mumkin
+
+    async def wait_turn(self, turn: int) -> None:
+        if 0 <= turn < self._total:
+            await self._events[turn].wait()
+
+    def advance(self, turn: int) -> None:
+        """turn yuborilib bo'ldi (yoki o'tkazib yuborildi) — keyingi turnga yashil chiroq beradi."""
+        nxt = turn + 1
+        if 0 <= nxt < self._total:
+            self._events[nxt].set()
+
+    def release_all_from(self, turn: int) -> None:
+        """Bekor qilish kabi holatlarda: turn'dan boshlab BARCHA qolgan
+        eventlarni ochib yuboradi — aks holda turn'dan oldingi (hali
+        navbatida turgan, lekin hali tugamagan) workerlar bu workerning
+        alohida advance() chaqirishini abadiy kutib qolishi mumkin edi.
+        Masalan: workerlar tasodifiy tartibda tugaydi, va agar 5-turn
+        worker'i bekor qilingani uchun faqat self._events[6] ni ochsa-yu,
+        3 va 4-turnlar hali navbatda bo'lsa — ular hech qachon signalini
+        olmaydi. Shu sababli bekor qilishda butun qolgan zanjir bo'shatiladi."""
+        for i in range(max(turn, 0), self._total):
+            self._events[i].set()
+
+    def bind(self, turn: int) -> "_BoundTurnGate":
+        """Berilgan turn raqamiga "bog'langan" kichik obyekt qaytaradi —
+        shunda _download_and_send kabi pastki funksiyalar turn raqamini
+        o'zlari hisoblab yurishi shart emas, faqat .wait_turn()/.advance()
+        chaqirsa kifoya."""
+        return _BoundTurnGate(self, turn)
+
+
+class _BoundTurnGate:
+    """_TurnGate'ning bitta turn'ga bog'langan ingichka wrapper'i."""
+
+    def __init__(self, gate: "_TurnGate", turn: int):
+        self._gate = gate
+        self._turn = turn
+
+    async def wait_turn(self) -> None:
+        await self._gate.wait_turn(self._turn)
+
+    def advance(self) -> None:
+        self._gate.advance(self._turn)
+
+
 async def _send_batch(
     client: Client, from_chat, ids: list, status_msg,
     user_id: int, dest_chat_id: int, dest_thread_id: int | None, bot,
@@ -802,6 +918,11 @@ async def _send_batch(
         return
 
     sem = asyncio.Semaphore(batch_concurrency)
+    # Eski guruh mavzusidagi tartibni saqlash uchun: ids ro'yxatidagi
+    # ketma-ketlik (ya'ni asl xabar tartibi) "turn" raqami sifatida
+    # ishlatiladi. Worker 0 darhol yuboradi, Worker 1 Worker 0 tugaguncha
+    # kutadi, va h.k. — kichik fayl tezroq yuklansa ham otilib ketmaydi.
+    send_gate = _TurnGate(total)
     done = 0
     sent = 0
     failed_ids: list[int] = []
@@ -809,7 +930,7 @@ async def _send_batch(
     cancelled_flag = False
     slots: dict[int, str] = {}  # slot raqami → o'sha slotdagi joriy holat matni
 
-    async def _worker(mid: int, slot: int):
+    async def _worker(mid: int, slot: int, turn: int):
         nonlocal done, sent, cancelled_flag
 
         def _report(text: str):
@@ -818,12 +939,17 @@ async def _send_batch(
         async with sem:
             if is_cancelled(user_id):
                 cancelled_flag = True
+                # Bekor qilinganda barcha qolgan navbatlarni bo'shatamiz —
+                # global bekor qilish bo'lgani uchun baribir hech kim
+                # send_file'ga yetib bormaydi, lekin deadlock bo'lmasligi
+                # uchun zanjir to'liq ochilishi kerak.
+                send_gate.release_all_from(turn)
                 return
             slots[slot] = "⏳ navbatda..."
             ok = await _download_and_send_one(
                 client, from_chat, mid, status_msg, user_id,
                 dest_chat_id, dest_thread_id, bot, silent=True, report=_report,
-                chunk_delay=chunk_delay,
+                chunk_delay=chunk_delay, send_gate=send_gate.bind(turn),
             )
             slots.pop(slot, None)
             async with lock:
@@ -839,7 +965,7 @@ async def _send_batch(
             if is_cancelled(user_id):
                 return
             bar = _progress_bar(int(done / total * 100))
-            lines = [f"📦 *{done}/{total}* yuklandi ({batch_concurrency} parallel)", bar]
+            lines = [f"📦 *{done}/{total}* yuklandi ({batch_concurrency} parallel, tartib bilan yuborilmoqda)", bar]
             for s in sorted(slots.keys()):
                 lines.append(f"`{slots[s]}`")
             render = "\n".join(lines)
@@ -858,7 +984,7 @@ async def _send_batch(
     reporter_task = asyncio.create_task(_progress_reporter())
     try:
         await asyncio.gather(*[
-            _worker(mid, i % batch_concurrency) for i, mid in enumerate(ids)
+            _worker(mid, i % batch_concurrency, i) for i, mid in enumerate(ids)
         ])
     finally:
         reporter_task.cancel()
