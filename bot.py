@@ -392,6 +392,10 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     state = context.user_data.get("state")
 
+    if state == "save_new_topic_name":
+        await update.message.reply_text("❗ Iltimos, topic uchun matn ko'rinishida nom yuboring (fayl emas).")
+        return
+
     if state == "settings_thumb":
         await handle_settings_photo(update, context)
         return
@@ -429,7 +433,11 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     await ensure_loaded(user_id, context)
-    if context.user_data.get("state") == "settings_thumb":
+    state = context.user_data.get("state")
+    if state == "save_new_topic_name":
+        await update.message.reply_text("❗ Iltimos, topic uchun matn ko'rinishida nom yuboring (rasm emas).")
+        return
+    if state == "settings_thumb":
         await handle_settings_photo(update, context)
 
 
