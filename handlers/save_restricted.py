@@ -39,11 +39,22 @@ _BATCH_CONCURRENCY = 2  # bir vaqtda nechta fayl yuklanadi/yuboriladi (Pyrogram 
 # resolve qilinadi — bu normal holat.)
 _resolved_peers: set[int] = set()
 
-# ARCHIVE_GROUP_ID guruhi private (username'siz) bo'lsa, bot_session
-# peer cache'ini "noldan" tiklash uchun ishlatiladigan invite link.
-# Bot bu guruhga allaqachon a'zo/admin bo'lsa ham, get_chat(invite_link)
-# xavfsiz — qayta join qilmaydi, faqat peer ma'lumotini cache'ga yozadi.
-ARCHIVE_GROUP_INVITE_LINK = "https://t.me/+MvoGF_hfj6Y0YjZi"
+# Bot allaqachon a'zo bo'lgan, lekin username/invite-link orqali "tanishtirib"
+# bo'lmaydigan (BOT_METHOD_INVALID: messages.CheckChatInvite faqat user
+# akkauntlar uchun) guruhlar/kanallar uchun: get_dialogs() chaqirilganda
+# pyrogram bot turgan BARCHA chatlarning peer (access_hash) ma'lumotini
+# avtomatik cache'ga yozadi. Shu sababli ARCHIVE_GROUP_ID kabi private va
+# username'siz guruhlar uchun ham ishlaydi — chunki bot u yerda a'zo.
+async def _bootstrap_bot_peer_cache(bot_client) -> None:
+    """bot_session uchun barcha a'zo bo'lgan chatlarning peer cache'ini
+    bir martalik to'ldiradi (get_dialogs orqali). Xatolar yutiladi —
+    chaqiruvchi keyin resolve_peer/get_chat orqali baribir tekshiradi."""
+    try:
+        async for _ in bot_client.get_dialogs():
+            pass
+    except Exception as e:
+        logger.warning("get_dialogs bootstrap xato: %s", e)
+
 
 # ── Oddiy link saqlash (save_link_handler) uchun BITTA umumiy topic ─────────
 # Har bir foydalanuvchi/fayl uchun emas — hamma uchun bir xil joy.
@@ -143,9 +154,9 @@ async def _fetch_live_topics(client: Client, chat_id: int) -> list[dict] | None:
         try:
             peer = await client.resolve_peer(chat_id)
         except Exception:
-            # user_session bu guruhni hali "tanimasa" — invite link orqali
-            # tanishtiramiz (agar a'zo bo'lsa xavfsiz, qayta join qilmaydi).
-            await client.get_chat(ARCHIVE_GROUP_INVITE_LINK)
+            # client (user_session) bu guruhni hali "tanimasa" — get_dialogs()
+            # orqali u a'zo bo'lgan barcha chatlarning peer'ini cache'laymiz.
+            await _bootstrap_bot_peer_cache(client)
             peer = await client.resolve_peer(chat_id)
         result = await client.invoke(
             GetForumTopics(channel=peer, offset_date=0, offset_id=0, offset_topic=0, limit=100)
@@ -542,10 +553,12 @@ async def _download_and_send(
         #
         # MUHIM: get_chat(int(target_chat)) ham ichida resolve_peer() ni
         # chaqiradi — agar bot_session bu chatni hali umuman "tanimasa",
-        # bare raqamli ID bilan bu chaqiruv ham xato beradi (oldingi versiyada
-        # aynan shu sabab patch ishlamagan edi). Shuning uchun muvaffaqiyatsiz
-        # bo'lganda invite link orqali qayta tanishtiramiz — bot guruhga
-        # allaqachon a'zo bo'lsa ham bu xavfsiz (qayta join qilmaydi).
+        # bare raqamli ID bilan bu chaqiruv ham xato beradi. Invite link
+        # ham BOTLAR uchun ishlamaydi (Telegram: "messages.CheckChatInvite"
+        # faqat user akkauntlarga ruxsat etilgan — BOT_METHOD_INVALID).
+        # Shuning uchun bot allaqachon a'zo bo'lgan chatlar uchun
+        # get_dialogs() orqali peer cache'ni to'ldiramiz (bu botlar uchun
+        # ham ishlaydi, chunki faqat o'zi a'zo bo'lgan chatlarni sanaydi).
         if target_chat != status_msg.chat_id and int(target_chat) not in _resolved_peers:
             try:
                 from handlers.video_handler import get_pyrogram_client
@@ -553,7 +566,8 @@ async def _download_and_send(
                 try:
                     await _bot_pyro.get_chat(int(target_chat))
                 except Exception:
-                    await _bot_pyro.get_chat(ARCHIVE_GROUP_INVITE_LINK)
+                    await _bootstrap_bot_peer_cache(_bot_pyro)
+                    await _bot_pyro.get_chat(int(target_chat))
                 _resolved_peers.add(int(target_chat))
             except Exception as _pe:
                 logger.warning("bot_session peer cache xato: %s", _pe)
