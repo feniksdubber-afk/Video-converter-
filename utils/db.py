@@ -154,6 +154,8 @@ async def db_load(user_id: int) -> dict:
         "sample_duration":   row["sample_duration"],
         "split_duration":    row["split_duration"],
         "large_file_dest":   row["large_file_dest"] if "large_file_dest" in row.keys() else "auto",
+        "sr_parallel":       int(row["sr_parallel"]) if "sr_parallel" in row.keys() else DEFAULTS["sr_parallel"],
+        "sr_chunk_delay":    float(row["sr_chunk_delay"]) if "sr_chunk_delay" in row.keys() else DEFAULTS["sr_chunk_delay"],
     }
 
 
@@ -190,8 +192,8 @@ async def db_set(user_id: int, key: str, value) -> None:
             defaults[key] = value
             await db.execute(
                 "INSERT INTO user_settings "
-                "(user_id, upload_mode, rename_file, custom_thumbnail, sample_duration, split_duration, large_file_dest) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "(user_id, upload_mode, rename_file, custom_thumbnail, sample_duration, split_duration, large_file_dest, sr_parallel, sr_chunk_delay) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     user_id,
                     defaults["upload_mode"],
@@ -200,6 +202,8 @@ async def db_set(user_id: int, key: str, value) -> None:
                     defaults["sample_duration"],
                     defaults["split_duration"],
                     defaults["large_file_dest"],
+                    int(defaults["sr_parallel"]),
+                    float(defaults["sr_chunk_delay"]),
                 ),
             )
         await db.commit()
@@ -210,8 +214,8 @@ async def db_reset(user_id: int) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "INSERT OR REPLACE INTO user_settings "
-            "(user_id, upload_mode, rename_file, custom_thumbnail, sample_duration, split_duration, large_file_dest) "
-            "VALUES (?, 'document', 0, NULL, 30, 60, 'auto')",
+            "(user_id, upload_mode, rename_file, custom_thumbnail, sample_duration, split_duration, large_file_dest, sr_parallel, sr_chunk_delay) "
+            "VALUES (?, 'document', 0, NULL, 30, 60, 'auto', 1, 0.0)",
             (user_id,),
         )
         await db.commit()
