@@ -30,7 +30,9 @@ from utils.task_manager import (
 
 logger = logging.getLogger(__name__)
 
-_BATCH_CONCURRENCY = 2  # bir vaqtda nechta fayl yuklanadi/yuboriladi (Pyrogram client bilan ham moslashtirilgan)
+# Standart parallel yuklash soni — foydalanuvchi sozlamasidan o'qiladi,
+# bu qiymat faqat zaxira (fallback) sifatida ishlatiladi.
+_DEFAULT_BATCH_CONCURRENCY = 2
 
 # bot_session uchun "Peer id invalid" xatosini oldini olish: muvaffaqiyatli
 # resolve qilingan chat_id'larni xotirada saqlaymiz, har xabarda qayta
@@ -38,6 +40,20 @@ _BATCH_CONCURRENCY = 2  # bir vaqtda nechta fayl yuklanadi/yuboriladi (Pyrogram 
 # ishga tushganda bu to'plam tozalanadi va birinchi yuborishda qayta
 # resolve qilinadi — bu normal holat.)
 _resolved_peers: set[int] = set()
+
+# ── Foydalanuvchi Save Restricted sozlamalarini yuklash ─────────────────────
+
+async def _load_sr_settings(user_id: int) -> dict:
+    """Foydalanuvchining sr_parallel va sr_chunk_delay sozlamalarini qaytaradi."""
+    from utils.db import db_load, DEFAULTS
+    try:
+        settings = await db_load(user_id)
+        return {
+            "parallel":    bool(int(settings.get("sr_parallel",    DEFAULTS.get("sr_parallel",    1)))),
+            "chunk_delay": float(settings.get("sr_chunk_delay",   DEFAULTS.get("sr_chunk_delay",  0.0))),
+        }
+    except Exception:
+        return {"parallel": True, "chunk_delay": 0.0}
 
 # Bot allaqachon a'zo bo'lgan, lekin username/invite-link orqali "tanishtirib"
 # bo'lmaydigan (BOT_METHOD_INVALID: messages.CheckChatInvite faqat user
@@ -426,6 +442,7 @@ async def _download_and_send(
     bot,
     silent: bool = False,
     report=None,
+    chunk_delay: float = 0.0,
 ) -> bool:
     from utils.sender import send_file, _r2_pending
     from utils.db import is_already_saved, mark_saved
@@ -463,6 +480,12 @@ async def _download_and_send(
             return
         if not total:
             return
+        # chunk_delay > 0 bo'lsa — har bir chunk yuklanib bo'lgandan keyin
+        # shu qancha soniya kutiladi. Bu Telegram flood limit bilan kurashadi:
+        # progress callback kutilayotganda Pyrogram keyingi GetFile so'rovini
+        # YUBORMAYDI, ya'ni biz download tezligini sun'iy pasaytiramiz.
+        if chunk_delay > 0.0:
+            await asyncio.sleep(chunk_delay)
         pct = min(int(current / total * 100), 99)
         cur_mb = current / 1024 / 1024
         bar = _progress_bar(pct)
@@ -645,6 +668,7 @@ async def _download_and_send_one(
     _retry: int = 0,
     silent: bool = False,
     report=None,
+    chunk_delay: float = 0.0,
 ) -> bool:
     try:
         await _resolve_peer_safe(client, from_chat)
@@ -660,6 +684,7 @@ async def _download_and_send_one(
             if await _download_and_send(
                 client, part, status_msg, user_id,
                 dest_chat_id, dest_thread_id, bot, silent=silent, report=report,
+                chunk_delay=chunk_delay,
             ):
                 ok_any = True
             await asyncio.sleep(0.8)
@@ -685,6 +710,7 @@ async def _download_and_send_one(
         return await _download_and_send_one(
             client, from_chat, msg_id, status_msg, user_id,
             dest_chat_id, dest_thread_id, bot, _retry + 1, silent=silent, report=report,
+            chunk_delay=chunk_delay,
         )
     except OSError as e:
         if _retry < 3:
@@ -692,6 +718,7 @@ async def _download_and_send_one(
             return await _download_and_send_one(
                 client, from_chat, msg_id, status_msg, user_id,
                 dest_chat_id, dest_thread_id, bot, _retry + 1, silent=silent, report=report,
+                chunk_delay=chunk_delay,
             )
         logger.error("msg %s OSError: %s", msg_id, e)
         return False
@@ -704,13 +731,15 @@ async def _send_batch(
     client: Client, from_chat, ids: list, status_msg,
     user_id: int, dest_chat_id: int, dest_thread_id: int | None, bot,
     bot_data: dict | None = None,
+    batch_concurrency: int = _DEFAULT_BATCH_CONCURRENCY,
+    chunk_delay: float = 0.0,
 ):
     total = len(ids)
     if total == 0:
         await status_msg.edit_text("❌ Yuboriladigan media yo'q.")
         return
 
-    sem = asyncio.Semaphore(_BATCH_CONCURRENCY)
+    sem = asyncio.Semaphore(batch_concurrency)
     done = 0
     sent = 0
     failed_ids: list[int] = []
@@ -732,6 +761,7 @@ async def _send_batch(
             ok = await _download_and_send_one(
                 client, from_chat, mid, status_msg, user_id,
                 dest_chat_id, dest_thread_id, bot, silent=True, report=_report,
+                chunk_delay=chunk_delay,
             )
             slots.pop(slot, None)
             async with lock:
@@ -747,7 +777,7 @@ async def _send_batch(
             if is_cancelled(user_id):
                 return
             bar = _progress_bar(int(done / total * 100))
-            lines = [f"📦 *{done}/{total}* yuklandi ({_BATCH_CONCURRENCY} parallel)", bar]
+            lines = [f"📦 *{done}/{total}* yuklandi ({batch_concurrency} parallel)", bar]
             for s in sorted(slots.keys()):
                 lines.append(f"`{slots[s]}`")
             render = "\n".join(lines)
@@ -852,6 +882,10 @@ async def save_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = user_id
         register_task(uid, label=f"Save: {_resolve_filename(msg)}")
 
+        # Foydalanuvchi sozlamalarini yuklab olamiz
+        sr_cfg = await _load_sr_settings(uid)
+        chunk_delay = sr_cfg["chunk_delay"]
+
         if not ARCHIVE_GROUP_ID:
             # Arxiv guruh sozlanmagan — tanlov mantiqsiz, joriy chatga saqlaymiz
             dest_chat = update.effective_chat.id
@@ -866,6 +900,7 @@ async def save_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             ok = await _download_and_send_one(
                 client, chat_id, msg_id, status, uid, dest_chat, dest_thread, context.bot,
+                chunk_delay=chunk_delay,
             )
             _progress_state.pop(status.message_id, None)
             clear_task(uid)
@@ -985,12 +1020,19 @@ async def save_topic_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not ARCHIVE_GROUP_ID:
             # Arxiv guruh sozlanmagan — eski xatti-harakat (tanlovsiz)
             uid, dest_chat, dest_thread = await _prepare_destination(update, context, label)
+            # Foydalanuvchi sozlamalarini yuklab olamiz
+            sr_cfg = await _load_sr_settings(uid)
+            batch_conc = 2 if sr_cfg["parallel"] else 1
+            chunk_delay = sr_cfg["chunk_delay"]
             if count <= 30:
                 await status.edit_text(
                     f"📦 {count} ta media yuklanmoqda...",
                     reply_markup=_refresh_kb(status.message_id),
                 )
-                await _send_batch(client, chat_id, media_ids, status, uid, dest_chat, dest_thread, context.bot, context.bot_data)
+                await _send_batch(
+                    client, chat_id, media_ids, status, uid, dest_chat, dest_thread, context.bot,
+                    context.bot_data, batch_concurrency=batch_conc, chunk_delay=chunk_delay,
+                )
             else:
                 key = f"sr_ids_{update.effective_chat.id}_{user_id}"
                 context.bot_data[key] = {
@@ -1044,6 +1086,11 @@ async def _continue_link_save(key: str, dest_chat: int, dest_thread: int | None,
 
     user_id = pending["user_id"]
     register_task(user_id, label="Save link")
+
+    # Foydalanuvchi sozlamalarini yuklab olamiz
+    sr_cfg = await _load_sr_settings(user_id)
+    chunk_delay = sr_cfg["chunk_delay"]
+
     _progress_state[status_ref.message_id] = "⬇️ *Yuklanmoqda...*"
     try:
         await status_ref.edit_text(
@@ -1055,7 +1102,7 @@ async def _continue_link_save(key: str, dest_chat: int, dest_thread: int | None,
 
     ok = await _download_and_send_one(
         client, pending["chat_id"], pending["msg_id"], status_ref, user_id,
-        dest_chat, dest_thread, bot,
+        dest_chat, dest_thread, bot, chunk_delay=chunk_delay,
     )
     _progress_state.pop(status_ref.message_id, None)
     clear_task(user_id)
@@ -1088,6 +1135,11 @@ async def _continue_topic_save(key: str, dest_chat: int, dest_thread: int | None
     count = len(ids)
     register_task(user_id, label=f"Save: {pending.get('label', '')}")
 
+    # Foydalanuvchi sozlamalarini yuklab olamiz
+    sr_cfg = await _load_sr_settings(user_id)
+    batch_conc = 2 if sr_cfg["parallel"] else 1
+    chunk_delay = sr_cfg["chunk_delay"]
+
     if count <= 30:
         try:
             await status_ref.edit_text(
@@ -1096,7 +1148,10 @@ async def _continue_topic_save(key: str, dest_chat: int, dest_thread: int | None
             )
         except Exception:
             pass
-        await _send_batch(client, from_chat, ids, status_ref, user_id, dest_chat, dest_thread, bot, bot_data)
+        await _send_batch(
+            client, from_chat, ids, status_ref, user_id, dest_chat, dest_thread, bot,
+            bot_data, batch_concurrency=batch_conc, chunk_delay=chunk_delay,
+        )
         clear_task(user_id)
     else:
         confirm_key = f"sr_ids_{status_ref.chat_id}_{user_id}_{secrets.token_hex(3)}"
@@ -1195,9 +1250,12 @@ async def save_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TY
             f"🔁 {len(data['ids'])} ta faylni qayta urinish boshlandi...",
             reply_markup=_refresh_kb(query.message.message_id),
         )
+        sr_cfg = await _load_sr_settings(uid)
         await _send_batch(
             client, data["chat_id"], data["ids"], query.message,
             uid, data["dest_chat"], data["dest_thread"], context.bot, context.bot_data,
+            batch_concurrency=2 if sr_cfg["parallel"] else 1,
+            chunk_delay=sr_cfg["chunk_delay"],
         )
         clear_task(uid)
         return
@@ -1335,8 +1393,11 @@ async def save_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TY
         reply_markup=_refresh_kb(query.message.message_id),
     )
     context.bot_data.pop(key, None)
+    sr_cfg = await _load_sr_settings(uid)
     await _send_batch(
         client, data["chat_id"], data["ids"], query.message,
         uid, data["dest_chat"], data["dest_thread"], context.bot, context.bot_data,
+        batch_concurrency=2 if sr_cfg["parallel"] else 1,
+        chunk_delay=sr_cfg["chunk_delay"],
     )
     clear_task(uid)
