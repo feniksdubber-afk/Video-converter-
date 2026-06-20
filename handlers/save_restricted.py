@@ -192,13 +192,20 @@ def _dest_choice_kb(key: str) -> InlineKeyboardMarkup:
 
 class _MsgRef:
     """Callback orqali emas, matn (state) orqali davom etilganda ham xuddi
-    PTB Message obyekti kabi (.edit_text/.delete/.message_id/.chat_id)
-    saqlangan status xabarga murojaat qilish uchun yengil wrapper."""
+    PTB Message obyekti kabi murojaat qilish uchun yengil wrapper.
+
+    utils/sender.py (send_file) status xabarda quyidagilarni chaqiradi:
+    .chat_id, .edit_text, .reply_text, .reply_video, .reply_audio,
+    .reply_document, .get_bot() — shularning barchasi shu yerda
+    haqiqiy bot chaqiruvlariga proksilanadi."""
 
     def __init__(self, bot, chat_id: int, message_id: int):
         self.bot = bot
         self.chat_id = chat_id
         self.message_id = message_id
+
+    def get_bot(self):
+        return self.bot
 
     async def edit_text(self, text, parse_mode=None, reply_markup=None):
         return await self.bot.edit_message_text(
@@ -211,6 +218,18 @@ class _MsgRef:
             await self.bot.delete_message(chat_id=self.chat_id, message_id=self.message_id)
         except Exception:
             pass
+
+    async def reply_text(self, text, **kwargs):
+        return await self.bot.send_message(chat_id=self.chat_id, text=text, **kwargs)
+
+    async def reply_video(self, video, **kwargs):
+        return await self.bot.send_video(chat_id=self.chat_id, video=video, **kwargs)
+
+    async def reply_audio(self, audio, **kwargs):
+        return await self.bot.send_audio(chat_id=self.chat_id, audio=audio, **kwargs)
+
+    async def reply_document(self, document, **kwargs):
+        return await self.bot.send_document(chat_id=self.chat_id, document=document, **kwargs)
 
 
 _user_client: Client | None = None
