@@ -367,6 +367,15 @@ async def _download_and_send_one(
         return ok_any
 
     except FloodWait as e:
+        wait_txt = f"⏳ *Telegram cheklovi:* {e.value} soniya kutilmoqda..."
+        _progress_state[status_msg.message_id] = wait_txt
+        try:
+            await status_msg.edit_text(
+                wait_txt, parse_mode="Markdown",
+                reply_markup=_refresh_kb(status_msg.message_id),
+            )
+        except Exception:
+            pass
         await asyncio.sleep(e.value)
         return await _download_and_send_one(
             client, from_chat, msg_id, status_msg, user_id,
@@ -396,9 +405,11 @@ async def _send_batch(
         if is_cancelled(user_id):
             await status_msg.edit_text(f"❌ Bekor qilindi. {sent}/{total} yuborildi.")
             return
+        txt = f"📥 *{i + 1}/{total}* yuklanmoqda...\n{_progress_bar(int(i / total * 100))}"
+        _progress_state[status_msg.message_id] = txt
         try:
             await status_msg.edit_text(
-                f"📥 *{i + 1}/{total}* yuklanmoqda...\n{_progress_bar(int(i / total * 100))}",
+                txt,
                 parse_mode="Markdown",
                 reply_markup=_refresh_kb(status_msg.message_id),
             )
