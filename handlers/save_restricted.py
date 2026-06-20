@@ -30,6 +30,8 @@ from utils.task_manager import (
 
 logger = logging.getLogger(__name__)
 
+_BATCH_CONCURRENCY = 3  # bir vaqtda nechta fayl yuklanadi/yuboriladi (Pyrogram client bilan ham moslashtirilgan)
+
 # ── Oddiy link saqlash (save_link_handler) uchun BITTA umumiy topic ─────────
 # Har bir foydalanuvchi/fayl uchun emas — hamma uchun bir xil joy.
 SHARED_TOPIC_NAME = "📥 Saqlangan medialar"
@@ -249,9 +251,16 @@ async def get_user_client() -> Client | None:
                 api_id=API_ID,
                 api_hash=API_HASH,
                 session_string=SESSION_STRING,
+                # MUHIM: Pyrogram default'da bir vaqtda faqat 1 ta transmissiyaga
+                # (yuklash/yuborish) ruxsat beradi — _BATCH_CONCURRENCY qancha
+                # bo'lishidan qat'i nazar, fayllar MTProto darajasida navbatda
+                # kutib, ketma-ket bajariladi ("⏳ navbatda..." shu sababdan
+                # uzoq turib qoladi). Buni _BATCH_CONCURRENCY bilan moslashtiramiz.
+                max_concurrent_transmissions=_BATCH_CONCURRENCY,
             )
             await _user_client.start()
     return _user_client
+
 
 
 def _refresh_kb(msg_id: int) -> InlineKeyboardMarkup:
@@ -588,9 +597,6 @@ async def _download_and_send_one(
     except Exception as e:
         logger.error("msg %s xato: %s", msg_id, e, exc_info=True)
         return False
-
-
-_BATCH_CONCURRENCY = 3  # bir vaqtda nechta fayl yuklanadi/yuboriladi
 
 
 async def _send_batch(
