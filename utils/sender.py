@@ -363,35 +363,56 @@ async def send_file(
             except Exception:
                 pass
 
+    # Hech qachon abadiy osilib qolmasin: hajmga qarab, lekin kamida 5 daqiqa.
+    upload_timeout = max(300, int(total_mb * 4))
+
     try:
         pyro_kw = {}
         if message_thread_id:
             pyro_kw["reply_to_message_id"] = message_thread_id  # Pyrogram forum topic
         if upload_mode == "video" and is_video:
-            await client.send_video(
-                chat_id=dest_chat, video=file_path,
-                file_name=filename, caption=caption,
-                duration=meta.get("duration") or None,
-                width=meta.get("width") or None,
-                height=meta.get("height") or None,
-                thumb=thumb_path, supports_streaming=True,
-                progress=progress,
-                **pyro_kw,
+            await asyncio.wait_for(
+                client.send_video(
+                    chat_id=dest_chat, video=file_path,
+                    file_name=filename, caption=caption,
+                    duration=meta.get("duration") or None,
+                    width=meta.get("width") or None,
+                    height=meta.get("height") or None,
+                    thumb=thumb_path, supports_streaming=True,
+                    progress=progress,
+                    **pyro_kw,
+                ),
+                timeout=upload_timeout,
             )
         elif upload_mode == "audio" and is_audio:
-            await client.send_audio(
-                chat_id=dest_chat, audio=file_path,
-                file_name=filename, caption=caption,
-                progress=progress,
-                **pyro_kw,
+            await asyncio.wait_for(
+                client.send_audio(
+                    chat_id=dest_chat, audio=file_path,
+                    file_name=filename, caption=caption,
+                    progress=progress,
+                    **pyro_kw,
+                ),
+                timeout=upload_timeout,
             )
         else:
-            await client.send_document(
-                chat_id=dest_chat, document=file_path,
-                file_name=filename, caption=caption,
-                progress=progress,
-                **pyro_kw,
+            await asyncio.wait_for(
+                client.send_document(
+                    chat_id=dest_chat, document=file_path,
+                    file_name=filename, caption=caption,
+                    progress=progress,
+                    **pyro_kw,
+                ),
+                timeout=upload_timeout,
             )
+    except asyncio.TimeoutError:
+        try:
+            await status_msg.edit_text(
+                "❌ *Yuborish vaqti tugadi* — ulanish juda sekin yoki uzilib qoldi.",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
+        raise
     finally:
         if custom_thumb_tmp and os.path.exists(custom_thumb_tmp):
             os.remove(custom_thumb_tmp)
