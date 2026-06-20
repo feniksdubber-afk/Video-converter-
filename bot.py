@@ -347,6 +347,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     await ensure_loaded(user_id, context)
 
+    is_private = update.effective_chat.type == "private"
+
     state = context.user_data.get("state")
     dispatch = {
         "trim_start":          handle_trim_text,
@@ -363,26 +365,38 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "save_new_topic_name": handle_save_new_topic_name,
     }
 
-    # R2 rename / papka yaratish
-    if state == "r2_rename_input":
-        await r2_rename_text(update, context)
-        return
-    if state == "r2_mkdir_input":
-        await r2_mkdir_text(update, context)
+    # MUHIM: konvertatsiya oqimi bilan bog'liq holatlar (trim, rename va h.k.)
+    # faqat shaxsiy chatda ma'noli — bular foydalanuvchi botning shaxsiy
+    # menyusi bilan ishlayotganda yuzaga keladi. Guruhdagi matnlar uchun bu
+    # state'larga e'tibor berilmaydi.
+    if is_private:
+        # R2 rename / papka yaratish
+        if state == "r2_rename_input":
+            await r2_rename_text(update, context)
+            return
+        if state == "r2_mkdir_input":
+            await r2_mkdir_text(update, context)
+            return
+
+        # Batch shablon nomi kiritish
+        if state == "batch_save_name":
+            from handlers.batch import handle_batch_save_name
+            await handle_batch_save_name(update, context)
+            return
+        handler = dispatch.get(state)
+        if handler:
+            await handler(update, context)
+            return
+
+    # t.me havola orqali saqlash — guruh va shaxsiy chatlarning ikkalasida
+    # ham ishlaydi (guruhga restricted-link tashlash foydali bo'lishi mumkin).
+    if await save_link_handler(update, context):
         return
 
-    # Batch shablon nomi kiritish
-    if state == "batch_save_name":
-        from handlers.batch import handle_batch_save_name
-        await handle_batch_save_name(update, context)
-        return
-    handler = dispatch.get(state)
-    if handler:
-        await handler(update, context)
-    elif await save_link_handler(update, context):
-        # t.me havola edi — save_restricted handle qildi
-        return
-    else:
+    # Guruhda hech narsaga mos kelmagan matnga umuman e'tibor berilmaydi —
+    # bot guruhdagi suhbatlarga aralashmasligi kerak. Faqat shaxsiy chatda
+    # konvertatsiyaga taklif qiluvchi yordamchi xabar ko'rsatiladi.
+    if is_private:
         await update.message.reply_text("📤 Video yuboring yoki /start bosing.")
 
 
@@ -554,10 +568,16 @@ def main():
     app.add_handler(CommandHandler("deny", deny_handler))
     app.add_handler(CommandHandler("users", users_handler))
 
-    app.add_handler(MessageHandler(filters.VIDEO, document_handler))
-    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
-    app.add_handler(MessageHandler(filters.Document.ALL, document_handler))
-    app.add_handler(MessageHandler(filters.AUDIO, document_handler))
+    # MUHIM: video/fayl/audio/rasm qabul qilish va "✅ Video qabul qilindi"
+    # kabi konvertatsiya menyusi FAQAT shaxsiy chatda (bot bilan 1:1) ishlashi
+    # kerak. Guruhlarga tashlangan videolarga bot umuman e'tibor bermasligi,
+    # hech qanday javob yozmasligi kerak — shu sababli filters.ChatType.PRIVATE
+    # qo'shildi. (save_restricted/t.me-havola orqali saqlash bunga
+    # ta'sirlanmaydi — u alohida text_handler orqali ishlaydi.)
+    app.add_handler(MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, document_handler))
+    app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, photo_handler))
+    app.add_handler(MessageHandler(filters.Document.ALL & filters.ChatType.PRIVATE, document_handler))
+    app.add_handler(MessageHandler(filters.AUDIO & filters.ChatType.PRIVATE, document_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_error_handler(error_handler)
