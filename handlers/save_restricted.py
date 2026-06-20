@@ -386,6 +386,7 @@ async def _download_and_send(
     dest_thread_id: int | None,
     bot,
     silent: bool = False,
+    report=None,
 ) -> bool:
     from utils.sender import send_file, _r2_pending
     from utils.db import is_already_saved, mark_saved
@@ -399,6 +400,8 @@ async def _download_and_send(
 
     source_chat_id = getattr(getattr(msg, "chat", None), "id", None)
     if source_chat_id is not None and await is_already_saved(source_chat_id, msg.id, dest_thread_id):
+        if report:
+            report("⏭ allaqachon saqlangan")
         if not silent:
             try:
                 await status_msg.edit_text(
@@ -410,6 +413,7 @@ async def _download_and_send(
         return True
 
     filename = _resolve_filename(msg)
+    short_name = filename if len(filename) <= 22 else filename[:19] + "..."
     ext = os.path.splitext(filename)[1].lstrip(".") or "bin"
     file_size = getattr(media_obj, "file_size", 0) or 0
     total_mb = file_size / 1024 / 1024 if file_size else 0
@@ -423,9 +427,11 @@ async def _download_and_send(
         pct = min(int(current / total * 100), 99)
         cur_mb = current / 1024 / 1024
         bar = _progress_bar(pct)
-        txt = f"⬇️ *Yuklanmoqda...*\n\n{bar} `{pct}%`\n`{cur_mb:.1f}` / `{total_mb:.1f}` MB"
+        if report:
+            report(f"⬇️ {short_name} {pct}%")
         if silent:
             return
+        txt = f"⬇️ *Yuklanmoqda...*\n\n{bar} `{pct}%`\n`{cur_mb:.1f}` / `{total_mb:.1f}` MB"
         _progress_state[status_msg.message_id] = txt
         if pct - last_pct[0] < 10:
             return
@@ -448,6 +454,8 @@ async def _download_and_send(
         if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
             return False
 
+        if report:
+            report(f"📤 {short_name} yuborilmoqda")
         if not silent:
             try:
                 await status_msg.edit_text(
@@ -529,6 +537,7 @@ async def _download_and_send_one(
     bot,
     _retry: int = 0,
     silent: bool = False,
+    report=None,
 ) -> bool:
     try:
         await _resolve_peer_safe(client, from_chat)
@@ -543,13 +552,15 @@ async def _download_and_send_one(
                 break
             if await _download_and_send(
                 client, part, status_msg, user_id,
-                dest_chat_id, dest_thread_id, bot, silent=silent,
+                dest_chat_id, dest_thread_id, bot, silent=silent, report=report,
             ):
                 ok_any = True
             await asyncio.sleep(0.8)
         return ok_any
 
     except FloodWait as e:
+        if report:
+            report(f"⏳ flood {e.value}s kutilmoqda")
         if not silent:
             wait_txt = f"⏳ *Telegram cheklovi:* {e.value} soniya kutilmoqda..."
             _progress_state[status_msg.message_id] = wait_txt
@@ -563,14 +574,14 @@ async def _download_and_send_one(
         await asyncio.sleep(e.value)
         return await _download_and_send_one(
             client, from_chat, msg_id, status_msg, user_id,
-            dest_chat_id, dest_thread_id, bot, _retry, silent=silent,
+            dest_chat_id, dest_thread_id, bot, _retry, silent=silent, report=report,
         )
     except OSError as e:
         if _retry < 3:
             await asyncio.sleep(2 * (_retry + 1))
             return await _download_and_send_one(
                 client, from_chat, msg_id, status_msg, user_id,
-                dest_chat_id, dest_thread_id, bot, _retry + 1, silent=silent,
+                dest_chat_id, dest_thread_id, bot, _retry + 1, silent=silent, report=report,
             )
         logger.error("msg %s OSError: %s", msg_id, e)
         return False
@@ -598,17 +609,24 @@ async def _send_batch(
     failed_ids: list[int] = []
     lock = asyncio.Lock()
     cancelled_flag = False
+    slots: dict[int, str] = {}  # slot raqami → o'sha slotdagi joriy holat matni
 
-    async def _worker(mid: int):
+    async def _worker(mid: int, slot: int):
         nonlocal done, sent, cancelled_flag
+
+        def _report(text: str):
+            slots[slot] = text
+
         async with sem:
             if is_cancelled(user_id):
                 cancelled_flag = True
                 return
+            slots[slot] = "⏳ navbatda..."
             ok = await _download_and_send_one(
                 client, from_chat, mid, status_msg, user_id,
-                dest_chat_id, dest_thread_id, bot, silent=True,
+                dest_chat_id, dest_thread_id, bot, silent=True, report=_report,
             )
+            slots.pop(slot, None)
             async with lock:
                 done += 1
                 if ok:
@@ -617,21 +635,21 @@ async def _send_batch(
                     failed_ids.append(mid)
 
     async def _progress_reporter():
-        last_done = -1
+        last_render = ""
         while done < total and not cancelled_flag:
             if is_cancelled(user_id):
                 return
-            if done != last_done:
-                last_done = done
-                bar = _progress_bar(int(done / total * 100))
-                txt = (
-                    f"📦 *{done}/{total}* yuklandi "
-                    f"({_BATCH_CONCURRENCY} parallel)\n{bar}"
-                )
-                _progress_state[status_msg.message_id] = txt
+            bar = _progress_bar(int(done / total * 100))
+            lines = [f"📦 *{done}/{total}* yuklandi ({_BATCH_CONCURRENCY} parallel)", bar]
+            for s in sorted(slots.keys()):
+                lines.append(f"`{slots[s]}`")
+            render = "\n".join(lines)
+            if render != last_render:
+                last_render = render
+                _progress_state[status_msg.message_id] = render
                 try:
                     await status_msg.edit_text(
-                        txt, parse_mode="Markdown",
+                        render, parse_mode="Markdown",
                         reply_markup=_refresh_kb(status_msg.message_id),
                     )
                 except Exception:
@@ -640,7 +658,9 @@ async def _send_batch(
 
     reporter_task = asyncio.create_task(_progress_reporter())
     try:
-        await asyncio.gather(*[_worker(mid) for mid in ids])
+        await asyncio.gather(*[
+            _worker(mid, i % _BATCH_CONCURRENCY) for i, mid in enumerate(ids)
+        ])
     finally:
         reporter_task.cancel()
         try:
