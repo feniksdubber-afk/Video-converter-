@@ -263,7 +263,22 @@ async def send_file(
     target_chat_id: int | None = None,
     message_thread_id: int | None = None,
     r2_object_key: str | None = None,
+    pyro_client_override=None,
 ):
+    """
+    pyro_client_override: agar berilgan bo'lsa, 50MB-2GB Pyrogram MTProto
+    yuborish bosqichida bot_session o'rniga shu client ishlatiladi.
+
+    Nega kerak: ARCHIVE_GROUP_ID kabi guruhlar -100... (kanal/supergroup)
+    bo'lsa, ularning MTProto darajasidagi update'lari alohida channel_pts
+    orqali keladi va klient faqat avval o'zi resolve qilgan kanallarga shu
+    oqimga "obuna" bo'ladi. Bot session GetDialogs ishlatolmagani (botlar
+    uchun taqiqlangan — BOT_METHOD_INVALID) sababli bunday guruhni hech
+    qachon o'zi resolve qila olmaydi — tuxum-tovuq holati. Userbot
+    (user_session) esa GetDialogs orqali bemalol resolve qila oladi, shuning
+    uchun chaqiruvchi kod (save_restricted.py) bu holatlarda userbot
+    clientini shu yerga uzatadi.
+    """
     file_size = os.path.getsize(file_path)
     ext = os.path.splitext(filename)[1].lower()
     is_video = ext in VIDEO_EXTENSIONS
@@ -379,18 +394,21 @@ async def send_file(
 
     # ─── 50 MB – 2 GB → Pyrogram MTProto ─────────────────────────────────
     status_msg = await message.reply_text("📤 Yuborilmoqda... 0%")
-    client = await get_pyrogram_client()
+    client = pyro_client_override or await get_pyrogram_client()
 
     # Himoya: agar chaqiruvchi kod (masalan save_restricted.py) dest_chat
     # peer'ini oldindan cache'lamagan bo'lsa, shu yerda urinib ko'ramiz —
     # muvaffaqiyatsiz bo'lsa ham keyingi send chaqiruvi aniq xato bilan
     # qulaydi (silent emas), shuning uchun bu faqat qo'shimcha himoya.
+    # MUHIM: pyro_client_override berilgan bo'lsa (userbot), bu tekshiruv
+    # deyarli har doim muvaffaqiyatli o'tadi — chunki userbot bu chatni
+    # GetDialogs orqali allaqachon biladi.
     if dest_chat != message.chat_id:
         try:
             await client.get_chat(dest_chat)
         except Exception as _pe:
             logger.warning(
-                "Pyrogram bot_session '%s' chatini cache'lay olmadi: %s — "
+                "Pyrogram client '%s' chatini cache'lay olmadi: %s — "
                 "send chaqiruvi 'Peer id invalid' bilan qulashi mumkin.",
                 dest_chat, _pe,
             )
