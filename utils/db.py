@@ -37,12 +37,24 @@ CREATE TABLE IF NOT EXISTS batch_templates (
 )
 """
 
+_CREATE_SAVED_MEDIA_TABLE = """
+CREATE TABLE IF NOT EXISTS saved_media (
+    source_chat_id   INTEGER NOT NULL,
+    source_msg_id    INTEGER NOT NULL,
+    dest_chat_id     INTEGER,
+    dest_thread_id   INTEGER,
+    saved_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (source_chat_id, source_msg_id, dest_thread_id)
+)
+"""
+
 
 async def init_db():
     """Bot ishga tushganda bitta marta chaqiriladi."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(_CREATE_TABLE)
         await db.execute(_CREATE_BATCH_TABLE)
+        await db.execute(_CREATE_SAVED_MEDIA_TABLE)
         await db.commit()
 
 
@@ -160,5 +172,38 @@ async def db_reset(user_id: int) -> None:
             "(user_id, upload_mode, rename_file, custom_thumbnail, sample_duration, split_duration) "
             "VALUES (?, 'document', 0, NULL, 30, 60)",
             (user_id,),
+        )
+        await db.commit()
+
+
+# ── /save dublikat oldini olish ──────────────────────────────────────────────
+# dest_thread_id NULL bo'lsa PRIMARY KEY solishtirishda muammo chiqarmasligi
+# uchun 0 ga normallashtiramiz (forum bo'lmagan chat uchun thread_id 0 bo'ladi).
+
+def _norm_thread(dest_thread_id: int | None) -> int:
+    return dest_thread_id if dest_thread_id is not None else 0
+
+
+async def is_already_saved(source_chat_id: int, source_msg_id: int, dest_thread_id: int | None) -> bool:
+    """Shu xabar shu manzilga (topicga) avval saqlanganmi — tekshiradi."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT 1 FROM saved_media WHERE source_chat_id = ? AND source_msg_id = ? AND dest_thread_id = ?",
+            (source_chat_id, source_msg_id, _norm_thread(dest_thread_id)),
+        ) as cursor:
+            row = await cursor.fetchone()
+    return row is not None
+
+
+async def mark_saved(
+    source_chat_id: int, source_msg_id: int,
+    dest_chat_id: int | None, dest_thread_id: int | None,
+) -> None:
+    """Muvaffaqiyatli yuborilgan xabarni dublikat-tekshiruv jadvaliga yozadi."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO saved_media "
+            "(source_chat_id, source_msg_id, dest_chat_id, dest_thread_id) VALUES (?, ?, ?, ?)",
+            (source_chat_id, source_msg_id, dest_chat_id, _norm_thread(dest_thread_id)),
         )
         await db.commit()

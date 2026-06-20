@@ -11,18 +11,51 @@ import os
 import asyncio
 import subprocess
 import hashlib
+import json
+import logging
 import time
 import aiohttp
 from telegram import Message, InlineKeyboardButton, InlineKeyboardMarkup
 from handlers.video_handler import get_pyrogram_client
 from utils.r2_manager import upload_file as r2_upload, is_configured as r2_ok, R2_THRESHOLD, fmt_size as r2_fmt
 from utils.ffmpeg_utils import sanitize_filename
+from config import DATA_DIR
+
+logger = logging.getLogger(__name__)
 
 # Telegram callback_data 64 bayt bilan cheklangan.
 # Fayl nomini to'g'ridan-to'g'ri ishlatish o'rniga qisqa hash saqlаymiz.
 # {short_key: {"filename": ..., "url": ..., "file_path": ..., "ts": unix_time}}
-_r2_pending: dict[str, dict] = {}
+#
+# Diskka saqlanadi (_R2_PENDING_FILE) — bot qayta ishga tushganda (deploy/crash)
+# ham yozuvlar (va R2 URL) yo'qolmaydi. `file_path` baribir vaqtinchalik bo'lgani
+# uchun qayta ishga tushgandan keyin lokal fayl mavjud bo'lmaydi, lekin URL saqlanib
+# qoladi va foydalanuvchi "ma'lumot topilmadi" emas, to'g'ri "fayl yo'q, link bu" javobini oladi.
+_R2_PENDING_FILE = os.path.join(DATA_DIR, "r2_pending.json")
 _R2_PENDING_TTL = 3600  # 1 soat
+
+
+def _load_r2_pending() -> dict[str, dict]:
+    if os.path.isfile(_R2_PENDING_FILE):
+        try:
+            with open(_R2_PENDING_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("r2_pending o'qish xato: %s", e)
+    return {}
+
+
+def _persist_r2_pending() -> None:
+    try:
+        with open(_R2_PENDING_FILE, "w", encoding="utf-8") as f:
+            json.dump(_r2_pending, f, ensure_ascii=False)
+    except OSError as e:
+        logger.warning("r2_pending saqlash xato: %s", e)
+
+
+_r2_pending: dict[str, dict] = _load_r2_pending()
 
 
 def _cleanup_r2_pending():
@@ -31,6 +64,8 @@ def _cleanup_r2_pending():
     stale = [k for k, v in _r2_pending.items() if now - v.get("ts", 0) > _R2_PENDING_TTL]
     for k in stale:
         _r2_pending.pop(k, None)
+    if stale:
+        _persist_r2_pending()
 
 TELEGRAM_LIMIT = 50 * 1024 * 1024        # 50 MB
 PYROGRAM_LIMIT = 2 * 1024 * 1024 * 1024  # 2 GB
@@ -189,6 +224,7 @@ async def _upload_to_r2(message: Message, file_path: str, filename: str, file_si
             "file_path": file_path,
             "ts": time.time(),
         }
+        _persist_r2_pending()
 
         # Telegram ga ham yuborish tugmasi chiqar
         keyboard = InlineKeyboardMarkup([
@@ -369,7 +405,11 @@ async def send_file(
     try:
         pyro_kw = {}
         if message_thread_id:
-            pyro_kw["message_thread_id"] = message_thread_id  # Pyrogram forum topic
+            # MUHIM: bu o'rnatilgan Pyrogram versiyasida (2.0.106) send_video/
+            # send_audio/send_document message_thread_id parametrini QABUL
+            # QILMAYDI (TypeError: unexpected keyword argument). Forum topic'ga
+            # MTProto darajasida reply_to_message_id orqali yo'naltiriladi.
+            pyro_kw["reply_to_message_id"] = message_thread_id
         if upload_mode == "video" and is_video:
             await asyncio.wait_for(
                 client.send_video(
