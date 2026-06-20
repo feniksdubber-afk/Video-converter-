@@ -453,7 +453,7 @@ async def _download_and_send(
         except Exception:
             pass
 
-    tmp_path = os.path.join(TEMP_DIR, f"sr_{msg.id}_{user_id}.{ext}")
+    tmp_path = os.path.join(TEMP_DIR, f"sr_{msg.id}_{user_id}_{int(time.time()*1000)}.{ext}")
     try:
         await pyro_client.download_media(media_obj, file_name=tmp_path, progress=_dl_progress)
 
@@ -613,6 +613,9 @@ async def _download_and_send_one(
         return ok_any
 
     except FloodWait as e:
+        if _retry >= 5:
+            logger.error("msg %s FloodWait: retry limiti tugadi (%s s)", msg_id, e.value)
+            return False
         if report:
             report(f"⏳ flood {e.value}s kutilmoqda")
         if not silent:
@@ -628,7 +631,7 @@ async def _download_and_send_one(
         await asyncio.sleep(e.value)
         return await _download_and_send_one(
             client, from_chat, msg_id, status_msg, user_id,
-            dest_chat_id, dest_thread_id, bot, _retry, silent=silent, report=report,
+            dest_chat_id, dest_thread_id, bot, _retry + 1, silent=silent, report=report,
         )
     except OSError as e:
         if _retry < 3:
