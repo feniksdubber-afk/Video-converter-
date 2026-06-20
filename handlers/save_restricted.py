@@ -30,7 +30,7 @@ from utils.task_manager import (
 
 logger = logging.getLogger(__name__)
 
-_BATCH_CONCURRENCY = 5  # bir vaqtda nechta fayl yuklanadi/yuboriladi (Pyrogram client bilan ham moslashtirilgan)
+_BATCH_CONCURRENCY = 2  # bir vaqtda nechta fayl yuklanadi/yuboriladi (Pyrogram client bilan ham moslashtirilgan)
 
 # ── Oddiy link saqlash (save_link_handler) uchun BITTA umumiy topic ─────────
 # Har bir foydalanuvchi/fayl uchun emas — hamma uchun bir xil joy.
@@ -463,6 +463,29 @@ async def _download_and_send(
         if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
             return False
 
+        # Yuklangan fayl hajmi Telegram bergan asl hajmdan sezilarli kichik
+        # bo'lsa — yuklash to'liq tugamagan (uzilib qolgan) degani. Bunday
+        # faylni jim yuborib yubormaymiz, xato deb hisoblaymiz.
+        downloaded_size = os.path.getsize(tmp_path)
+        if file_size and downloaded_size < file_size * 0.95:
+            logger.error(
+                "Tugallanmagan yuklash: %s — kutilgan %s bayt, olingan %s bayt",
+                filename, file_size, downloaded_size,
+            )
+            if report:
+                report(f"❌ {short_name} to'liq yuklanmadi")
+            if not silent:
+                try:
+                    await status_msg.edit_text(
+                        f"❌ *{filename}* to'liq yuklanmadi "
+                        f"({downloaded_size/1024/1024:.1f} / {file_size/1024/1024:.1f} MB) — qayta urinib ko'ring.",
+                        parse_mode="Markdown",
+                        reply_markup=_refresh_kb(status_msg.message_id),
+                    )
+                except Exception:
+                    pass
+            return False
+
         if report:
             report(f"📤 {short_name} yuborilmoqda")
         if not silent:
@@ -479,6 +502,16 @@ async def _download_and_send(
         from utils.db import db_load
         settings = await db_load(user_id)
 
+        # /save orqali yuborilganda video fayllar 🎬 video pleyer ko'rinishida
+        # ketsin (force_document emas) — bu yerda foydalanuvchining shaxsiy
+        # upload_mode sozlamasidan qat'i nazar, video kengaytmasi bo'lsa
+        # "video" rejimini majburlaymiz.
+        video_ext = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".m4v", ".ts", ".wmv"}
+        is_video_file = os.path.splitext(filename)[1].lower() in video_ext
+        if is_video_file:
+            settings = dict(settings)
+            settings["upload_mode"] = "video"
+
         class _FakeCtx:
             user_data = {"settings": settings, "_settings_loaded": True, "_user_id": user_id}
 
@@ -489,7 +522,7 @@ async def _download_and_send(
             filename=filename,
             caption=caption,
             context=_FakeCtx(),
-            force_document=True,
+            force_document=not is_video_file,
             target_chat_id=target_chat if target_chat != status_msg.chat_id else None,
             message_thread_id=dest_thread_id,
         )
