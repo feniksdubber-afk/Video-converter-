@@ -1,15 +1,17 @@
 """
-kino_sender.py — Userbot orqali @Kinofilmnewbot dan kino yuborish.
+kino_sender.py — Istalgan botdan xabarni mirror qilish + video yuborish.
 
 Foydalanish:
-  /kino 923          — payload 923 uchun 6-tugmani bosadi
-  /kino 923 3        — payload 923 uchun 3-tugmani bosadi (ixtiyoriy)
+  /kino @Kinofilmnewbot 923        — bot javobini mirror qiladi
+  /kino @Kinofilmnewbot 923 2      — to'g'ridan 2-tugmani bosadi
+  /kino @FilmBot 12345             — istalgan bot ishlaydi
 """
 
 import asyncio
 import logging
 import os
 import time
+import uuid
 
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
@@ -19,11 +21,13 @@ from handlers.save_restricted import get_user_client
 
 logger = logging.getLogger(__name__)
 
-KINO_BOT = "Kinofilmnewbot"
-WAIT_TIMEOUT = 45
+WAIT_TIMEOUT = 45          # botdan javob kutish (soniya)
+COLLECT_DELAY = 3.0        # barcha xabarlar kelishini kutish (soniya)
 
 _kino_lock = asyncio.Lock()
 
+
+# ── Progress / format yordamchilari ──────────────────────────────────────────
 
 def _progress_bar(percent: int, length: int = 14) -> str:
     filled = int(length * percent / 100)
@@ -38,26 +42,34 @@ def _fmt_size(b: int) -> str:
     return f"{b:.1f} GB"
 
 
+def _fmt_dur(seconds: int) -> str:
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+# ── Asosiy handler ────────────────────────────────────────────────────────────
+
 async def kino_sender_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     args = context.args
 
-    if not args:
+    if not args or len(args) < 2:
         await msg.reply_text(
             "❗ *Foydalanish:*\n"
-            "`/kino 923` — 6-tugmani bosadi\n"
-            "`/kino 923 3` — 3-tugmani bosadi",
+            "`/kino @BotNomi payload` — mirror qiladi\n"
+            "`/kino @BotNomi payload 2` — 2-tugmani bosadi",
             parse_mode="Markdown",
         )
         return
 
-    payload = args[0].strip()
-    button_index = 5  # default: 6-tugma (0-indexed = 5)
-    if len(args) >= 2 and args[1].isdigit():
-        button_index = int(args[1]) - 1
+    bot_username = args[0].lstrip("@")
+    payload = args[1].strip()
+    button_index = None
+    if len(args) >= 3 and args[2].isdigit():
+        button_index = int(args[2]) - 1  # 0-indexed
 
-    dest_chat = ARCHIVE_GROUP_ID
-    if not dest_chat:
+    if not ARCHIVE_GROUP_ID:
         await msg.reply_text("❌ `ARCHIVE_GROUP_ID` `.env`da sozlanmagan!", parse_mode="Markdown")
         return
 
@@ -66,7 +78,7 @@ async def kino_sender_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     status_msg = await msg.reply_text(
-        f"🎬 *Kino qidirilmoqda...*\n\n`{payload}` so'rovi yuborilmoqda",
+        f"🔍 *@{bot_username}* ga so'rov yuborilmoqda...\n`{payload}`",
         parse_mode="Markdown",
     )
 
@@ -77,136 +89,399 @@ async def kino_sender_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     async with _kino_lock:
         try:
-            await _run_kino_flow(client, payload, button_index, dest_chat, status_msg, context)
+            await _run_flow(
+                client=client,
+                bot_username=bot_username,
+                payload=payload,
+                button_index=button_index,
+                dest_chat=ARCHIVE_GROUP_ID,
+                status_msg=status_msg,
+                context=context,
+                user_msg=msg,
+            )
         except Exception as e:
             logger.exception("kino_sender xato: %s", e)
-            await status_msg.edit_text(f"❌ *Xato yuz berdi:*\n`{e}`", parse_mode="Markdown")
+            await status_msg.edit_text(f"❌ *Xato:*\n`{e}`", parse_mode="Markdown")
 
 
-async def _run_kino_flow(client, payload: str, button_index: int, dest_chat, status_msg, context):
+# ── Asosiy flow ───────────────────────────────────────────────────────────────
+
+async def _run_flow(client, bot_username, payload, button_index,
+                    dest_chat, status_msg, context, user_msg):
     from pyrogram.raw import functions
 
-    # ── 1. Kino botini resolve ────────────────────────────────────────────────
-    kino_peer = await client.resolve_peer(KINO_BOT)
+    # 1. Bot peer ni resolve qilamiz
+    try:
+        bot_peer = await client.resolve_peer(bot_username)
+    except Exception as e:
+        await status_msg.edit_text(f"❌ `@{bot_username}` topilmadi!\n`{e}`", parse_mode="Markdown")
+        return
 
-    # ── 2. Oxirgi xabar ID ni eslab qolamiz ──────────────────────────────────
+    # 2. Oxirgi xabar ID ni eslab qolamiz
     last_msg_id = 0
     try:
-        async for h in client.get_chat_history(KINO_BOT, limit=1):
+        async for h in client.get_chat_history(bot_username, limit=1):
             last_msg_id = h.id
             break
     except Exception:
         pass
 
-    # ── 3. /start <payload> yuborish ─────────────────────────────────────────
+    # 3. /start <payload> yuboramiz
     await status_msg.edit_text(
-        f"🎬 *Kino botiga so'rov yuborildi*\n\n"
-        f"🔍 Bot javobini kutilmoqda...",
+        f"📨 *@{bot_username}* ga `/start {payload}` yuborildi\n"
+        f"⏳ Javob kutilmoqda...",
         parse_mode="Markdown",
     )
+
     await client.invoke(
         functions.messages.StartBot(
-            bot=kino_peer,
-            peer=kino_peer,
+            bot=bot_peer,
+            peer=bot_peer,
             random_id=client.rnd_id(),
             start_param=payload,
         )
     )
 
-    # ── 4. Inline tugmali xabarni kutish ─────────────────────────────────────
-    bot_msg = await _wait_for_new_message_with_buttons(
-        client, KINO_BOT, after_id=last_msg_id, timeout=WAIT_TIMEOUT, status_msg=status_msg
+    # 4. Barcha yangi xabarlarni event handler orqali yig'amiz
+    new_messages = await _collect_new_messages(
+        client=client,
+        from_username=bot_username,
+        after_id=last_msg_id,
+        timeout=WAIT_TIMEOUT,
+        collect_delay=COLLECT_DELAY,
+        status_msg=status_msg,
     )
 
-    if bot_msg is None:
-        await status_msg.edit_text("❌ Bot javob bermadi (timeout)!\n\nQaytadan urinib ko'ring.")
-        return
-
-    # ── 5. Tugmalar ro'yxati ──────────────────────────────────────────────────
-    buttons = _flatten_buttons(bot_msg)
-    if not buttons:
-        await status_msg.edit_text("❌ Bot tugmali javob yubordi, lekin tugmalar topilmadi!")
-        return
-
-    if button_index >= len(buttons):
-        btn_list = "\n".join(f"  `{i+1}.` {b.text}" for i, b in enumerate(buttons))
+    if not new_messages:
         await status_msg.edit_text(
-            f"❌ *{button_index+1}-tugma mavjud emas.*\n\n"
-            f"📋 *Tugmalar ({len(buttons)} ta):*\n{btn_list}\n\n"
-            f"Masalan: `/kino {payload} 1`",
+            f"❌ *@{bot_username}* javob bermadi (timeout {WAIT_TIMEOUT}s)\n\n"
+            f"Qaytadan urinib ko'ring.",
             parse_mode="Markdown",
         )
         return
 
-    chosen_btn = buttons[button_index]
     await status_msg.edit_text(
-        f"🎬 *Kino topildi!*\n\n"
-        f"🔘 `{chosen_btn.text}` tanlandi\n"
-        f"⏳ Video yuklab olishni boshlash uchun so'rov yuborilmoqda...",
+        f"✅ *@{bot_username}* dan {len(new_messages)} ta xabar keldi\n"
+        f"⏳ Qayta ishlanmoqda...",
         parse_mode="Markdown",
     )
 
-    # ── 6. Tugmani bosish ─────────────────────────────────────────────────────
+    # 5. Agar button_index berilgan bo'lsa — to'g'ridan o'sha tugmani bosamiz
+    if button_index is not None:
+        btn_msg = next((m for m in new_messages if _flatten_buttons(m)), None)
+        if not btn_msg:
+            await status_msg.edit_text("❌ Tugmali xabar topilmadi!")
+            return
+
+        buttons = _flatten_buttons(btn_msg)
+        if button_index >= len(buttons):
+            btn_list = "\n".join(f"  `{i+1}.` {b.text}" for i, b in enumerate(buttons))
+            await status_msg.edit_text(
+                f"❌ *{button_index+1}-tugma mavjud emas*\n\n"
+                f"📋 *Tugmalar ({len(buttons)} ta):*\n{btn_list}\n\n"
+                f"Masalan: `/kino @{bot_username} {payload} 1`",
+                parse_mode="Markdown",
+            )
+            return
+
+        chosen = buttons[button_index]
+        await status_msg.edit_text(
+            f"🔘 `{chosen.text}` tanlandi\n⏳ Video kutilmoqda...",
+            parse_mode="Markdown",
+        )
+        await _press_button_and_download(
+            client, bot_username, bot_peer, btn_msg, chosen,
+            dest_chat, status_msg, context
+        )
+        return
+
+    # 6. button_index berilmagan — barcha xabarlarni mirror qilamiz
+    await status_msg.delete()
+
+    for pyro_msg in new_messages:
+        await _mirror_message(
+            client=client,
+            pyro_msg=pyro_msg,
+            bot_username=bot_username,
+            bot_peer=bot_peer,
+            dest_chat=dest_chat,
+            user_msg=user_msg,
+            context=context,
+        )
+
+
+# ── Xabarni mirror qilish ─────────────────────────────────────────────────────
+
+async def _mirror_message(client, pyro_msg, bot_username, bot_peer,
+                           dest_chat, user_msg, context):
+    """Pyrogram xabarni PTB orqali foydalanuvchiga mirror qiladi."""
+
+    text = pyro_msg.text or pyro_msg.caption or ""
+    buttons = _flatten_buttons(pyro_msg)
+
+    # Inline keyboard yasaymiz (agar bor bo'lsa)
+    tg_keyboard = None
+    if buttons:
+        kb_rows = []
+        # Asl row strukturasini saqlashga harakat qilamiz
+        if hasattr(pyro_msg.reply_markup, "inline_keyboard"):
+            for row in pyro_msg.reply_markup.inline_keyboard:
+                kb_row = []
+                for btn in row:
+                    if hasattr(btn, "callback_data") and btn.callback_data is not None:
+                        cb = btn.callback_data
+                        if isinstance(cb, bytes):
+                            cb = cb.decode("utf-8", errors="replace")
+                        # callback_data ni encode qilib saqlaymiz
+                        # format: "kino|bot_username|msg_id|cb_data"
+                        safe_cb = f"kino|{bot_username}|{pyro_msg.id}|{cb}"
+                        if len(safe_cb) <= 64:
+                            kb_row.append(InlineKeyboardButton(btn.text, callback_data=safe_cb))
+                        else:
+                            # Juda uzun bo'lsa index ishlatamiz
+                            idx = buttons.index(btn) if btn in buttons else 0
+                            kb_row.append(InlineKeyboardButton(
+                                btn.text,
+                                callback_data=f"kinoi|{bot_username}|{pyro_msg.id}|{idx}"
+                            ))
+                if kb_row:
+                    kb_rows.append(kb_row)
+        tg_keyboard = InlineKeyboardMarkup(kb_rows) if kb_rows else None
+
+    # Media bor bo'lsa — yuklab olish tugmasini qo'shamiz
+    has_media = bool(pyro_msg.video or pyro_msg.document or pyro_msg.audio)
+    if has_media:
+        dl_cb = f"kinodl|{bot_username}|{pyro_msg.id}"
+        dl_btn = [InlineKeyboardButton("📥 Videoni yuborish", callback_data=dl_cb)]
+        if tg_keyboard:
+            tg_keyboard = InlineKeyboardMarkup(tg_keyboard.inline_keyboard + [dl_btn])
+        else:
+            tg_keyboard = InlineKeyboardMarkup([dl_btn])
+
+    # Xabarni yuboramiz
+    if has_media:
+        # Avval matnni (caption) yuboramiz
+        media_obj = pyro_msg.video or pyro_msg.document or pyro_msg.audio
+        file_size = getattr(media_obj, "file_size", 0) or 0
+        size_str = _fmt_size(file_size) if file_size else "?"
+        fname = getattr(media_obj, "file_name", "") or ""
+        mime = getattr(media_obj, "mime_type", "") or ""
+
+        info_text = (
+            f"{text}\n\n" if text else ""
+        ) + (
+            f"📎 `{fname}`\n" if fname else ""
+        ) + (
+            f"📦 Hajmi: `{size_str}`\n"
+            f"🎞 MIME: `{mime}`"
+        )
+
+        await user_msg.reply_text(
+            info_text.strip(),
+            parse_mode="Markdown",
+            reply_markup=tg_keyboard,
+        )
+    else:
+        # Matnli yoki boshqa xabar
+        if text:
+            await user_msg.reply_text(
+                text,
+                parse_mode=None,  # asl formatni buzmaslik uchun
+                reply_markup=tg_keyboard,
+            )
+        else:
+            await user_msg.reply_text(
+                "📨 (Bo'sh xabar)",
+                reply_markup=tg_keyboard,
+            )
+
+
+# ── Callback handler (tugma bosilganda) ──────────────────────────────────────
+
+async def kino_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+
+    # kinodl — video yuklab guruhga yuborish
+    if data.startswith("kinodl|"):
+        parts = data.split("|", 3)
+        if len(parts) < 3:
+            return
+        _, bot_username, msg_id_str = parts
+        msg_id = int(msg_id_str)
+
+        status = await query.message.reply_text(
+            f"⏳ *@{bot_username}* dan video yuklab olinmoqda...",
+            parse_mode="Markdown",
+        )
+        client = await get_user_client()
+        if not client:
+            await status.edit_text("❌ Userbot ulangmagan!")
+            return
+
+        try:
+            # Xabarni Pyrogram orqali olamiz
+            pyro_msg = await client.get_messages(bot_username, msg_id)
+            await _download_and_send(
+                client=client,
+                media_msg=pyro_msg,
+                dest_chat=ARCHIVE_GROUP_ID,
+                title=bot_username,
+                status_msg=status,
+            )
+        except Exception as e:
+            logger.exception("kinodl xato: %s", e)
+            await status.edit_text(f"❌ Xato:\n`{e}`", parse_mode="Markdown")
+        return
+
+    # kino| — inline tugmani userbot orqali bosish
+    if data.startswith("kino|") or data.startswith("kinoi|"):
+        is_indexed = data.startswith("kinoi|")
+        parts = data.split("|", 4)
+
+        if is_indexed:
+            # kinoi|bot_username|msg_id|index
+            if len(parts) < 4:
+                return
+            _, bot_username, msg_id_str, idx_str = parts
+            msg_id = int(msg_id_str)
+            btn_index = int(idx_str)
+            cb_data_str = None
+        else:
+            # kino|bot_username|msg_id|cb_data
+            if len(parts) < 4:
+                return
+            _, bot_username, msg_id_str, cb_data_str = parts
+            msg_id = int(msg_id_str)
+            btn_index = None
+
+        status = await query.message.reply_text(
+            f"⏳ Tugma bosilmoqda...",
+            parse_mode="Markdown",
+        )
+        client = await get_user_client()
+        if not client:
+            await status.edit_text("❌ Userbot ulangmagan!")
+            return
+
+        try:
+            from pyrogram.raw import functions
+
+            bot_peer = await client.resolve_peer(bot_username)
+            pyro_msg = await client.get_messages(bot_username, msg_id)
+
+            if cb_data_str is None:
+                # index orqali topamiz
+                buttons = _flatten_buttons(pyro_msg)
+                if btn_index >= len(buttons):
+                    await status.edit_text("❌ Tugma topilmadi!")
+                    return
+                chosen = buttons[btn_index]
+            else:
+                # to'g'ridan callback_data
+                class _FakeBtn:
+                    def __init__(self, text, cb):
+                        self.text = text
+                        self.callback_data = cb
+                chosen = _FakeBtn(cb_data_str, cb_data_str)
+
+            await status.edit_text(
+                f"🔘 `{chosen.text}` tanlandi\n⏳ Javob kutilmoqda...",
+                parse_mode="Markdown",
+            )
+
+            await _press_button_and_download(
+                client, bot_username, bot_peer, pyro_msg, chosen,
+                ARCHIVE_GROUP_ID, status, context
+            )
+        except Exception as e:
+            logger.exception("kino callback xato: %s", e)
+            await status.edit_text(f"❌ Xato:\n`{e}`", parse_mode="Markdown")
+
+
+# ── Tugmani bosib video kutish ────────────────────────────────────────────────
+
+async def _press_button_and_download(client, bot_username, bot_peer,
+                                      btn_msg, chosen_btn,
+                                      dest_chat, status_msg, context):
+    from pyrogram.raw import functions
+
     cb_data = chosen_btn.callback_data
     if isinstance(cb_data, str):
         cb_data = cb_data.encode("utf-8")
 
+    # Oxirgi xabar ID
+    last_id = btn_msg.id
+
     try:
         await client.invoke(
             functions.messages.GetBotCallbackAnswer(
-                peer=kino_peer,
-                msg_id=bot_msg.id,
+                peer=bot_peer,
+                msg_id=btn_msg.id,
                 data=cb_data,
             )
         )
     except Exception as e:
         logger.info("GetBotCallbackAnswer xato (normal): %s", e)
 
-    # ── 7. Bot media yuborishini kutish ───────────────────────────────────────
+    # Media xabarini event handler orqali kutamiz
     await status_msg.edit_text(
-        f"🎬 *{chosen_btn.text}*\n\n"
-        f"⏳ Video yuborilishini kutilmoqda...",
+        f"🔘 `{chosen_btn.text}` tanlandi\n⏳ Video yuborilishini kutilmoqda...",
         parse_mode="Markdown",
     )
 
-    media_msg = await _wait_for_new_media(
-        client, KINO_BOT, after_id=bot_msg.id, timeout=WAIT_TIMEOUT
+    media_msg = await _wait_for_media_event(
+        client=client,
+        from_username=bot_username,
+        after_id=last_id,
+        timeout=WAIT_TIMEOUT,
     )
 
     if media_msg is None:
         await status_msg.edit_text(
-            f"❌ *Bot video yuboramadi* (timeout {WAIT_TIMEOUT}s)\n\n"
-            f"Bot sekin ishlayotgan bo'lishi mumkin. Qaytadan urinib ko'ring.",
+            f"❌ Bot video yuboramadi (timeout {WAIT_TIMEOUT}s)\n\n"
+            f"Qaytadan urinib ko'ring.",
             parse_mode="Markdown",
         )
         return
 
-    # ── 8. Fayl hajmini aniqlaymiz ────────────────────────────────────────────
+    await _download_and_send(
+        client=client,
+        media_msg=media_msg,
+        dest_chat=dest_chat,
+        title=chosen_btn.text or bot_username,
+        status_msg=status_msg,
+    )
+
+
+# ── Yuklab olish va yuborish ──────────────────────────────────────────────────
+
+async def _download_and_send(client, media_msg, dest_chat, title, status_msg):
     media_obj = media_msg.video or media_msg.document or media_msg.audio
     file_size = getattr(media_obj, "file_size", 0) or 0
-    title = chosen_btn.text or "Kino"
+    size_str = _fmt_size(file_size) if file_size else "?"
 
     await status_msg.edit_text(
         f"🎬 *{title}*\n\n"
         f"⬇️ Yuklab olinmoqda...\n"
         f"`{'▱' * 14}` `0%`\n"
-        f"`0.0 MB` / `{_fmt_size(file_size) if file_size else '? MB'}`",
+        f"`0.0 MB` / `{size_str}`",
         parse_mode="Markdown",
     )
 
-    # ── 9. Yuklab olish (progress bilan) ─────────────────────────────────────
-    tmp_path = None
+    ext = _guess_ext(media_msg)
+    tmp_path = os.path.join(TEMP_DIR, f"kino_{media_msg.id}_{uuid.uuid4().hex[:6]}.{ext}")
+    thumb_path = None
+
     try:
-        ext = _guess_ext(media_msg)
-        tmp_path = os.path.join(TEMP_DIR, f"kino_{media_msg.id}_{int(time.time())}.{ext}")
         last_edit = [0.0]
         last_pct = [-1]
 
         async def _dl_progress(current, total):
             now = time.monotonic()
-            if now - last_edit[0] < 2.5:
-                return
-            if not total:
+            if now - last_edit[0] < 2.5 or not total:
                 return
             pct = min(int(current / total * 100), 99)
             if pct == last_pct[0]:
@@ -236,7 +511,7 @@ async def _run_kino_flow(client, payload: str, button_index: int, dest_chat, sta
         actual_size = os.path.getsize(tmp_path)
         size_str = _fmt_size(actual_size)
 
-        # ── 10. Metadata (thumbnail, davomiylik, o'lcham) ────────────────────
+        # Metadata
         await status_msg.edit_text(
             f"🎬 *{title}*\n\n"
             f"✅ Yuklab olindi: `{size_str}`\n"
@@ -245,16 +520,14 @@ async def _run_kino_flow(client, payload: str, button_index: int, dest_chat, sta
         )
 
         meta = {}
-        thumb_path = None
         is_video_file = ext in {"mp4", "mkv", "avi", "mov", "webm", "flv", "m4v", "ts", "wmv"}
 
         if is_video_file:
             meta = await _get_video_meta(tmp_path)
-            dur = meta.get("duration", 0)
-            if dur > 0:
-                thumb_path = await _make_thumb(tmp_path, dur)
+            if meta.get("duration", 0) > 0:
+                thumb_path = await _make_thumb(tmp_path, meta["duration"])
 
-        # ── 11. Guruhga yuborish (progress bilan) ────────────────────────────
+        # Yuborish
         await status_msg.edit_text(
             f"🎬 *{title}*\n\n"
             f"📤 *Guruhga yuborilmoqda...*\n"
@@ -268,9 +541,7 @@ async def _run_kino_flow(client, payload: str, button_index: int, dest_chat, sta
 
         async def _ul_progress(current, total):
             now = time.monotonic()
-            if now - last_edit[0] < 2.5:
-                return
-            if not total:
+            if now - last_edit[0] < 2.5 or not total:
                 return
             pct = min(int(current / total * 100), 99)
             if pct == last_pct[0]:
@@ -278,14 +549,12 @@ async def _run_kino_flow(client, payload: str, button_index: int, dest_chat, sta
             last_pct[0] = pct
             last_edit[0] = now
             bar = _progress_bar(pct)
-            cur_mb = current / 1024 / 1024
-            tot_mb = total / 1024 / 1024
             try:
                 await status_msg.edit_text(
                     f"🎬 *{title}*\n\n"
                     f"📤 *Guruhga yuborilmoqda...*\n"
                     f"`{bar}` `{pct}%`\n"
-                    f"`{cur_mb:.1f} MB` / `{tot_mb:.1f} MB`",
+                    f"`{current/1024/1024:.1f} MB` / `{total/1024/1024:.1f} MB`",
                     parse_mode="Markdown",
                 )
             except Exception:
@@ -321,16 +590,9 @@ async def _run_kino_flow(client, payload: str, button_index: int, dest_chat, sta
                 except Exception:
                     pass
 
-        # ── 12. Yakuniy xabar ─────────────────────────────────────────────────
-        dur_str = ""
-        if meta.get("duration"):
-            m, s = divmod(int(meta["duration"]), 60)
-            h, m = divmod(m, 60)
-            dur_str = f"\n⏱ Davomiyligi: `{h:02d}:{m:02d}:{s:02d}`" if h else f"\n⏱ Davomiyligi: `{m:02d}:{s:02d}`"
-
-        res_str = ""
-        if meta.get("width") and meta.get("height"):
-            res_str = f"\n📐 O'lchami: `{meta['width']}×{meta['height']}`"
+        # Yakuniy
+        dur_str = f"\n⏱ Davomiyligi: `{_fmt_dur(meta['duration'])}`" if meta.get("duration") else ""
+        res_str = f"\n📐 O'lchami: `{meta['width']}×{meta['height']}`" if meta.get("width") and meta.get("height") else ""
 
         await status_msg.edit_text(
             f"✅ *{title}*\n\n"
@@ -349,10 +611,127 @@ async def _run_kino_flow(client, payload: str, button_index: int, dest_chat, sta
                 pass
 
 
+# ── Event handler orqali xabar yig'ish ───────────────────────────────────────
+
+async def _collect_new_messages(client, from_username, after_id,
+                                  timeout, collect_delay, status_msg):
+    """
+    Botdan kelgan barcha yangi xabarlarni yig'adi.
+    Birinchi xabar kelgandan keyin collect_delay soniya kutib, qolganlarni ham oladi.
+    """
+    from pyrogram import filters
+    from pyrogram.handlers import MessageHandler
+
+    collected = []
+    first_arrived = asyncio.Event()
+
+    async def _on_message(c, m):
+        if m.chat.username and m.chat.username.lower() == from_username.lower():
+            if m.id > after_id:
+                collected.append(m)
+                first_arrived.set()
+
+    handler = client.add_handler(MessageHandler(_on_message, filters.private))
+
+    try:
+        # Birinchi xabar kelishini kutamiz
+        dots = 0
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                await asyncio.wait_for(first_arrived.wait(), timeout=1.5)
+                break
+            except asyncio.TimeoutError:
+                dots = (dots % 3) + 1
+                waited = int(timeout - (deadline - asyncio.get_event_loop().time()))
+                try:
+                    await status_msg.edit_text(
+                        f"⏳ Javob kutilmoqda{'.' * dots}\n"
+                        f"`{waited}s` / `{timeout}s`",
+                        parse_mode="Markdown",
+                    )
+                except Exception:
+                    pass
+
+        if not collected:
+            return []
+
+        # Qolgan xabarlar kelishini kutamiz
+        await status_msg.edit_text(
+            f"📨 Xabar keldi, to'liq yuklanmoqda...",
+            parse_mode="Markdown",
+        )
+        await asyncio.sleep(collect_delay)
+
+        # Yana polling bilan tekshiramiz (event handler o'tkazib yuborgan bo'lishi mumkin)
+        try:
+            seen_ids = {m.id for m in collected}
+            async for m in client.get_chat_history(from_username, limit=10):
+                if m.id <= after_id:
+                    break
+                if m.id not in seen_ids:
+                    collected.append(m)
+                    seen_ids.add(m.id)
+        except Exception as e:
+            logger.warning("Polling fallback xato: %s", e)
+
+        # ID bo'yicha tartiblash (eski → yangi)
+        collected.sort(key=lambda m: m.id)
+        return collected
+
+    finally:
+        try:
+            client.remove_handler(*handler)
+        except Exception:
+            pass
+
+
+async def _wait_for_media_event(client, from_username, after_id, timeout):
+    """Tugma bosilgandan keyin media xabarini kutadi."""
+    from pyrogram import filters
+    from pyrogram.handlers import MessageHandler
+
+    result = []
+    arrived = asyncio.Event()
+
+    async def _on_media(c, m):
+        if m.chat.username and m.chat.username.lower() == from_username.lower():
+            if m.id > after_id and (m.video or m.document or m.audio):
+                result.append(m)
+                arrived.set()
+
+    handler = client.add_handler(MessageHandler(_on_media, filters.private))
+
+    try:
+        try:
+            await asyncio.wait_for(arrived.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            pass
+
+        if result:
+            return result[0]
+
+        # Fallback: polling
+        try:
+            async for m in client.get_chat_history(from_username, limit=5):
+                if m.id <= after_id:
+                    break
+                if m.video or m.document or m.audio:
+                    return m
+        except Exception as e:
+            logger.warning("Media polling fallback xato: %s", e)
+
+        return None
+    finally:
+        try:
+            client.remove_handler(*handler)
+        except Exception:
+            pass
+
+
 # ── Video metadata ────────────────────────────────────────────────────────────
 
 import subprocess
-import uuid
 
 
 def _get_video_meta_sync(file_path: str) -> dict:
@@ -408,7 +787,7 @@ def _make_thumb_sync(file_path: str, duration: int) -> str | None:
         if r.returncode == 0 and os.path.exists(thumb_path):
             return thumb_path
     except Exception as e:
-        logger.warning("thumbnail yaratish xato: %s", e)
+        logger.warning("Thumbnail xato: %s", e)
     return None
 
 
@@ -417,7 +796,7 @@ async def _make_thumb(file_path: str, duration: int) -> str | None:
     return await loop.run_in_executor(None, _make_thumb_sync, file_path, duration)
 
 
-# ── Yordamchi funksiyalar ─────────────────────────────────────────────────────
+# ── Yordamchi ─────────────────────────────────────────────────────────────────
 
 def _guess_ext(msg) -> str:
     if msg.video:
@@ -439,51 +818,6 @@ def _guess_ext(msg) -> str:
             return "mp4"
         return "bin"
     return "mp4"
-
-
-async def _wait_for_new_message_with_buttons(
-    client, from_username: str, after_id: int, timeout: int = 30, status_msg=None
-):
-    deadline = asyncio.get_event_loop().time() + timeout
-    dots = 0
-    while asyncio.get_event_loop().time() < deadline:
-        await asyncio.sleep(1.5)
-        dots = (dots % 3) + 1
-        try:
-            async for msg in client.get_chat_history(from_username, limit=5):
-                if msg.id <= after_id:
-                    break
-                if msg.reply_markup:
-                    return msg
-        except Exception as e:
-            logger.warning("_wait_for_buttons xato: %s", e)
-        if status_msg:
-            try:
-                waited = int(timeout - (deadline - asyncio.get_event_loop().time()))
-                await status_msg.edit_text(
-                    f"🎬 *Kino botiga so'rov yuborildi*\n\n"
-                    f"🔍 Bot javobini kutilmoqda{'.' * dots}\n"
-                    f"⏱ `{waited}s` / `{timeout}s`",
-                    parse_mode="Markdown",
-                )
-            except Exception:
-                pass
-    return None
-
-
-async def _wait_for_new_media(client, from_username: str, after_id: int, timeout: int = 30):
-    deadline = asyncio.get_event_loop().time() + timeout
-    while asyncio.get_event_loop().time() < deadline:
-        await asyncio.sleep(1.5)
-        try:
-            async for msg in client.get_chat_history(from_username, limit=5):
-                if msg.id <= after_id:
-                    break
-                if msg.video or msg.document or msg.audio:
-                    return msg
-        except Exception as e:
-            logger.warning("_wait_for_media xato: %s", e)
-    return None
 
 
 def _flatten_buttons(msg) -> list:
