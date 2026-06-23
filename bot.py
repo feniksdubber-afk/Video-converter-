@@ -84,7 +84,7 @@ from handlers.save_restricted import (
     save_link_handler, save_topic_handler, save_confirm_callback, handle_save_new_topic_name,
     audio_link_handler, save_audio_topic_handler,
 )
-from handlers.kino_sender import kino_sender_handler
+from handlers.kino_sender import kino_sender_handler, kino_callback_handler
 from utils.auth_handlers import auth_gate, allow_handler, deny_handler, users_handler
 from utils.auth import reload_auth
 from utils.task_manager import cancel_task, clear_task
@@ -127,6 +127,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     context.user_data["_user_id"] = user_id
     await ensure_loaded(user_id, context)
+
+    # ── Kino mirror callbacks ─────────────────────────────────────────────────
+    if data.startswith(("kino|", "kinoi|", "kinodl|")):
+        await kino_callback_handler(update, context)
+        return
 
     # ── Save Restricted confirm / cancel / topic tanlash ────────────────────────
     if data.startswith("sr_"):
