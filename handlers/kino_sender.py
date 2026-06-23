@@ -1,12 +1,6 @@
 """
 kino_sender.py — Userbot orqali @Kinofilmnewbot dan kino yuborish.
 
-Jarayon:
-  1. Userbot ?start=<payload> bilan botga /start yuboradi
-  2. Bot inline tugmalar bilan javob qaytaradi
-  3. 6-tugma (index 5) bosiladi
-  4. Bot yuborgan video/fayl ARCHIVE_GROUP_ID guruhiga forward qilinadi
-
 Foydalanish:
   /kino 923          — payload 923 uchun 6-tugmani bosadi
   /kino 923 3        — payload 923 uchun 3-tugmani bosadi (ixtiyoriy)
@@ -23,19 +17,11 @@ from handlers.save_restricted import get_user_client
 
 logger = logging.getLogger(__name__)
 
-# Kino boti username
 KINO_BOT = "Kinofilmnewbot"
-
-# Tugmani kutish va javobni kutish uchun timeout (sekund)
 WAIT_TIMEOUT = 30
 
 
 async def kino_sender_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /kino <payload> [tugma_raqami]
-    Misol: /kino 923       → 6-tugmani bosadi
-           /kino 923 3     → 3-tugmani bosadi
-    """
     msg = update.effective_message
     args = context.args
 
@@ -49,7 +35,7 @@ async def kino_sender_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     payload = args[0].strip()
     button_index = 5  # default: 6-tugma (0-indexed = 5)
     if len(args) >= 2 and args[1].isdigit():
-        button_index = int(args[1]) - 1  # foydalanuvchi 1-dan hisoblaydi
+        button_index = int(args[1]) - 1
 
     dest_chat = ARCHIVE_GROUP_ID
     if not dest_chat:
@@ -74,13 +60,34 @@ async def kino_sender_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def _run_kino_flow(client, payload: str, button_index: int, dest_chat, status_msg):
-    """Asosiy oqim: /start yuborish → tugma bosish → guruhga yuborish."""
     from pyrogram.raw import functions
 
-    # ── 1. Kino botini resolve qilish ─────────────────────────────────────────
+    # ── 1. Kino botini resolve ────────────────────────────────────────────────
     kino_peer = await client.resolve_peer(KINO_BOT)
 
-    # ── 2. /start <payload> yuborish ──────────────────────────────────────────
+    # ── 2. Guruhni cache'ga olish (forward uchun kerak) ───────────────────────
+    # Pyrogram userbot guruhni bilmasa forward xato beradi.
+    # get_chat() chaqirish peer cache'ni to'ldiradi.
+    try:
+        await client.get_chat(dest_chat)
+    except Exception as e:
+        logger.warning("get_chat(%s) xato (davom etilmoqda): %s", dest_chat, e)
+        # get_dialogs() bilan kuchliroq urinish
+        try:
+            async for _ in client.get_dialogs():
+                pass
+        except Exception:
+            pass
+
+    # ── 3. Oxirgi xabar ID ni eslab qolamiz ──────────────────────────────────
+    last_seen_id = None
+    try:
+        async for h in client.get_chat_history(KINO_BOT, limit=1):
+            last_seen_id = h.id
+    except Exception:
+        pass
+
+    # ── 4. /start <payload> yuborish ─────────────────────────────────────────
     await client.invoke(
         functions.messages.StartBot(
             bot=kino_peer,
@@ -92,14 +99,14 @@ async def _run_kino_flow(client, payload: str, button_index: int, dest_chat, sta
 
     await status_msg.edit_text(f"⏳ Bot javobini kutilmoqda (max {WAIT_TIMEOUT}s)...")
 
-    # ── 3. Bot javobini kutish — inline tugmali xabar ─────────────────────────
-    bot_msg = await _wait_for_inline_buttons(client, KINO_BOT, timeout=WAIT_TIMEOUT)
+    # ── 5. Inline tugmali xabarni kutish ─────────────────────────────────────
+    bot_msg = await _wait_for_inline_buttons(client, KINO_BOT, last_seen_id, timeout=WAIT_TIMEOUT)
 
     if bot_msg is None:
         await status_msg.edit_text("❌ Bot inline tugmali javob bermadi!")
         return
 
-    # ── 4. Tugmalar ro'yxati ──────────────────────────────────────────────────
+    # ── 6. Tugmalar ro'yxati ──────────────────────────────────────────────────
     buttons = _flatten_buttons(bot_msg)
     if not buttons:
         await status_msg.edit_text("❌ Xabarda inline tugmalar topilmadi!")
@@ -115,56 +122,68 @@ async def _run_kino_flow(client, payload: str, button_index: int, dest_chat, sta
     chosen_btn = buttons[button_index]
     await status_msg.edit_text(f"🔘 \"{chosen_btn.text}\" tugmasi bosilmoqda...")
 
-    # ── 5. Tugmani bosish — callback_data (Pyrogram 2.x) ──────────────────────
+    # ── 7. Tugmani bosish — timeout bo'lsa ham davom etamiz ───────────────────
     cb_data = chosen_btn.callback_data
     if isinstance(cb_data, str):
         cb_data = cb_data.encode("utf-8")
 
-    await client.invoke(
-        functions.messages.GetBotCallbackAnswer(
-            peer=kino_peer,
-            msg_id=bot_msg.id,
-            data=cb_data,
+    try:
+        await client.invoke(
+            functions.messages.GetBotCallbackAnswer(
+                peer=kino_peer,
+                msg_id=bot_msg.id,
+                data=cb_data,
+            )
         )
-    )
+    except Exception as e:
+        # Kino botlari ko'pincha callback answer bermaydi — bu normal
+        logger.info("GetBotCallbackAnswer xato (normal): %s", e)
 
     await status_msg.edit_text(f"⏳ Video/fayl javobini kutilmoqda (max {WAIT_TIMEOUT}s)...")
 
-    # ── 6. Bot media (video/fayl) yuborishini kutish ───────────────────────────
+    # ── 8. Bot media yuborishini kutish ───────────────────────────────────────
     media_msg = await _wait_for_media(client, KINO_BOT, after_msg_id=bot_msg.id, timeout=WAIT_TIMEOUT)
 
     if media_msg is None:
-        await status_msg.edit_text("❌ Bot media (video/fayl) yuboramadi!")
+        await status_msg.edit_text("❌ Bot video/fayl yuboramadi!")
         return
 
-    # ── 7. Guruhga forward qilish ─────────────────────────────────────────────
+    # ── 9. Guruhga forward qilish ─────────────────────────────────────────────
     await status_msg.edit_text("📤 Guruhga yuborilmoqda...")
 
-    await client.forward_messages(
-        chat_id=dest_chat,
-        from_chat_id=KINO_BOT,
-        message_ids=media_msg.id,
-    )
-
-    await status_msg.edit_text(
-        f"✅ \"{chosen_btn.text}\" kino guruhga yuborildi!\n"
-        f"📩 Xabar ID: `{media_msg.id}`",
-        parse_mode="Markdown",
-    )
-
-
-# ── Yordamchi funksiyalar ──────────────────────────────────────────────────────
-
-async def _wait_for_inline_buttons(client, from_username: str, timeout: int = 30):
-    """Botdan inline tugmali yangi xabarni kutadi."""
-    deadline = asyncio.get_event_loop().time() + timeout
-    last_seen_id = None
-
     try:
-        async for h in client.get_chat_history(from_username, limit=1):
-            last_seen_id = h.id
-    except Exception:
-        pass
+        await client.forward_messages(
+            chat_id=dest_chat,
+            from_chat_id=KINO_BOT,
+            message_ids=media_msg.id,
+        )
+        await status_msg.edit_text(
+            f"✅ \"{chosen_btn.text}\" kino guruhga yuborildi!\n"
+            f"📩 Xabar ID: `{media_msg.id}`",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        # Forward xato bo'lsa, to'g'ridan-to'g'ri copy_message bilan urinamiz
+        logger.warning("forward_messages xato, copy urinilmoqda: %s", e)
+        try:
+            await client.copy_message(
+                chat_id=dest_chat,
+                from_chat_id=KINO_BOT,
+                message_id=media_msg.id,
+            )
+            await status_msg.edit_text(
+                f"✅ \"{chosen_btn.text}\" kino guruhga yuborildi! (copy)\n"
+                f"📩 Xabar ID: `{media_msg.id}`",
+                parse_mode="Markdown",
+            )
+        except Exception as e2:
+            await status_msg.edit_text(f"❌ Guruhga yuborishda xato: {e2}")
+
+
+# ── Yordamchi funksiyalar ─────────────────────────────────────────────────────
+
+async def _wait_for_inline_buttons(client, from_username: str, last_seen_id, timeout: int = 30):
+    deadline = asyncio.get_event_loop().time() + timeout
 
     while asyncio.get_event_loop().time() < deadline:
         await asyncio.sleep(1.5)
@@ -181,7 +200,6 @@ async def _wait_for_inline_buttons(client, from_username: str, timeout: int = 30
 
 
 async def _wait_for_media(client, from_username: str, after_msg_id: int, timeout: int = 30):
-    """after_msg_id dan keyin media xabarini kutadi."""
     deadline = asyncio.get_event_loop().time() + timeout
 
     while asyncio.get_event_loop().time() < deadline:
@@ -199,16 +217,14 @@ async def _wait_for_media(client, from_username: str, after_msg_id: int, timeout
 
 
 def _flatten_buttons(msg) -> list:
-    """InlineKeyboardMarkup ichidagi callback_data li tugmalarni tekis ro'yxatga soladi."""
+    """callback_data li tugmalarni tekis ro'yxatga soladi."""
     buttons = []
     if not msg.reply_markup:
         return buttons
     markup = msg.reply_markup
-    # Pyrogram 2.x: InlineKeyboardMarkup.inline_keyboard → list of list of InlineKeyboardButton
     if hasattr(markup, "inline_keyboard"):
         for row in markup.inline_keyboard:
             for btn in row:
-                # Pyrogram 2.x da attribute nomi: callback_data
                 if hasattr(btn, "callback_data") and btn.callback_data is not None:
                     buttons.append(btn)
     return buttons
