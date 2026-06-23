@@ -94,6 +94,31 @@ logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 
+def _setup_asyncio_exception_handler():
+    """Pyrogram ichki handle_updates() taskida chiqadigan 'Peer id invalid'
+    ValueError xatolarini yutib yuboradi. Bu xato bot ishiga ta'sir qilmaydi —
+    userbot yangi kanal/guruh update'i olganda peer cache'da shu chat bo'lmasa
+    yuz beradi va kutilgan holat hisoblanadi. Shu sababli asyncio'ning
+    unhandled exception handler'ini override qilib, faqat shu xatoni
+    WARNING darajasida loglaymiz (ERROR o'rniga), stack trace yo'q."""
+    import asyncio
+
+    def _custom_exception_handler(loop, context):
+        exc = context.get("exception")
+        if isinstance(exc, ValueError) and "Peer id invalid" in str(exc):
+            # Kutilgan holat — yutib yuboramiz (yoki faqat debug darajasida)
+            logger.debug("Pyrogram peer cache miss (kutilgan): %s", exc)
+            return
+        # Boshqa xatolar — standart asyncio handler'ga uzatamiz
+        loop.default_exception_handler(context)
+
+    try:
+        loop = asyncio.get_event_loop()
+        loop.set_exception_handler(_custom_exception_handler)
+    except RuntimeError:
+        pass  # Event loop hali yaratilmagan — main() ichida chaqiriladi
+
+
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
@@ -530,6 +555,21 @@ def _cleanup_temp_dir():
 
 async def _post_init(app):
     """Bot ishga tushganda SQLite bazasini initsializatsiya qiladi."""
+    import asyncio
+    # Asyncio event loop ishga tushgandan keyin exception handler'ni
+    # qaytadan o'rnatamiz — shu paytda loop allaqachon mavjud bo'ladi.
+    _setup_asyncio_exception_handler()
+    try:
+        asyncio.get_running_loop().set_exception_handler(
+            lambda loop, ctx: (
+                logger.debug("Pyrogram peer cache miss (kutilgan): %s", ctx.get("exception"))
+                if isinstance(ctx.get("exception"), ValueError)
+                   and "Peer id invalid" in str(ctx.get("exception", ""))
+                else loop.default_exception_handler(ctx)
+            )
+        )
+    except Exception:
+        pass
     await init_db()
     reload_auth()
     logger.info("✅ SQLite DB tayyor.")
@@ -540,6 +580,8 @@ async def _post_init(app):
 def main():
     if not BOT_TOKEN:
         raise ValueError("TELEGRAM_BOT_TOKEN topilmadi!")
+
+    _setup_asyncio_exception_handler()
 
     builder = Application.builder().token(BOT_TOKEN).post_init(_post_init)
 
