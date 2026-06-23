@@ -416,14 +416,17 @@ async def _press_button_and_download(client, bot_username, bot_peer,
     last_id = btn_msg.id
 
     try:
-        await client.invoke(
-            functions.messages.GetBotCallbackAnswer(
-                peer=bot_peer,
-                msg_id=btn_msg.id,
-                data=cb_data,
-            )
+        await asyncio.wait_for(
+            client.invoke(
+                functions.messages.GetBotCallbackAnswer(
+                    peer=bot_peer,
+                    msg_id=btn_msg.id,
+                    data=cb_data,
+                )
+            ),
+            timeout=10,
         )
-    except Exception as e:
+    except (asyncio.TimeoutError, Exception) as e:
         logger.info("GetBotCallbackAnswer xato (normal): %s", e)
 
     # Media xabarini event handler orqali kutamiz
@@ -561,6 +564,13 @@ async def _download_and_send(client, media_msg, dest_chat, title, status_msg):
                 pass
 
         caption = (media_msg.caption or "").strip() or f"🎬 {title}"
+
+        # dest_chat ni Pyrogram peer cache ga kiritamiz
+        # (-100xxxx supergroup ID lar resolve_peer da "Peer id invalid" berishi mumkin)
+        try:
+            await client.get_chat(dest_chat)
+        except Exception as e:
+            logger.warning("dest_chat get_chat xato (normal): %s", e)
 
         try:
             if is_video_file:
