@@ -307,6 +307,7 @@ async def get_user_client() -> Client | None:
                 # yuqori darajadagi "parallel" sozlama amalda ishlamaydi.
                 max_concurrent_transmissions=4,
             )
+
             await _user_client.start()
             try:
                 me = await _user_client.get_me()
@@ -380,9 +381,9 @@ def _refresh_kb(msg_id: int) -> InlineKeyboardMarkup:
     ])
 
 
-def _progress_bar(percent: int, length: int = 12) -> str:
+def _progress_bar(percent: int, length: int = 14) -> str:
     filled = int(length * percent / 100)
-    return "[" + "█" * filled + "░" * (length - filled) + "]"
+    return "\u25b0" * filled + "\u25b1" * (length - filled)
 
 
 def parse_tme_link(text: str):
@@ -571,7 +572,7 @@ async def _download_and_send(
                 report(f"⬇️ {short_name} {pct}%")
             if silent:
                 return
-            txt = f"⬇️ *Yuklanmoqda...*\n\n{bar} `{pct}%`\n`{cur_mb:.1f}` / `{total_mb:.1f}` MB"
+            txt = f"⬇️ *Yuklanmoqda...*\n\n`{bar}` `{pct}%`\n`{cur_mb:.1f} MB` / `{total_mb:.1f} MB`"
             _progress_state[status_msg.message_id] = txt
             if pct - last_pct[0] < 10:
                 return
@@ -965,10 +966,14 @@ async def _send_batch(
         while done < total and not cancelled_flag:
             if is_cancelled(user_id):
                 return
-            bar = _progress_bar(int(done / total * 100))
-            lines = [f"📦 *{done}/{total}* yuklandi ({batch_concurrency} parallel, tartib bilan yuborilmoqda)", bar]
+            pct = int(done / total * 100)
+            bar = _progress_bar(pct)
+            lines = [
+                f"📦 *{done}/{total}* fayl yuklandi",
+                f"`{bar}` `{pct}%`",
+            ]
             for s in sorted(slots.keys()):
-                lines.append(f"`{slots[s]}`")
+                lines.append(f"  • `{slots[s]}`")
             render = "\n".join(lines)
             if render != last_render:
                 last_render = render
