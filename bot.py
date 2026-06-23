@@ -84,6 +84,7 @@ from handlers.save_restricted import (
     save_link_handler, save_topic_handler, save_confirm_callback, handle_save_new_topic_name,
     audio_link_handler, save_audio_topic_handler,
 )
+from handlers.kino_sender import kino_sender_handler
 from utils.auth_handlers import auth_gate, allow_handler, deny_handler, users_handler
 from utils.auth import reload_auth
 from utils.task_manager import cancel_task, clear_task
@@ -569,6 +570,7 @@ def main():
     app.add_handler(CommandHandler("save", save_topic_handler))
     app.add_handler(CommandHandler("savea", save_audio_topic_handler))
     app.add_handler(CommandHandler("a", audio_link_handler))
+    app.add_handler(CommandHandler("kino", kino_sender_handler))
     app.add_handler(CommandHandler("allow", allow_handler))
     app.add_handler(CommandHandler("deny", deny_handler))
     app.add_handler(CommandHandler("users", users_handler))
