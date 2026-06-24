@@ -86,6 +86,7 @@ from handlers.save_restricted import (
 )
 from handlers.kino_sender import kino_sender_handler, kino_callback_handler
 from handlers.netfilm_handler import netfilm_handler, netfilm_callback_handler
+from handlers.url_downloader import dl_handler, dl_callback_handler
 from utils.auth_handlers import auth_gate, allow_handler, deny_handler, users_handler
 from utils.auth import reload_auth
 from utils.task_manager import cancel_task, clear_task
@@ -132,6 +133,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Netfilm callbacks ────────────────────────────────────────────────────
     if data.startswith(("nf_dl|", "nf_cancel")):
         await netfilm_callback_handler(update, context)
+        return
+    if data.startswith(("dl_fmt|", "dl_cancel")):
+        await dl_callback_handler(update, context)
         return
 
     # ── Kino mirror callbacks ─────────────────────────────────────────────────
@@ -625,6 +629,7 @@ def main():
     app.add_handler(CommandHandler("a", audio_link_handler))
     app.add_handler(CommandHandler("kino", kino_sender_handler))
     app.add_handler(CommandHandler("netfilm", netfilm_handler))
+    app.add_handler(CommandHandler("dl", dl_handler))
     app.add_handler(CommandHandler("allow", allow_handler))
     app.add_handler(CommandHandler("deny", deny_handler))
     app.add_handler(CommandHandler("users", users_handler))
