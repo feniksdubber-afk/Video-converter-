@@ -223,6 +223,7 @@ def _build_yts_magnet(info_hash: str, display_name: str) -> str:
 async def _search_rutor(query: str, limit: int = 5) -> list[TorrentResult]:
     """Rutor.info dan qidiradi (rus/uzbek kino uchun yaxshi)."""
     results = []
+    seen_magnets: set[str] = set()
     url = f"https://rutor.info/search/0/0/100/0/{quote_plus(query)}"
     try:
         async with httpx.AsyncClient(headers=HEADERS, timeout=SEARCH_TIMEOUT, follow_redirects=True) as c:
@@ -232,9 +233,8 @@ async def _search_rutor(query: str, limit: int = 5) -> list[TorrentResult]:
             html = r.text
 
         rows = re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.DOTALL)
-        count = 0
         for row in rows:
-            if count >= limit:
+            if len(results) >= limit:
                 break
             magnet_m = re.search(r'href="(magnet:\?[^"]+)"', row)
             name_m = re.search(r'<a[^>]+href="/torrent/[^"]*"[^>]*>(.*?)</a>', row, re.DOTALL)
@@ -245,38 +245,56 @@ async def _search_rutor(query: str, limit: int = 5) -> list[TorrentResult]:
             if not magnet_m or not name_m:
                 continue
 
+            magnet = magnet_m.group(1)
+            # Infohash bo'yicha dublikat tekshiruv
+            ih_m = re.search(r'btih:([a-fA-F0-9]{40})', magnet, re.I)
+            ih = ih_m.group(1).lower() if ih_m else magnet[:60]
+            if ih in seen_magnets:
+                continue
+            seen_magnets.add(ih)
+
             title = re.sub(r'<[^>]+>', '', name_m.group(1)).strip()
             if not title:
                 continue
 
             results.append(TorrentResult(
                 title=title[:80],
-                magnet=magnet_m.group(1),
+                magnet=magnet,
                 size=size_m.group(1) if size_m else "?",
                 seeds=int(seeds_m.group(1)) if seeds_m else 0,
                 leeches=int(leeches_m.group(1)) if leeches_m else 0,
                 source="Rutor",
             ))
-            count += 1
     except Exception as e:
         logger.warning("Rutor qidiruv xato: %s", e)
     return results
 
 
 async def _search_all(query: str) -> list[TorrentResult]:
-    """Barcha manbalardan parallel qidiradi."""
+    """Barcha manbalardan parallel qidiradi, dublikatlarni olib tashlaydi."""
     tasks = [
-        _search_yts(query, 3),
-        _search_1337x(query, 4),
-        _search_rutor(query, 3),
+        _search_yts(query, 4),
+        _search_1337x(query, 5),
+        _search_rutor(query, 4),
     ]
     all_results = await asyncio.gather(*tasks, return_exceptions=True)
     merged = []
-    for res in all_results:
-        if isinstance(res, list):
-            merged.extend(res)
+    seen_hashes: set[str] = set()
 
-    # Seeds bo'yicha tartiblaymiz
+    for res in all_results:
+        if not isinstance(res, list):
+            continue
+        for r in res:
+            # Infohash bo'yicha global dedup
+            ih_m = re.search(r'btih:([a-fA-F0-9]{40})', r.magnet or "", re.I)
+            ih = ih_m.group(1).lower() if ih_m else None
+            if ih and ih in seen_hashes:
+                continue
+            if ih:
+                seen_hashes.add(ih)
+            merged.append(r)
+
+    # Seeds bo'yicha tartiblaymiz (seederli natijalar birinchi)
     merged.sort(key=lambda x: x.seeds, reverse=True)
     return merged[:10]
 
@@ -593,6 +611,34 @@ async def torrent_callback_handler(update: Update, context: ContextTypes.DEFAULT
         await query.edit_message_text("❌ Bekor qilindi.")
         return
 
+    # tr_force — 0 seed bo'lsa majburiy yuklab olish
+    if data.startswith("tr_force|"):
+        parts = data.split("|")
+        if len(parts) >= 3:
+            try:
+                owner_id = int(parts[1])
+                idx = int(parts[2])
+            except ValueError:
+                await query.edit_message_text("❌ Xato!")
+                return
+            session = _sessions.get(owner_id)
+            if not session:
+                await query.edit_message_text("❌ Session tugadi!")
+                return
+            result = session.results[idx]
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            status = await query.message.reply_text(
+                f"🧲 *{result.title[:60]}*\n"
+                f"📦 {result.size}  🔴 0 seed (majburiy)\n\n"
+                f"Yuklab olinmoqda... (seeder kutilmoqda)",
+                parse_mode="Markdown",
+            )
+            await _run_download(result.magnet, result.title, status, query.message)
+        return
+
     if not data.startswith("tr_dl|"):
         return
 
@@ -630,15 +676,35 @@ async def torrent_callback_handler(update: Update, context: ContextTypes.DEFAULT
         )
         return
 
+
+    # 0 seed — ogohlantirish
+    if result.seeds == 0:
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("⚠️ Baribir yukla", callback_data=f"tr_force|{owner_id}|{idx}"),
+                InlineKeyboardButton("❌ Bekor", callback_data="tr_cancel"),
+            ]
+        ])
+        await query.edit_message_text(
+            f"⚠️ *{result.title[:60]}*\n\n"
+            f"🔴 Seeder: 0 — fayl yuklab olinmasligi mumkin!\n"
+            f"Torrent 5 daqiqagacha kutadi, muvaffaqiyatsiz tugashi ehtimoli yuqori.\n\n"
+            f"Baribir urinib ko'rasizmi?",
+            parse_mode="Markdown",
+            reply_markup=kb,
+        )
+        return
+
     # Klaviaturani olib tashlaymiz
     try:
         await query.edit_message_reply_markup(reply_markup=None)
     except Exception:
         pass
 
+    seed_icon = "🟢" if result.seeds > 50 else "🟡" if result.seeds > 10 else "🔴"
     status = await query.message.reply_text(
         f"🧲 *{result.title[:60]}*\n"
-        f"📦 {result.size}  🌱 {result.seeds} seed\n\n"
+        f"📦 {result.size}  {seed_icon} {result.seeds} seed\n\n"
         f"Yuklab olinmoqda...",
         parse_mode="Markdown",
     )
