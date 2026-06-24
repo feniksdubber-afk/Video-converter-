@@ -138,7 +138,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith(("dl_fmt|", "dl_cancel")):
         await dl_callback_handler(update, context)
         return
-    if data.startswith(("tr_dl|", "tr_cancel")):
+    if data.startswith(("tr_dl|", "tr_cancel", "tr_force|")):
         await torrent_callback_handler(update, context)
         return
 
