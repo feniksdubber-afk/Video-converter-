@@ -66,6 +66,10 @@ STEP_DEFS = {
     "res_1080": {"label": "📐 1080p", "desc": "1080p ga o'zgartirish"},
     "res_720":  {"label": "📐 720p",  "desc": "720p ga o'zgartirish"},
     "res_480":  {"label": "📐 480p",  "desc": "480p ga o'zgartirish"},
+    "faststart": {
+        "label": "⚡️ Faststart (tez ochilish)",
+        "desc": "MOOV atomni boshiga ko'chiradi — video darhol striming boshlanadi",
+    },
     "upload_r2": {
         "label": "☁️ R2 ga yuklash",
         "desc": "Cloudflare R2 ga yuklab havola yuboradi",
@@ -672,6 +676,8 @@ async def _run_step(
     if step_key in ("res_1080", "res_720", "res_480"):
         h = {"res_1080": 1080, "res_720": 720, "res_480": 480}[step_key]
         return await _step_change_res(input_path, base, h, status_msg, user_id)
+    if step_key == "faststart":
+        return await _step_faststart(input_path, base, user_id)
     raise ValueError(f"Noma'lum qadam: {step_key}")
 
 
@@ -784,6 +790,18 @@ async def _step_remove_audio(input_path: str, base_name: str, user_id: int = 0):
     if rc != 0:
         raise RuntimeError(stderr[-800:])
     return out_path, f"{base_name}_noaudio{ext}"
+
+
+async def _step_faststart(input_path: str, base_name: str, user_id: int = 0):
+    """MOOV atomni faylning boshiga ko'chiradi (stream copy, qayta encode yo'q) —
+    natijada video Telegram/R2 dan darhol striming bo'la boshlaydi."""
+    ext = os.path.splitext(input_path)[1] or ".mp4"
+    out_path = make_temp_path(ext.lstrip("."))
+    cmd = ["ffmpeg", "-y", "-i", input_path, "-c", "copy", "-movflags", "+faststart", out_path]
+    rc, stderr = await _run_cmd(cmd, 900, user_id)
+    if rc != 0:
+        raise RuntimeError(stderr[-800:])
+    return out_path, f"{base_name}_fs{ext}"
 
 
 async def _step_change_res(input_path: str, base_name: str, height: int, status_msg=None, user_id: int = 0):
