@@ -88,7 +88,11 @@ from handlers.kino_sender import kino_sender_handler, kino_callback_handler
 from handlers.netfilm_handler import netfilm_handler, netfilm_callback_handler
 from handlers.url_downloader import dl_handler, dl_callback_handler
 from handlers.torrent_handler import torrent_handler, torrent_callback_handler
-from utils.auth_handlers import auth_gate, allow_handler, deny_handler, users_handler
+from utils.auth_handlers import (
+    auth_gate, allow_handler, deny_handler, users_handler,
+    studio_create_handler, studios_list_handler, studio_unbind_handler, studio_token_handler,
+)
+from handlers.studio_upload import show_studio_upload_entry, handle_kind_choice, handle_studio_text
 from utils.auth import reload_auth
 from utils.task_manager import cancel_task, clear_task
 from utils.keyboards import main_menu_keyboard
@@ -130,6 +134,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     context.user_data["_user_id"] = user_id
     await ensure_loaded(user_id, context)
+
+    # ── Studiya menejerlari faqat konvertatsiya + studiyaga yuklashdan foydalana oladi ──
+    from utils.auth import is_admin, is_allowed
+    from utils.studio_auth import is_studio_manager
+    if is_studio_manager(user_id) and not is_admin(user_id) and not is_allowed(user_id):
+        _STUDIO_ALLOWED_PREFIXES = (
+            "cat_video", "studio_", "pa_", "task_cancel", "cancel", "back",
+            "convert", "resolution", "fmt_", "res_",
+        )
+        if not data.startswith(_STUDIO_ALLOWED_PREFIXES):
+            await query.answer("⛔ Sizga faqat konvertatsiya va studiyaga yuklash ruxsat etilgan.", show_alert=True)
+            return
 
     # ── Netfilm callbacks ────────────────────────────────────────────────────
     if data.startswith(("nf_dl|", "nf_cancel")):
@@ -184,6 +200,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "cat_r2":
         await query.answer()
         await _show_r2_list_cb(query, context, page=0)
+        return
+
+    # ── Studiya menejeri: konvertatsiyalangan videoni platformaga yuklash ──
+    if data == "studio_upload":
+        await show_studio_upload_entry(update, context)
+        return
+    if data == "studio_kind_movie":
+        await handle_kind_choice(update, context, "movies")
+        return
+    if data == "studio_kind_series":
+        await handle_kind_choice(update, context, "series")
         return
 
     # ── Umumiy ──────────────────────────────────────────────
@@ -431,6 +458,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             from handlers.batch import handle_batch_save_name
             await handle_batch_save_name(update, context)
             return
+
+        # Studiyaga yuklash oqimi (film/serial ID, fasl, qism)
+        if state in ("studio_movie_id", "studio_series_id", "studio_season", "studio_episode"):
+            if await handle_studio_text(update, context):
+                return
+
         handler = dispatch.get(state)
         if handler:
             await handler(update, context)
@@ -638,6 +671,10 @@ def main():
     app.add_handler(CommandHandler("allow", allow_handler))
     app.add_handler(CommandHandler("deny", deny_handler))
     app.add_handler(CommandHandler("users", users_handler))
+    app.add_handler(CommandHandler("studiya_yarat", studio_create_handler))
+    app.add_handler(CommandHandler("studiyalar", studios_list_handler))
+    app.add_handler(CommandHandler("studiya_chiqar", studio_unbind_handler))
+    app.add_handler(CommandHandler("studiya_token", studio_token_handler))
 
     # MUHIM: video/fayl/audio/rasm qabul qilish va "✅ Video qabul qilindi"
     # kabi konvertatsiya menyusi FAQAT shaxsiy chatda (bot bilan 1:1) ishlashi

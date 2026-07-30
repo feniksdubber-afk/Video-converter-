@@ -52,5 +52,10 @@ AUTO_CREATE_TOPIC = os.environ.get("AUTO_CREATE_TOPIC", "true").lower() in ("1",
 # R2 upload default papka prefiksi (users/{user_id}/uploads/)
 R2_USER_PREFIX = os.environ.get("R2_USER_PREFIX", "users")
 
+# ── Studiya menejerlari uchun Afsona Studio API ────────────────────────────
+# Studiya menejerlari konvertatsiya qilingan videoni to'g'ridan-to'g'ri
+# o'z studiyasiga (Afsona platformasiga) shu manzil orqali yuklaydi.
+STUDIO_API_BASE = os.environ.get("STUDIO_API_BASE", "https://app.afsonatv.uz/api")
+
 os.makedirs(TEMP_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
