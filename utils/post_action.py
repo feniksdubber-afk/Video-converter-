@@ -102,13 +102,15 @@ async def handle_pa_send(update, context):
 
 async def handle_pa_continue(update, context):
     """✏️ Boshqa amal bosilganda."""
-    from utils.keyboards import main_menu_keyboard
+    from utils.keyboards import main_menu_keyboard, studio_menu_keyboard
+    from utils.studio_auth import is_studio_manager
 
     query = update.callback_query
     await query.answer()
+    keyboard = studio_menu_keyboard() if is_studio_manager(query.from_user.id) else main_menu_keyboard()
     await query.edit_message_text(
         "Quyidagi amallardan birini tanlang:",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=keyboard,
     )
 
 

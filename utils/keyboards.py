@@ -30,6 +30,19 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def studio_menu_keyboard() -> InlineKeyboardMarkup:
+    """Studiya menejerlari uchun cheklangan menyu — faqat konvertatsiya va
+    o'z studiyasiga yuklash."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🎬 Video Tahrirlash", callback_data="cat_video"),
+        ],
+        [
+            InlineKeyboardButton("📤 Studiyaga yuklash", callback_data="studio_upload"),
+        ],
+    ])
+
+
 def start_keyboard() -> InlineKeyboardMarkup:
     """Start ekranida ko'rsatiladigan menyu (video yo'q)."""
     return InlineKeyboardMarkup([
