@@ -41,7 +41,25 @@ HELP_TEXT = (
 )
 
 
+STUDIO_START_TEXT = (
+    "👋 *Xush kelibsiz, {studio_name}!*\n\n"
+    "🎬 Bu bot orqali videongizni tayyorlab, to'g'ridan-to'g'ri o'z "
+    "studiyangizga yuklashingiz mumkin.\n\n"
+    "📤 *Boshlash uchun video yuboring.*"
+)
+
+
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from utils.studio_auth import get_studio_for_user
+
+    studio = get_studio_for_user(update.effective_user.id)
+    if studio:
+        await update.message.reply_text(
+            STUDIO_START_TEXT.format(studio_name=studio["name"]),
+            parse_mode="Markdown",
+        )
+        return
+
     await update.message.reply_text(
         START_TEXT,
         parse_mode="Markdown",

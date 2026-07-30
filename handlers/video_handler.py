@@ -90,12 +90,16 @@ async def video_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from utils.video_history import init_history
         init_history(context, local_path, file_name)
 
+        from utils.studio_auth import is_studio_manager
+        from utils.keyboards import studio_menu_keyboard
+        keyboard = studio_menu_keyboard() if is_studio_manager(message.from_user.id) else main_menu_keyboard()
+
         await status_msg.edit_text(
             f"✅ *Video qabul qilindi!*\n\n"
             f"📁 Fayl: `{file_name}`\n"
             f"📦 Hajmi: {_format_size(file.file_size)}\n\n"
             f"Quyidagi amallardan birini tanlang:",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=keyboard,
             parse_mode="Markdown",
         )
     except Exception as e:
