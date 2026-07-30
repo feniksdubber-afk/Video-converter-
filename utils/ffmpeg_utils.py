@@ -20,7 +20,7 @@ def sanitize_filename(name: str) -> str:
     return (base or "file") + ext
 
 
-def run_ffmpeg(args: list[str], timeout: int = 1800) -> tuple[bool, str]:
+def run_ffmpeg(args: list[str], timeout: int = 7200) -> tuple[bool, str]:
     cmd = ["ffmpeg", "-y"] + args
     try:
         result = subprocess.run(
@@ -33,7 +33,7 @@ def run_ffmpeg(args: list[str], timeout: int = 1800) -> tuple[bool, str]:
             return False, result.stderr[-2000:] if result.stderr else "Noma'lum xato"
         return True, ""
     except subprocess.TimeoutExpired:
-        return False, "Vaqt tugadi (30 daqiqa)"
+        return False, f"Vaqt tugadi ({timeout // 60} daqiqa)"
     except FileNotFoundError:
         return False, "FFmpeg topilmadi."
     except Exception as e:
@@ -45,7 +45,7 @@ async def run_ffmpeg_async(
     status_msg,
     label: str = "Ishlanmoqda",
     input_path: str = None,
-    timeout: int = 1800,
+    timeout: int = 7200,
     user_id: int = 0,
 ) -> tuple[bool, str]:
     """FFmpeg ni async + progress foizi bilan ishlatadi."""
@@ -250,20 +250,20 @@ def convert_video(input_path: str, output_format: str) -> tuple[bool, str, str]:
     output_path = make_temp_path(output_format)
     threads = _thread_count()
     codec_map = {
-        "mp4":  ["-c:v", "libx264", "-preset", "medium", "-crf", "23",
+        "mp4":  ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
                  "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart"],
-        "mkv":  ["-c:v", "libx264", "-preset", "medium", "-crf", "23",
+        "mkv":  ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
                  "-c:a", "aac"],
         "avi":  ["-c:v", "libxvid", "-q:v", "5",
                  "-c:a", "libmp3lame", "-q:a", "4"],
-        "mov":  ["-c:v", "libx264", "-preset", "medium", "-crf", "23",
+        "mov":  ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
                  "-c:a", "aac", "-movflags", "+faststart"],
         "webm": ["-c:v", "libvpx-vp9", "-deadline", "good", "-cpu-used", "4",
                  "-c:a", "libopus"],
-        "flv":  ["-c:v", "libx264", "-preset", "medium", "-crf", "23",
+        "flv":  ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
                  "-c:a", "aac"],
     }
-    extra = codec_map.get(output_format, ["-c:v", "libx264", "-preset", "medium",
+    extra = codec_map.get(output_format, ["-c:v", "libx264", "-preset", "veryfast",
                                            "-crf", "23", "-c:a", "aac"])
     args = ["-i", input_path, "-threads", threads] + extra + [output_path]
     ok, err = run_ffmpeg(args)
@@ -274,16 +274,16 @@ async def convert_video_async(input_path: str, output_format: str, status_msg, u
     output_path = make_temp_path(output_format)
     threads = _thread_count()
     codec_map = {
-        "mp4":  ["-c:v", "libx264", "-preset", "medium", "-crf", "23",
+        "mp4":  ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
                  "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart"],
-        "mkv":  ["-c:v", "libx264", "-preset", "medium", "-crf", "23", "-c:a", "aac"],
+        "mkv":  ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-c:a", "aac"],
         "avi":  ["-c:v", "libxvid", "-q:v", "5", "-c:a", "libmp3lame", "-q:a", "4"],
-        "mov":  ["-c:v", "libx264", "-preset", "medium", "-crf", "23",
+        "mov":  ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
                  "-c:a", "aac", "-movflags", "+faststart"],
         "webm": ["-c:v", "libvpx-vp9", "-deadline", "good", "-cpu-used", "4", "-c:a", "libopus"],
-        "flv":  ["-c:v", "libx264", "-preset", "medium", "-crf", "23", "-c:a", "aac"],
+        "flv":  ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-c:a", "aac"],
     }
-    extra = codec_map.get(output_format, ["-c:v", "libx264", "-preset", "medium",
+    extra = codec_map.get(output_format, ["-c:v", "libx264", "-preset", "veryfast",
                                            "-crf", "23", "-c:a", "aac"])
     args = ["-i", input_path, "-threads", threads] + extra + [output_path]
     ok, err = await run_ffmpeg_async(
@@ -302,7 +302,7 @@ async def change_resolution_async(input_path: str, height: int, status_msg, user
         "-i", input_path,
         "-threads", threads,
         "-vf", f"scale=-2:{height}",
-        "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
         "-c:a", "aac", "-b:a", "128k",
         "-movflags", "+faststart",
         output_path,
@@ -323,7 +323,7 @@ def change_resolution(input_path: str, height: int) -> tuple[bool, str, str]:
         "-i", input_path,
         "-threads", threads,
         "-vf", f"scale=-2:{height}",
-        "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
         "-c:a", "aac", "-b:a", "128k",
         "-movflags", "+faststart",
         output_path,
@@ -341,7 +341,7 @@ async def compress_video_async(input_path: str, quality: str, status_msg, user_i
     args = [
         "-i", input_path,
         "-threads", threads,
-        "-c:v", "libx264", "-preset", "medium", "-crf", crf,
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", crf,
         "-c:a", "aac", "-b:a", "128k",
         "-movflags", "+faststart",
         output_path,
@@ -363,7 +363,7 @@ def compress_video(input_path: str, quality: str) -> tuple[bool, str, str]:
     args = [
         "-i", input_path,
         "-threads", threads,
-        "-c:v", "libx264", "-preset", "medium", "-crf", crf,
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", crf,
         "-c:a", "aac", "-b:a", "128k",
         "-movflags", "+faststart",
         output_path,
@@ -712,7 +712,7 @@ async def hardsub_video_async(
         "-i", video_path,
         "-threads", threads,
         "-vf", vf,
-        "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
         "-c:a", "copy",
         "-movflags", "+faststart",
         output_path,
