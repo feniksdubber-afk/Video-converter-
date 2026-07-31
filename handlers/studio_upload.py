@@ -17,7 +17,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from config import STUDIO_API_BASE
-from utils.studio_auth import get_studio_for_user
+from utils.studio_auth import get_bound_studio
 from utils.keyboards import studio_menu_keyboard
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,7 @@ async def show_studio_upload_entry(update: Update, context: ContextTypes.DEFAULT
         await query.edit_message_text("⚠️ Avval video yuboring (yoki konvertatsiya qiling)!")
         return
 
-    studio = get_studio_for_user(query.from_user.id)
+    studio = get_bound_studio(query.from_user.id)
     if not studio:
         await query.edit_message_text("⛔ Studiya sifatida aniqlanmadingiz.")
         return
@@ -120,7 +120,7 @@ async def _presign_and_put(studio: dict, file_path: str, kind: str, filename: st
 
 async def _do_movie_upload(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: str):
     message = update.message
-    studio = get_studio_for_user(message.from_user.id)
+    studio = get_bound_studio(message.from_user.id)
     video_path = context.user_data.get("video_path")
     video_name = context.user_data.get("video_name", "video.mp4")
 
@@ -146,7 +146,7 @@ async def _do_movie_upload(update: Update, context: ContextTypes.DEFAULT_TYPE, m
 
 async def _do_episode_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
-    studio = get_studio_for_user(message.from_user.id)
+    studio = get_bound_studio(message.from_user.id)
     video_path = context.user_data.get("video_path")
     video_name = context.user_data.get("video_name", "video.mp4")
     series_id = context.user_data["studio_series_id"]
