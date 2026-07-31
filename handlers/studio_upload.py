@@ -65,20 +65,8 @@ async def handle_kind_choice(update: Update, context: ContextTypes.DEFAULT_TYPE,
     await query.answer()
     context.user_data["studio_kind"] = kind  # "movies" | "series"
 
-    if kind == "movies":
-        context.user_data["state"] = "studio_movie_id"
-        await query.edit_message_text(
-            "🎬 *Film ID'sini kiriting.*\n\n"
-            "ID'ni bilmasangiz, mini-app'dagi studiya panelidan ko'rishingiz mumkin.",
-            parse_mode="Markdown",
-        )
-    else:
-        context.user_data["state"] = "studio_series_id"
-        await query.edit_message_text(
-            "📺 *Serial ID'sini kiriting.*\n\n"
-            "ID'ni bilmasangiz, mini-app'dagi studiya panelidan ko'rishingiz mumkin.",
-            parse_mode="Markdown",
-        )
+    from handlers.studio_content import show_pick_entry
+    await show_pick_entry(update, context, "m" if kind == "movies" else "s")
 
 
 def _auth_headers(studio: dict) -> dict:
@@ -119,8 +107,8 @@ async def _presign_and_put(studio: dict, file_path: str, kind: str, filename: st
 
 
 async def _do_movie_upload(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: str):
-    message = update.message
-    studio = get_bound_studio(message.from_user.id)
+    message = update.effective_message
+    studio = get_bound_studio(update.effective_user.id)
     video_path = context.user_data.get("video_path")
     video_name = context.user_data.get("video_name", "video.mp4")
 
@@ -145,8 +133,8 @@ async def _do_movie_upload(update: Update, context: ContextTypes.DEFAULT_TYPE, m
 
 
 async def _do_episode_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    studio = get_bound_studio(message.from_user.id)
+    message = update.effective_message
+    studio = get_bound_studio(update.effective_user.id)
     video_path = context.user_data.get("video_path")
     video_name = context.user_data.get("video_name", "video.mp4")
     series_id = context.user_data["studio_series_id"]
