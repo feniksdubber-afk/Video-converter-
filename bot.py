@@ -679,7 +679,7 @@ def main():
 
     _setup_asyncio_exception_handler()
 
-    builder = Application.builder().token(BOT_TOKEN).post_init(_post_init)
+    builder = Application.builder().token(BOT_TOKEN).post_init(_post_init).concurrent_updates(True)
 
     if LOCAL_BOT_API_URL:
         # Local Bot API server mavjud (Replit yoki Railway internal)
