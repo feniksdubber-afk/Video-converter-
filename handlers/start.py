@@ -51,12 +51,14 @@ STUDIO_START_TEXT = (
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from utils.studio_auth import get_bound_studio
+    from utils.keyboards import studio_menu_keyboard
 
     studio = get_bound_studio(update.effective_user.id)
     if studio:
         await update.message.reply_text(
             STUDIO_START_TEXT.format(studio_name=studio["name"]),
             parse_mode="Markdown",
+            reply_markup=studio_menu_keyboard(),
         )
         return
 
