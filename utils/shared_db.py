@@ -23,8 +23,9 @@ _QUERY = """
     SELECT s.id, s.slug, s.name
     FROM studio_members sm
     JOIN verified_profiles vp ON vp.id = sm.verified_profile_id
-    JOIN studios s            ON s.id  = sm.studio_id
-    WHERE vp.user_id = ? AND sm.role = 'manager' AND s.is_active = 1
+    JOIN users u              ON u.id  = vp.user_id
+    JOIN studios s             ON s.id  = sm.studio_id
+    WHERE u.tg_id = ? AND sm.role = 'manager' AND s.is_active = 1
     ORDER BY s.name
 """
 
