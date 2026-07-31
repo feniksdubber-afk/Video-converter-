@@ -1,39 +1,36 @@
 """Whitelist boshqaruvi: /allow, /deny, /users
-Studiya menejerlari uchun login/parol boshqaruvi: /studiya_yarat, /studiyalar,
-/studiya_chiqar, /studiya_ochir"""
+Studiya menejerlarini avtomatik aniqlash (asosiy platforma bazasidan) +
+admin uchun studiya API token va bog'lanishni boshqarish buyruqlari."""
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from config import ARCHIVE_GROUP_ID
 from utils.auth import (
     is_admin, is_allowed, allow_user, deny_user,
     list_allowed, list_admins, reload_auth,
 )
+from utils.shared_db import get_manager_studios
 from utils.studio_auth import (
-    is_studio_manager, get_studio_for_user, verify_login,
-    create_studio, list_studios, unbind_studio, delete_studio, set_api_token,
+    get_bound_studio, bind_user, clear_binding, set_api_token, list_tokens,
 )
 
 
-LOGIN_PROMPT = (
-    "🔐 *Kirish talab qilinadi*\n\n"
-    "Bu bot faqat ruxsat berilgan foydalanuvchilar uchun.\n\n"
-    "Agar siz *studiya menejeri* bo'lsangiz, Bosh admindan olgan login va "
-    "parolni BITTA xabarda, bo'sh joy bilan ajratib yuboring:\n\n"
-    "`Studiya_nomi Parol`\n\n"
-    "_Masalan: `Eleven Studio aB3xQ9pLmZ`_"
-)
+def _studio_pick_keyboard(studios: list[dict]) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(f"🏢 {s['name']}", callback_data=f"studio_pick_{s['id']}")]
+        for s in studios
+    ]
+    return InlineKeyboardMarkup(rows)
 
 
 async def auth_gate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Group -1: ruxsatsiz foydalanuvchilarni to'xtatadi, studiya login oqimini boshqaradi."""
+    """Group -1: ruxsatsiz foydalanuvchilarni to'xtatadi, studiya menejerlarini
+    asosiy platforma bazasidan avtomatik aniqlaydi."""
     from telegram.ext import ApplicationHandlerStop
 
     chat = update.effective_chat
     if ARCHIVE_GROUP_ID and chat and chat.id == ARCHIVE_GROUP_ID:
         # Arxiv guruhi — bot faqat shu yerga fayl/topic tashlaydi.
-        # Guruhga kim nima yozsa/tashlasa ham (video, matn, h.k.) bot
-        # umuman e'tibor bermaydi — auth javobi ham, boshqa handler ham ishlamaydi.
         raise ApplicationHandlerStop
 
     user = update.effective_user
@@ -44,44 +41,76 @@ async def auth_gate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if is_admin(user.id) or is_allowed(user.id):
         return
 
-    # 2) Allaqachon tizimga kirgan (bog'langan) studiya menejeri — ruxsat
-    if is_studio_manager(user.id):
+    # 2) Allaqachon studiyaga bog'langan menejer — ruxsat
+    if get_bound_studio(user.id):
         return
 
-    # 3) Hali tizimga kirmagan — faqat shaxsiy chatda login urinishini qabul qilamiz
-    if chat and chat.type == "private" and update.message and update.message.text \
-            and not update.message.text.startswith("/"):
-        text = update.message.text.strip()
-        parts = text.rsplit(" ", 1)
-        if len(parts) == 2 and parts[1]:
-            name_part, pwd = parts
-            slug = verify_login(name_part, pwd, user.id)
-            if slug:
-                studio = get_studio_for_user(user.id)
-                await update.message.reply_text(
-                    f"✅ *Muvaffaqiyatli kirish!*\n\n"
-                    f"🏷 Studiya: *{studio['name']}*\n\n"
-                    f"Endi video yuboring — konvertatsiyadan so'ng "
-                    f"to'g'ridan-to'g'ri studiyangizga yuklashingiz mumkin.",
-                    parse_mode="Markdown",
-                )
-                raise ApplicationHandlerStop
+    # 3) studio_pick_ tugmasi bosilgan bo'lsa — callback_handler o'zi qayta ishlaydi
+    if update.callback_query and update.callback_query.data and update.callback_query.data.startswith("studio_pick_"):
+        return
 
-        await update.message.reply_text(
-            "⛔ Login yoki parol xato. Qaytadan urinib ko'ring:\n\n"
-            "`Studiya_nomi Parol`",
-            parse_mode="Markdown",
+    # 4) Hali bog'lanmagan — asosiy platforma bazasidan tekshiramiz
+    studios = get_manager_studios(user.id)
+
+    if not studios:
+        text = (
+            "⛔ *Sizga ruxsat berilmagan.*\n\n"
+            "Bu bot faqat Afsona TV platformasida studiya menejeri sifatida "
+            "tasdiqlangan shaxslar uchun. Agar siz menejer bo'lsangiz, "
+            "Bosh admin bilan bog'laning."
         )
+        try:
+            if update.callback_query:
+                await update.callback_query.answer("⛔ Ruxsat yo'q", show_alert=True)
+            elif update.message:
+                await update.message.reply_text(text, parse_mode="Markdown")
+        except Exception:
+            pass
         raise ApplicationHandlerStop
 
+    if len(studios) == 1:
+        # Bitta studiyaga menejer — hech narsa so'ramasdan avtomatik bog'laymiz
+        bind_user(user.id, studios[0])
+        if update.message:
+            await update.message.reply_text(
+                f"✅ *{studios[0]['name']}* studiyasi avtomatik aniqlandi va bog'landi.",
+                parse_mode="Markdown",
+            )
+        return
+
+    # Bir nechta studiyaga menejer — tanlashni so'raymiz
     try:
-        if update.callback_query:
-            await update.callback_query.answer("⛔ Avval tizimga kiring (/start)", show_alert=True)
-        elif update.message:
-            await update.message.reply_text(LOGIN_PROMPT, parse_mode="Markdown")
+        if update.message:
+            await update.message.reply_text(
+                "🏢 Siz bir nechta studiyaga menejersiz. Qaysi studiya nomidan ishlaysiz?",
+                reply_markup=_studio_pick_keyboard(studios),
+            )
+        elif update.callback_query:
+            await update.callback_query.answer("⛔ Avval studiyani tanlang (/start)", show_alert=True)
     except Exception:
         pass
     raise ApplicationHandlerStop
+
+
+async def handle_studio_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Bir nechta studiyaga menejer bo'lgan foydalanuvchi tugma orqali tanlaganda."""
+    query = update.callback_query
+    await query.answer()
+    studio_id = int(query.data.split("_")[-1])
+
+    studios = get_manager_studios(query.from_user.id)
+    studio = next((s for s in studios if s["id"] == studio_id), None)
+    if not studio:
+        await query.edit_message_text("⛔ Bu studiyaga sizning ruxsatingiz topilmadi.")
+        return
+
+    bind_user(query.from_user.id, studio)
+    await query.edit_message_text(
+        f"✅ *{studio['name']}* studiyasi bilan bog'landingiz.\n\n"
+        f"Endi video yuboring — konvertatsiyadan so'ng to'g'ridan-to'g'ri "
+        f"studiyangizga yuklashingiz mumkin.",
+        parse_mode="Markdown",
+    )
 
 
 async def allow_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -148,86 +177,77 @@ async def users_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
-# ── Studiya menejerlari boshqaruvi (faqat Bosh Admin) ─────────────────────────
+# ── Studiya menejerlari: admin buyruqlari ─────────────────────────────────
 
-async def studio_create_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/studiya_yarat <Studiya nomi> — yangi studiya + xavfsiz parol yaratadi."""
+async def studios_list_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/studiyalar — Afsona platformasidagi barcha studiyalarni va API token
+    holatini ko'rsatadi (studiyalarning o'zi shu yerda YARATILMAYDI —
+    ular AfsonaMovieBot platformasida allaqachon mavjud)."""
     user_id = update.effective_user.id
     if not is_admin(user_id):
         await update.message.reply_text("⛔ Faqat Bosh admin.")
         return
 
-    args = context.args
-    if not args:
+    import sqlite3
+    from config import SHARED_DB_PATH as DB_PATH
+
+    if not DB_PATH:
         await update.message.reply_text(
-            "❗ Foydalanish:\n`/studiya_yarat Studiya nomi`\n\n"
-            "Misol: `/studiya_yarat Eleven Studio`",
+            "⚠️ `SHARED_DB_PATH` sozlanmagan — asosiy platforma bazasi ulanmagan.",
             parse_mode="Markdown",
         )
         return
 
-    name = " ".join(args)
-    slug, password = create_studio(name)
-    await update.message.reply_text(
-        f"✅ *Studiya yaratildi!*\n\n"
-        f"🏷 Nomi: `{name}`\n"
-        f"🔑 Slug: `{slug}`\n\n"
-        f"👤 *Menejerga shu ma'lumotni yuboring:*\n"
-        f"Login: `{name}`\n"
-        f"Parol: `{password}`\n\n"
-        f"Ular botga `/start` bosib, keyin bitta xabarda\n"
-        f"`{name} {password}`\n"
-        f"deb yozishlari kerak — bir marta kiritilgach abadiy eslab qolinadi.\n\n"
-        f"⚠️ Bu parol *faqat shu safar* ko'rsatiladi, keyin qayta ko'rib bo'lmaydi — saqlab qo'ying.",
-        parse_mode="Markdown",
-    )
-
-
-async def studios_list_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/studiyalar — barcha studiyalar va ularning holatini ko'rsatadi."""
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
-        await update.message.reply_text("⛔ Faqat Bosh admin.")
+    try:
+        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=5)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, slug, name FROM studios WHERE is_active = 1 ORDER BY name"
+        ).fetchall()
+        conn.close()
+    except sqlite3.Error as e:
+        await update.message.reply_text(f"❌ Bazani o'qishda xato: {e}")
         return
 
-    studios = list_studios()
-    if not studios:
-        await update.message.reply_text("📭 Hali birorta studiya yaratilmagan.\n\n`/studiya_yarat Nomi` bilan yarating.", parse_mode="Markdown")
+    if not rows:
+        await update.message.reply_text("📭 Platformada hali birorta faol studiya yo'q.")
         return
 
-    lines = ["🏢 *Studiyalar:*\n"]
-    for s in studios:
-        status = f"✅ bog'langan (`{s['telegram_id']}`)" if s.get("telegram_id") else "⏳ hali kirmagan"
-        lines.append(f"  • *{s['name']}* (`{s['slug']}`) — {status}")
+    tokens = list_tokens()
+    lines = ["🏢 *Afsona platformasidagi studiyalar:*\n"]
+    for r in rows:
+        token_status = "🔑 token bor" if r["slug"] in tokens else "❌ token yo'q"
+        lines.append(f"  • *{r['name']}* (`{r['slug']}`) — {token_status}")
+    lines.append("\n`/studiya_token slug token` bilan yuklash tokenini bog'lang.")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def studio_unbind_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/studiya_chiqar <slug> — menejerni studiyadan chiqaradi (qayta login talab qilinadi)."""
+    """/studiya_chiqar <telegram_id> — foydalanuvchining studiya bog'lanishini
+    bekor qiladi (masalan noto'g'ri studiya tanlangan bo'lsa, qayta tanlashi uchun)."""
     user_id = update.effective_user.id
     if not is_admin(user_id):
         await update.message.reply_text("⛔ Faqat Bosh admin.")
         return
 
     args = context.args
-    if not args:
+    if not args or not args[0].isdigit():
         await update.message.reply_text(
-            "❗ Foydalanish:\n`/studiya_chiqar slug`\n\nSlug'larni `/studiyalar` orqali ko'ring.",
+            "❗ Foydalanish:\n`/studiya_chiqar 123456789`\n\n(Telegram ID kiriting)",
             parse_mode="Markdown",
         )
         return
 
-    slug = args[0]
-    if unbind_studio(slug):
-        await update.message.reply_text(f"✅ `{slug}` studiyasi bog'lanishdan chiqarildi — menejer qayta login qilishi kerak.", parse_mode="Markdown")
+    target = int(args[0])
+    if clear_binding(target):
+        await update.message.reply_text(f"✅ `{target}` bog'lanishi bekor qilindi — /start bosganda qayta tanlaydi.", parse_mode="Markdown")
     else:
-        await update.message.reply_text(f"❌ `{slug}` topilmadi.", parse_mode="Markdown")
+        await update.message.reply_text(f"ℹ️ `{target}` hech qanday studiyaga bog'lanmagan edi.", parse_mode="Markdown")
 
 
 async def studio_token_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/studiya_token <slug> <token> — Afsona mini-app'dagi Studiya paneli →
-    Termux/Kompyuter bo'limidan olingan CLI yuklash tokenini shu studiyaga bog'laydi.
-    Shu token orqali bot studiya nomidan videoni Afsona platformasiga yuklaydi."""
+    Termux/Kompyuter bo'limidan olingan CLI yuklash tokenini shu studiyaga bog'laydi."""
     user_id = update.effective_user.id
     if not is_admin(user_id):
         await update.message.reply_text("⛔ Faqat Bosh admin.")
@@ -237,15 +257,12 @@ async def studio_token_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if len(args) < 2:
         await update.message.reply_text(
             "❗ Foydalanish:\n`/studiya_token slug eyJhbGci...`\n\n"
-            "Tokenni mini-app → Studiya paneli → Termux/Kompyuter bo'limidan oling.",
+            "Slug'larni `/studiyalar` orqali ko'ring. Tokenni mini-app → "
+            "Studiya paneli → Termux/Kompyuter bo'limidan oling.",
             parse_mode="Markdown",
         )
         return
 
     slug, token = args[0], args[1]
-    # Xabarni darhol o'chirish tavsiya qilinadi (token maxfiy), lekin bot
-    # o'z xabarini o'chira olmaydi -- shu sababli faqat tasdiq beramiz.
-    if set_api_token(slug, token):
-        await update.message.reply_text(f"✅ `{slug}` uchun API token saqlandi.", parse_mode="Markdown")
-    else:
-        await update.message.reply_text(f"❌ `{slug}` topilmadi. Avval `/studiya_yarat` bilan yarating.", parse_mode="Markdown")
+    set_api_token(slug, token)
+    await update.message.reply_text(f"✅ `{slug}` uchun API token saqlandi.", parse_mode="Markdown")

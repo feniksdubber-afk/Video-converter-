@@ -1,58 +1,49 @@
 """
-Studiya menejerlari uchun login/parol tizimi.
+Studiya menejerlarini boshqarish (parolsiz, avtomatik aniqlash).
 
-Har bir studiya uchun bot xavfsiz parol generatsiya qiladi (admin buni
-menejerga qo'lda beradi). Menejer /start orqali "Studiya nomi Parol"
-formatida bir marta kiritadi -> to'g'ri bo'lsa uning Telegram ID'si
-shu studiyaga abadiy bog'lanadi (qayta kiritish talab qilinmaydi).
+Studiya a'zoligi asosiy AfsonaMovieBot platformasida (studio_members jadvali)
+saqlanadi -- shu yerda faqat ikkita narsa saqlanadi:
 
-Ma'lumot DATA_DIR/studios.json faylida saqlanadi. Parol hech qachon ochiq
-holda saqlanmaydi -- faqat tuz (salt) + SHA-256 xesh saqlanadi.
+  1. BOG'LASH (binding) -- foydalanuvchi bir nechta studiyaga menejer bo'lsa,
+     u qaysi studiya nomidan ishlashni TANLAGANDA shu tanlov eslab qolinadi
+     (qayta-qayta so'ralmasligi uchun). DATA_DIR/studio_bindings.json.
+
+  2. API TOKEN -- har bir studiya uchun Afsona platformasiga yuklash uchun
+     kerakli CLI upload tokeni (admin mini-app'dan olib shu yerga saqlaydi).
+     DATA_DIR/studio_tokens.json.
 """
 
 import json
 import logging
 import os
-import re
-import secrets
-import hashlib
 
 from config import DATA_DIR
+from utils.shared_db import get_manager_studios
 
 logger = logging.getLogger(__name__)
 
-_STUDIOS_FILE = os.path.join(DATA_DIR, "studios.json")
+_BINDINGS_FILE = os.path.join(DATA_DIR, "studio_bindings.json")
+_TOKENS_FILE = os.path.join(DATA_DIR, "studio_tokens.json")
 
-_studios: dict[str, dict] = {}
+_bindings: dict[str, dict] = {}   # str(telegram_id) -> {id, slug, name}
+_tokens: dict[str, str] = {}      # slug -> api_token
 _loaded = False
 
 
-def _slugify(name: str) -> str:
-    s = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
-    return s or "studio"
-
-
-def _hash_password(password: str, salt: str) -> str:
-    return hashlib.sha256((salt + password).encode("utf-8")).hexdigest()
-
-
-def _save() -> None:
-    try:
-        with open(_STUDIOS_FILE, "w", encoding="utf-8") as f:
-            json.dump(_studios, f, ensure_ascii=False, indent=2)
-    except OSError as e:
-        logger.warning("studios.json saqlash xato: %s", e)
-
-
 def _load() -> None:
-    global _studios, _loaded
-    if os.path.isfile(_STUDIOS_FILE):
+    global _bindings, _tokens, _loaded
+    if os.path.isfile(_BINDINGS_FILE):
         try:
-            with open(_STUDIOS_FILE, encoding="utf-8") as f:
-                _studios = json.load(f)
-        except (OSError, json.JSONDecodeError, ValueError) as e:
-            logger.warning("studios.json o'qish xato: %s", e)
-            _studios = {}
+            with open(_BINDINGS_FILE, encoding="utf-8") as f:
+                _bindings = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            _bindings = {}
+    if os.path.isfile(_TOKENS_FILE):
+        try:
+            with open(_TOKENS_FILE, encoding="utf-8") as f:
+                _tokens = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            _tokens = {}
     _loaded = True
 
 
@@ -61,98 +52,71 @@ def _ensure_loaded() -> None:
         _load()
 
 
-def create_studio(name: str, api_token: str = "") -> tuple[str, str]:
-    """Yangi studiya yaratadi. (slug, ochiq_parol) qaytaradi -- parol faqat
-    shu chaqiruvda ko'rinadi, keyin qayta olib bo'lmaydi."""
-    _ensure_loaded()
-    base_slug = _slugify(name)
-    slug = base_slug
-    i = 2
-    while slug in _studios:
-        slug = f"{base_slug}-{i}"
-        i += 1
+def _save_bindings() -> None:
+    try:
+        with open(_BINDINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(_bindings, f, ensure_ascii=False, indent=2)
+    except OSError as e:
+        logger.warning("studio_bindings saqlash xato: %s", e)
 
-    password = secrets.token_urlsafe(9)  # ~12 xavfsiz belgi
-    salt = secrets.token_hex(8)
-    _studios[slug] = {
-        "name": name,
-        "salt": salt,
-        "password_hash": _hash_password(password, salt),
-        "telegram_id": None,
-        "api_token": api_token,
+
+def _save_tokens() -> None:
+    try:
+        with open(_TOKENS_FILE, "w", encoding="utf-8") as f:
+            json.dump(_tokens, f, ensure_ascii=False, indent=2)
+    except OSError as e:
+        logger.warning("studio_tokens saqlash xato: %s", e)
+
+
+# ── Bog'lash (binding) ────────────────────────────────────────────────────
+
+def bind_user(telegram_id: int, studio: dict) -> None:
+    """Foydalanuvchini shu studiyaga bog'laydi (eslab qoladi)."""
+    _ensure_loaded()
+    _bindings[str(telegram_id)] = {
+        "id": studio["id"], "slug": studio["slug"], "name": studio["name"],
     }
-    _save()
-    logger.info("Studiya yaratildi: %s (%s)", name, slug)
-    return slug, password
+    _save_bindings()
 
 
-def verify_login(name_or_slug: str, password: str, telegram_id: int) -> str | None:
-    """Login/parolni tekshiradi. To'g'ri bo'lsa telegram_id ni shu studiyaga
-    bog'lab, slug qaytaradi. Noto'g'ri bo'lsa None qaytaradi."""
+def get_bound_studio(telegram_id: int) -> dict | None:
+    """Avval bog'langan studiyani qaytaradi (agar hali asosiy platformada
+    ham manager sifatida qolgan bo'lsa). API tokeni ham qo'shib qaytariladi."""
     _ensure_loaded()
-    key = _slugify(name_or_slug)
-    studio = _studios.get(key)
-    slug = key
-
-    if not studio:
-        for s_slug, s in _studios.items():
-            if s.get("name", "").strip().lower() == name_or_slug.strip().lower():
-                studio, slug = s, s_slug
-                break
-
-    if not studio:
+    entry = _bindings.get(str(telegram_id))
+    if not entry:
         return None
-    if _hash_password(password, studio["salt"]) != studio["password_hash"]:
+    # Hali ham platformada shu studiyaga menejermi -- tekshirib qo'yamiz
+    # (studiyadan chetlashtirilgan bo'lsa avtomatik bekor bo'ladi).
+    current = get_manager_studios(telegram_id)
+    if not any(s["id"] == entry["id"] for s in current):
+        _bindings.pop(str(telegram_id), None)
+        _save_bindings()
         return None
-
-    studio["telegram_id"] = telegram_id
-    _save()
-    logger.info("Studiya menejeri kirdi: %s -> telegram_id=%s", slug, telegram_id)
-    return slug
+    return {**entry, "api_token": _tokens.get(entry["slug"], "")}
 
 
-def get_studio_for_user(telegram_id: int) -> dict | None:
+def clear_binding(telegram_id: int) -> bool:
     _ensure_loaded()
-    for slug, s in _studios.items():
-        if s.get("telegram_id") == telegram_id:
-            return {"slug": slug, **s}
-    return None
+    if str(telegram_id) in _bindings:
+        del _bindings[str(telegram_id)]
+        _save_bindings()
+        return True
+    return False
 
 
 def is_studio_manager(telegram_id: int) -> bool:
-    return get_studio_for_user(telegram_id) is not None
+    return get_bound_studio(telegram_id) is not None
 
 
-def unbind_studio(slug: str) -> bool:
-    """Studiyani hech qanday Telegram ID'ga bog'lanmagan holga qaytaradi
-    (masalan menejer telefonini almashtirganda, admin qayta login qildirish
-    uchun ishlatadi)."""
+# ── API token boshqaruvi (admin /studiya_token orqali) ────────────────────
+
+def set_api_token(slug: str, token: str) -> None:
     _ensure_loaded()
-    if slug in _studios:
-        _studios[slug]["telegram_id"] = None
-        _save()
-        return True
-    return False
+    _tokens[slug] = token
+    _save_tokens()
 
 
-def delete_studio(slug: str) -> bool:
+def list_tokens() -> dict[str, str]:
     _ensure_loaded()
-    if slug in _studios:
-        del _studios[slug]
-        _save()
-        return True
-    return False
-
-
-def set_api_token(slug: str, token: str) -> bool:
-    _ensure_loaded()
-    if slug in _studios:
-        _studios[slug]["api_token"] = token
-        _save()
-        return True
-    return False
-
-
-def list_studios() -> list[dict]:
-    _ensure_loaded()
-    return [{"slug": k, **v} for k, v in _studios.items()]
+    return dict(_tokens)
