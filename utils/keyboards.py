@@ -40,6 +40,9 @@ def studio_menu_keyboard() -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton("📤 Studiyaga yuklash", callback_data="studio_upload"),
         ],
+        [
+            InlineKeyboardButton("📋 Mening kontentim", callback_data="studio_browse"),
+        ],
     ])
 
 
