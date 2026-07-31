@@ -93,6 +93,10 @@ from utils.auth_handlers import (
     studios_list_handler, studio_unbind_handler, studio_token_handler, handle_studio_pick,
 )
 from handlers.studio_upload import show_studio_upload_entry, handle_kind_choice, handle_studio_text
+from handlers.studio_content import (
+    show_browse_entry, handle_bkind_choice, handle_list_page, handle_item_pick,
+    prompt_search, handle_clear_search, handle_manual_entry, handle_search_text,
+)
 from utils.auth import reload_auth
 from utils.task_manager import cancel_task, clear_task
 from utils.keyboards import main_menu_keyboard
@@ -214,6 +218,38 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if data.startswith("studio_pick_"):
         await handle_studio_pick(update, context)
+        return
+    if data == "studio_browse":
+        await show_browse_entry(update, context)
+        return
+    if data.startswith("studio_bkind_"):
+        # studio_bkind_{mode}_{kind}
+        _, _, mode, kind = data.split("_")
+        await handle_bkind_choice(update, context, mode, kind)
+        return
+    if data.startswith("studio_list_"):
+        # studio_list_{mode}_{kind}_{page}
+        _, _, mode, kind, page = data.split("_")
+        await handle_list_page(update, context, mode, kind, int(page))
+        return
+    if data.startswith("studio_item_"):
+        # studio_item_{mode}_{kind}_{id}
+        _, _, mode, kind, item_id = data.split("_", 4)
+        await handle_item_pick(update, context, mode, kind, item_id)
+        return
+    if data.startswith("studio_search_"):
+        # studio_search_{mode}_{kind}
+        _, _, mode, kind = data.split("_")
+        await prompt_search(update, context, mode, kind)
+        return
+    if data.startswith("studio_clr_"):
+        # studio_clr_{mode}_{kind}
+        _, _, mode, kind = data.split("_")
+        await handle_clear_search(update, context, mode, kind)
+        return
+    if data.startswith("studio_manual_"):
+        kind = data.rsplit("_", 1)[1]
+        await handle_manual_entry(update, context, kind)
         return
 
     # ── Umumiy ──────────────────────────────────────────────
@@ -465,6 +501,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Studiyaga yuklash oqimi (film/serial ID, fasl, qism)
         if state in ("studio_movie_id", "studio_series_id", "studio_season", "studio_episode"):
             if await handle_studio_text(update, context):
+                return
+
+        # Studiya kontenti bo'yicha qidiruv matni
+        if state == "studio_search_text":
+            if await handle_search_text(update, context):
                 return
 
         handler = dispatch.get(state)
