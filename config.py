@@ -57,5 +57,30 @@ R2_USER_PREFIX = os.environ.get("R2_USER_PREFIX", "users")
 # o'z studiyasiga (Afsona platformasiga) shu manzil orqali yuklaydi.
 STUDIO_API_BASE = os.environ.get("STUDIO_API_BASE", "https://app.afsonatv.uz/api")
 
+# ── AfsonaMovieBot (asosiy platforma) bilan umumiy SQLite baza ─────────────
+# Videokonverter bot shu fayldan (FAQAT O'QISH uchun) foydalanuvchining qaysi
+# studiya(lar)ga "manager" sifatida biriktirilganini avtomatik aniqlaydi —
+# alohida login/parol talab qilinmaydi. Hetzner'da bu odatda AfsonaMovieBot
+# konteyneridagi kinobot.db fayliga (read-only volume orqali) ishora qiladi.
+SHARED_DB_PATH = os.environ.get("SHARED_DB_PATH", "").strip()
+
+# AfsonaMovieBot (asosiy platforma) SQLite bazasining videobot konteyneri
+# ichidagi yo'li (read-only mount). Docker Compose'da shu faylni
+# AfsonaMovieBot'ning /data/kinobot.db fayliga (read_only: true bilan)
+# bog'lash kerak — shunda videobot mavjud studiyalar ro'yxatini jonli o'qiy oladi.
+AFSONA_DB_PATH = os.environ.get("AFSONA_DB_PATH", "/afsona-data/kinobot.db")
+
+# ── Asosiy AfsonaMovieBot platformasi bilan ulanish ────────────────────────
+# Studiyalar va ularning HAQIQIY menejerlari (studio_members jadvali) asosiy
+# platforma SQLite bazasida saqlanadi. Video-konvertor bot shu baza faylini
+# FAQAT O'QISH uchun ko'radi (studiyalar ro'yxati + kim menejer ekanini
+# tekshirish uchun) — hech qanday yozish amalga oshirilmaydi.
+PLATFORM_DB_PATH = os.environ.get("PLATFORM_DB_PATH", "/platform-data/kinobot.db")
+
+# Asosiy platforma bilan BIR XIL qiymat bo'lishi SHART (api-server'dagi
+# SESSION_SECRET bilan aynan mos kelishi kerak) — aks holda bot yaratgan
+# cli_upload tokenlarini platforma qabul qilmaydi.
+SESSION_SECRET = os.environ.get("SESSION_SECRET", "")
+
 os.makedirs(TEMP_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
