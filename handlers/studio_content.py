@@ -256,6 +256,7 @@ async def _show_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, kind:
         lines.append("💎 Premium kontent")
 
     rows = []
+    rows.append([InlineKeyboardButton("✏️ Tahrirlash", callback_data=f"studio_edit_{kind}_{item_id}")])
     video_path = context.user_data.get("video_path")
     if video_path:
         btn_label = "🔁 Video almashtirish" if item.get("hasVideo") else "📤 Video biriktirish"
@@ -267,7 +268,93 @@ async def _show_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, kind:
     await query.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(rows), parse_mode="Markdown")
 
 
-async def handle_item_pick(update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str, kind: str, item_id: str):
+_EDIT_FIELDS = {
+    "t": ("titleUz", "📝 Nomi"),
+    "y": ("year", "📅 Yil"),
+    "c": ("country", "🌍 Mamlakat"),
+    "d": ("description", "🧾 Tavsif"),
+    "g": ("genres", "🎭 Janr"),
+}
+
+
+def _edit_field_keyboard(kind: str, item_id: str) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(label, callback_data=f"studio_ef_{kind}_{item_id}_{code}")]
+        for code, (_, label) in _EDIT_FIELDS.items()
+    ]
+    rows.append([InlineKeyboardButton("⬅️ Bekor qilish", callback_data=f"studio_item_v_{kind}_{item_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def handle_edit_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, kind: str, item_id: str):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "✏️ Qaysi maydonni tahrirlaymiz?",
+        reply_markup=_edit_field_keyboard(kind, item_id),
+    )
+
+
+async def handle_edit_field_choice(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, kind: str, item_id: str, field_code: str
+):
+    query = update.callback_query
+    await query.answer()
+    api_field, label = _EDIT_FIELDS.get(field_code, (None, None))
+    if not api_field:
+        return
+    context.user_data["state"] = "studio_edit_text"
+    context.user_data["studio_edit_kind"] = kind
+    context.user_data["studio_edit_item_id"] = item_id
+    context.user_data["studio_edit_field"] = api_field
+    await query.edit_message_text(
+        f"{label} uchun yangi qiymatni yozing:",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Bekor qilish", callback_data=f"studio_item_v_{kind}_{item_id}")]]),
+    )
+
+
+async def handle_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """text_handler dispatch qatoridan chaqiriladi."""
+    if context.user_data.get("state") != "studio_edit_text":
+        return False
+
+    text = (update.message.text or "").strip()
+    kind = context.user_data.get("studio_edit_kind")
+    item_id = context.user_data.get("studio_edit_item_id")
+    api_field = context.user_data.get("studio_edit_field")
+    context.user_data["state"] = None
+
+    if not (kind and item_id and api_field) or not text:
+        await update.message.reply_text("❗ Nimadir xato ketdi, qaytadan urinib ko'ring.")
+        return True
+
+    studio = get_bound_studio(update.effective_user.id)
+    if not studio:
+        await update.message.reply_text("⛔ Studiya sifatida aniqlanmadingiz.")
+        return True
+
+    body = {api_field: int(text) if api_field == "year" else text}
+    if kind == "m":
+        url = f"{STUDIO_API_BASE}/studios/{studio['slug']}/content/movies/{item_id}"
+    else:
+        url = f"{STUDIO_API_BASE}/studios/{studio['slug']}/content/series/{item_id}/metadata"
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.patch(url, headers=_auth_headers(studio), json=body)
+    except httpx.HTTPError as e:
+        logger.warning("Tahrirlashda tarmoq xatosi: %s", e)
+        await update.message.reply_text("❌ Tarmoq xatosi. Qaytadan urinib ko'ring.")
+        return True
+
+    if resp.status_code >= 300:
+        logger.warning("Tahrirlash xato: %s %s", resp.status_code, resp.text[:200])
+        await update.message.reply_text(f"❌ Saqlashda xatolik: {resp.text[:200]}")
+        return True
+
+    context.user_data.get("studio_items_cache", {}).pop(str(item_id), None)
+    await update.message.reply_text("✅ Yangilandi.")
+    return True
     query = update.callback_query
     await query.answer()
 
