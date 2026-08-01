@@ -96,6 +96,7 @@ from handlers.studio_upload import show_studio_upload_entry, handle_kind_choice,
 from handlers.studio_content import (
     show_browse_entry, handle_bkind_choice, handle_list_page, handle_item_pick,
     prompt_search, handle_clear_search, handle_manual_entry, handle_search_text,
+    handle_edit_entry, handle_edit_field_choice, handle_edit_text,
 )
 from utils.auth import reload_auth
 from utils.task_manager import cancel_task, clear_task
@@ -258,6 +259,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("studio_manual_"):
         kind = data.rsplit("_", 1)[1]
         await handle_manual_entry(update, context, kind)
+        return
+    if data.startswith("studio_edit_"):
+        # studio_edit_{kind}_{id}
+        _, _, kind, item_id = data.split("_", 3)
+        await handle_edit_entry(update, context, kind, item_id)
+        return
+    if data.startswith("studio_ef_"):
+        # studio_ef_{kind}_{id}_{field_code}
+        _, _, kind, item_id, field_code = data.split("_", 4)
+        await handle_edit_field_choice(update, context, kind, item_id, field_code)
         return
 
     # ── Umumiy ──────────────────────────────────────────────
@@ -514,6 +525,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Studiya kontenti bo'yicha qidiruv matni
         if state == "studio_search_text":
             if await handle_search_text(update, context):
+                return
+
+        # Studiya kontenti maydonini tahrirlash matni
+        if state == "studio_edit_text":
+            if await handle_edit_text(update, context):
                 return
 
         handler = dispatch.get(state)
