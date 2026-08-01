@@ -318,7 +318,11 @@ async def _fetch_episodes(studio: dict, series_id: str) -> list[dict] | None:
         if eps is None and isinstance(data.get("seasons"), list):
             eps = []
             for season_obj in data["seasons"]:
-                season_num = season_obj.get("season") or season_obj.get("number")
+                season_num = (
+                    season_obj.get("season")
+                    or season_obj.get("seasonNumber")
+                    or season_obj.get("number")
+                )
                 for e in season_obj.get("episodes", []):
                     e = dict(e)
                     e.setdefault("season", season_num)
