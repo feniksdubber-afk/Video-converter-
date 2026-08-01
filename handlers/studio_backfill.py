@@ -35,6 +35,14 @@ _THROTTLE_SECONDS = 2.0
 _running: set[str] = set()  # slug'lar -- bir vaqtda ikkita backfill yurmasligi uchun
 _cancelled: set[str] = set()  # bekor qilish so'ralgan slug'lar
 
+# MUHIM: /tmp odatda tmpfs (RAM ustida, ~1.9GB) bo'ladi -- katta video fayllar
+# yozilganda server RAM'ini yeb qo'yishi yoki joy yetmasligi mumkin.
+# Shuning uchun haqiqiy diskdagi papkadan foydalanamiz.
+_DOWNLOAD_DIR = os.environ.get("BACKFILL_TMP_DIR", "/opt/videobot/tmp")
+os.makedirs(_DOWNLOAD_DIR, exist_ok=True)
+
+_DOWNLOAD_TIMEOUT = httpx.Timeout(connect=30.0, read=120.0, write=120.0, pool=30.0)
+
 
 async def cancel_backfill_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
@@ -123,69 +131,81 @@ async def _edit_progress(context, chat_id, message_id, text):
 
 
 async def _download_to_temp(url: str) -> str | None:
+    fd, path = tempfile.mkstemp(suffix=".mp4", dir=_DOWNLOAD_DIR)
+    os.close(fd)
+    ok = False
     try:
-        fd, path = tempfile.mkstemp(suffix=".mp4")
-        os.close(fd)
-        async with httpx.AsyncClient(timeout=None) as client:
+        async with httpx.AsyncClient(timeout=_DOWNLOAD_TIMEOUT) as client:
             async with client.stream("GET", url) as resp:
                 if resp.status_code >= 300:
-                    os.remove(path)
                     return None
                 with open(path, "wb") as f:
                     async for chunk in resp.aiter_bytes(1024 * 1024):
                         f.write(chunk)
+        ok = True
         return path
     except Exception as e:
         logger.warning("Video yuklab olishda xato: %s", e)
         return None
+    finally:
+        # Muvaffaqiyatsiz/qisman yozilgan faylni diskda qoldirmaymiz.
+        # Muvaffaqiyatli holatda fayl chaqiruvchi tomonidan ishlatilgach o'chiriladi.
+        if not ok:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
 
 def _video_url(item: dict) -> str | None:
     return item.get("r2Url") or item.get("videoUrl") or item.get("url") or None
 
 
-def _hls_url(item: dict) -> str | None:
-    return item.get("hlsUrl") or item.get("hls_url") or item.get("m3u8Url") or item.get("masterPlaylistUrl") or None
+async def _send_one_video(context, message, chat_id, topic_id, url, filename, header, link) -> bool:
+    """True qaytaradi -- faqat video haqiqatan topicga joylanganda.
+    Chaqiruvchi shu qiymatga qarab mark_episode_posted chaqirishi kerak,
+    aks holda yuborilmagan video "yuborilgan" deb belgilanib, keyingi
+    /kontent_toldirish safar qayta urinilmay qoladi.
 
-
-def _links_block(item: dict) -> str:
-    lines = []
-    r2 = _video_url(item)
-    hls = _hls_url(item)
-    if r2:
-        lines.append(f"🔗 R2: {r2}")
-    if hls:
-        lines.append(f"📡 HLS: {hls}")
-    return ("\n\n" + "\n".join(lines)) if lines else ""
-
-
-async def _send_one_video(context, message, chat_id, topic_id, url, filename, caption):
+    header: masalan "🎬 Doktor Stoun (2019)" yoki
+            "📺 Doktor Stoun (2019) — 1-fasl, 7-qism"
+    link:   video URL (bo'lishi shart emas)
+    """
     tmp_path = await _download_to_temp(url)
     if not tmp_path:
-        await post_text_to_topic_raw(context, chat_id, topic_id, caption + "\n\n⚠️ Videoni yuklab olishda xatolik bo'ldi.")
-        return
+        await post_text_to_topic_raw(context, chat_id, topic_id, header + "\n\n⚠️ Videoni yuklab olishda xatolik bo'ldi.")
+        return False
+    sent = False
     try:
         _w, _h = get_video_resolution(tmp_path)
         _q = quality_label(_h)
+        caption = header
         if _q:
-            caption = caption + f"\n🖼 Sifat: {_q}"
+            caption += f"\n▸ {_q}"
+        if link:
+            caption += f"\n\n🔗 Video: {link}"
         for attempt in range(3):
             try:
                 await send_file(
                     message, tmp_path, filename, caption=caption, context=context,
                     target_chat_id=chat_id, message_thread_id=topic_id,
+                    force_upload_mode="video",
                 )
+                sent = True
                 break
             except RetryAfter as e:
                 await asyncio.sleep(e.retry_after + 1)
             except TelegramError as e:
                 logger.warning("send_file xato: %s", e)
                 break
+        if not sent:
+            await post_text_to_topic_raw(context, chat_id, topic_id, caption + "\n\n⚠️ Videoni joylashda xatolik bo'ldi.")
     finally:
         try:
             os.remove(tmp_path)
         except OSError:
             pass
+    return sent
 
 
 async def post_text_to_topic_raw(context, chat_id, topic_id, text):
@@ -248,11 +268,14 @@ async def _run_backfill(context: ContextTypes.DEFAULT_TYPE, studio: dict, progre
                 if not is_episode_posted(slug, f"m_{mid}", "main") and (item.get("hasVideo") or _video_url(item)):
                     url = _video_url(item)
                     if url:
-                        await _send_one_video(
+                        sent = await _send_one_video(
                             context, quiet_msg, chat_id, topic_id, url,
-                            f"{title}.mp4", f"🎬 *{title}{year}*{_links_block(item)}",
+                            f"{title}.mp4", f"🎬 {title}{year}", url,
                         )
-                        mark_episode_posted(slug, f"m_{mid}", "main")
+                        if sent:
+                            mark_episode_posted(slug, f"m_{mid}", "main")
+                        else:
+                            errors += 1
                         await asyncio.sleep(_THROTTLE_SECONDS)
                 elif not item.get("hasVideo") and not _video_url(item):
                     await post_text_to_topic_raw(context, chat_id, topic_id, f"🎬 *{title}{year}*\n⚠️ Video hali yuklanmagan.")
@@ -295,13 +318,16 @@ async def _run_backfill(context: ContextTypes.DEFAULT_TYPE, studio: dict, progre
                     url = _video_url(ep)
                     if not url:
                         continue
-                    caption = f"📺 *{title}{year}*\n{ep.get('season')}-fasl {ep.get('episode')}-qism{_links_block(ep)}"
-                    await _send_one_video(
+                    header = f"📺 {title}{year} — {ep.get('season')}-fasl, {ep.get('episode')}-qism"
+                    sent = await _send_one_video(
                         context, quiet_msg, chat_id, topic_id, url,
-                        f"{title}_S{ep.get('season')}E{ep.get('episode')}.mp4", caption,
+                        f"{title}_S{ep.get('season')}E{ep.get('episode')}.mp4", header, url,
                     )
-                    mark_episode_posted(slug, f"s_{sid}", ep_key)
-                    done_eps += 1
+                    if sent:
+                        mark_episode_posted(slug, f"s_{sid}", ep_key)
+                        done_eps += 1
+                    else:
+                        errors += 1
                     await asyncio.sleep(_THROTTLE_SECONDS)
 
                 done_series += 1
