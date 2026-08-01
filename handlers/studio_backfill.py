@@ -217,7 +217,11 @@ async def _download_to_temp(url: str) -> str | None:
 
 
 def _video_url(item: dict) -> str | None:
-    return item.get("r2Url") or item.get("videoUrl") or item.get("url") or None
+    return (
+        item.get("r2Url") or item.get("videoUrl") or item.get("url")
+        or item.get("r2_url") or item.get("video_url")
+        or None
+    )
 
 
 async def _fetch_movie_detail(studio: dict, movie_id: str) -> dict | None:
