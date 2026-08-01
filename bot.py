@@ -92,7 +92,7 @@ from utils.auth_handlers import (
     auth_gate, allow_handler, deny_handler, users_handler,
     studios_list_handler, studio_unbind_handler, studio_token_handler, handle_studio_pick,
 )
-from handlers.studio_upload import show_studio_upload_entry, handle_kind_choice, handle_studio_text
+from handlers.studio_upload import show_studio_upload_entry, handle_kind_choice, handle_studio_text, handle_tg_video_attach
 from handlers.studio_content import (
     show_browse_entry, handle_bkind_choice, handle_list_page, handle_item_pick,
     prompt_search, handle_clear_search, handle_manual_entry, handle_search_text,
@@ -269,6 +269,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # studio_ef_{kind}_{id}_{field_code}
         _, _, kind, item_id, field_code = data.split("_", 4)
         await handle_edit_field_choice(update, context, kind, item_id, field_code)
+        return
+    if data.startswith("studio_tgv_"):
+        await handle_tg_video_attach(update, context, data)
         return
 
     # ── Umumiy ──────────────────────────────────────────────
