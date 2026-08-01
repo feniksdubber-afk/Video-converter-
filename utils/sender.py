@@ -408,6 +408,7 @@ async def send_file(
 
     # ─── <= 50 MB → PTB ──────────────────────────────────────────────────
     if file_size <= TELEGRAM_LIMIT:
+        sent_msg = None
         try:
             send_kw = {}
             if message_thread_id:
@@ -417,7 +418,7 @@ async def send_file(
                     thumb_file = open(thumb_path, "rb") if thumb_path else None
                     try:
                         if dest_chat == message.chat_id:
-                            await message.reply_video(
+                            sent_msg = await message.reply_video(
                                 video=f, filename=filename, caption=caption,
                                 duration=meta.get("duration") or None,
                                 width=meta.get("width") or None,
@@ -427,7 +428,7 @@ async def send_file(
                                 **send_kw,
                             )
                         else:
-                            await message.get_bot().send_video(
+                            sent_msg = await message.get_bot().send_video(
                                 chat_id=dest_chat, video=f, filename=filename, caption=caption,
                                 duration=meta.get("duration") or None,
                                 width=meta.get("width") or None,
@@ -441,22 +442,22 @@ async def send_file(
                             thumb_file.close()
                 elif upload_mode == "audio" and is_audio:
                     if dest_chat == message.chat_id:
-                        await message.reply_audio(audio=f, filename=filename, caption=caption, **send_kw)
+                        sent_msg = await message.reply_audio(audio=f, filename=filename, caption=caption, **send_kw)
                     else:
-                        await message.get_bot().send_audio(
+                        sent_msg = await message.get_bot().send_audio(
                             chat_id=dest_chat, audio=f, filename=filename, caption=caption, **send_kw,
                         )
                 else:
                     if dest_chat == message.chat_id:
-                        await message.reply_document(document=f, filename=filename, caption=caption, **send_kw)
+                        sent_msg = await message.reply_document(document=f, filename=filename, caption=caption, **send_kw)
                     else:
-                        await message.get_bot().send_document(
+                        sent_msg = await message.get_bot().send_document(
                             chat_id=dest_chat, document=f, filename=filename, caption=caption, **send_kw,
                         )
         finally:
             if custom_thumb_tmp and os.path.exists(custom_thumb_tmp):
                 os.remove(custom_thumb_tmp)
-        return
+        return sent_msg.message_id if sent_msg else None
 
     # ─── 50 MB – 4 GB → Pyrogram MTProto ─────────────────────────────────
     status_msg = await message.reply_text("📤 Yuborilmoqda... 0%")
@@ -523,6 +524,7 @@ async def send_file(
     # Hech qachon abadiy osilib qolmasin: hajmga qarab, lekin kamida 5 daqiqa.
     upload_timeout = max(300, int(total_mb * 4))
 
+    pyro_sent = None
     try:
         pyro_kw = {}
         if message_thread_id:
@@ -532,7 +534,7 @@ async def send_file(
             # MTProto darajasida reply_to_message_id orqali yo'naltiriladi.
             pyro_kw["reply_to_message_id"] = message_thread_id
         if upload_mode == "video" and is_video:
-            await asyncio.wait_for(
+            pyro_sent = await asyncio.wait_for(
                 client.send_video(
                     chat_id=dest_chat, video=file_path,
                     file_name=filename, caption=caption,
@@ -546,7 +548,7 @@ async def send_file(
                 timeout=upload_timeout,
             )
         elif upload_mode == "audio" and is_audio:
-            await asyncio.wait_for(
+            pyro_sent = await asyncio.wait_for(
                 client.send_audio(
                     chat_id=dest_chat, audio=file_path,
                     file_name=filename, caption=caption,
@@ -556,7 +558,7 @@ async def send_file(
                 timeout=upload_timeout,
             )
         else:
-            await asyncio.wait_for(
+            pyro_sent = await asyncio.wait_for(
                 client.send_document(
                     chat_id=dest_chat, document=file_path,
                     file_name=filename, caption=caption,
@@ -582,3 +584,5 @@ async def send_file(
         await status_msg.delete()
     except Exception:
         pass
+
+    return pyro_sent.id if pyro_sent else None

@@ -6,6 +6,7 @@ uchun bot avtomatik alohida topic ochadi va kontentni shu yerda saqlaydi.
 Saqlanadigan fayllar:
   studio_groups.json  -> slug -> {chat_id, title, bound_by, bound_at}
   studio_topics.json  -> slug -> {"m_{movieId}" | "s_{seriesId}": topic_id}
+  studio_posted.json  -> slug -> {content_key: {sub_key: message_id}}
 """
 
 import json
@@ -109,8 +110,20 @@ def set_topic_id(slug: str, content_key: str, topic_id: int) -> None:
     _save_topics()
 
 
+def clear_topic_id(slug: str, content_key: str) -> None:
+    """Topic Telegram'da o'chirilgan bo'lsa chaqiriladi -- keshni tozalab,
+    ensure_topic() keyingi safar yangisini yaratishiga imkon beradi."""
+    _ensure_loaded()
+    if slug in _topics and content_key in _topics[slug]:
+        del _topics[slug][content_key]
+        _save_topics()
+
+
 _POSTED_FILE = os.path.join(DATA_DIR, "studio_posted.json")
-_posted: dict[str, dict] = {}   # slug -> {content_key: [sub_key, ...]}
+# slug -> {content_key: {sub_key: message_id}}
+# Eski format slug -> {content_key: [sub_key, ...]} edi -- _load_posted() buni
+# avtomatik {sub_key: None} ga o'giradi (message_id noma'lum, tekshirib bo'lmaydi).
+_posted: dict[str, dict] = {}
 _posted_loaded = False
 
 
@@ -119,7 +132,17 @@ def _load_posted() -> None:
     if os.path.isfile(_POSTED_FILE):
         try:
             with open(_POSTED_FILE, encoding="utf-8") as f:
-                _posted = json.load(f)
+                raw = json.load(f)
+            migrated = {}
+            for slug, content_map in raw.items():
+                migrated[slug] = {}
+                for content_key, subs in content_map.items():
+                    if isinstance(subs, list):
+                        # eski format -- message_id noma'lum
+                        migrated[slug][content_key] = {sub_key: None for sub_key in subs}
+                    elif isinstance(subs, dict):
+                        migrated[slug][content_key] = subs
+            _posted = migrated
         except (OSError, json.JSONDecodeError):
             _posted = {}
     _posted_loaded = True
@@ -136,13 +159,30 @@ def _save_posted() -> None:
 def is_episode_posted(slug: str, content_key: str, sub_key: str) -> bool:
     if not _posted_loaded:
         _load_posted()
-    return sub_key in _posted.get(slug, {}).get(content_key, [])
+    return sub_key in _posted.get(slug, {}).get(content_key, {})
 
 
-def mark_episode_posted(slug: str, content_key: str, sub_key: str) -> None:
+def get_posted_message_id(slug: str, content_key: str, sub_key: str) -> int | None:
+    """sub_key oldin joylangan bo'lsa, uning Telegram message_id'sini qaytaradi
+    (mavjudligini/formatini tekshirish uchun). Eski yozuvlarda None bo'lishi mumkin."""
     if not _posted_loaded:
         _load_posted()
-    lst = _posted.setdefault(slug, {}).setdefault(content_key, [])
-    if sub_key not in lst:
-        lst.append(sub_key)
-        _save_posted()
+    return _posted.get(slug, {}).get(content_key, {}).get(sub_key)
+
+
+def mark_episode_posted(slug: str, content_key: str, sub_key: str, message_id: int | None = None) -> None:
+    if not _posted_loaded:
+        _load_posted()
+    d = _posted.setdefault(slug, {}).setdefault(content_key, {})
+    d[sub_key] = message_id
+    _save_posted()
+
+
+def unmark_episode_posted(slug: str, content_key: str, sub_key: str) -> None:
+    """Qismni 'yuborilmagan' holatiga qaytaradi -- masalan xabar Telegramda
+    o'chirilgan yoki noto'g'ri formatda (document) ekani aniqlanganda."""
+    if not _posted_loaded:
+        _load_posted()
+    d = _posted.get(slug, {}).get(content_key, {})
+    d.pop(sub_key, None)
+    _save_posted()
