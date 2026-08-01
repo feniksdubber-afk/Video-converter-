@@ -23,6 +23,15 @@ def _studio_pick_keyboard(studios: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def _studio_switch_keyboard(studios: list[dict]) -> InlineKeyboardMarkup:
+    """studio_pick_ bilan to'qnashmasligi uchun alohida callback prefix."""
+    rows = [
+        [InlineKeyboardButton(f"🏢 {s['name']}", callback_data=f"studio_switch_{s['id']}")]
+        for s in studios
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
 async def auth_gate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Group -1: ruxsatsiz foydalanuvchilarni to'xtatadi, studiya menejerlarini
     asosiy platforma bazasidan avtomatik aniqlaydi."""
@@ -109,6 +118,58 @@ async def handle_studio_pick(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"✅ *{studio['name']}* studiyasi bilan bog'landingiz.\n\n"
         f"Endi video yuboring — konvertatsiyadan so'ng to'g'ridan-to'g'ri "
         f"studiyangizga yuklashingiz mumkin.",
+        parse_mode="Markdown",
+    )
+
+
+async def studio_switch_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/studiya_almashtirish — menejerning o'zi bog'langan studiyani almashtirishi
+    uchun (adminni chaqirmasdan). Faqat 2+ studiyaga menejer bo'lganlarga foydali."""
+    user = update.effective_user
+    if not user:
+        return
+
+    studios = get_manager_studios(user.id)
+
+    if not studios:
+        await update.message.reply_text(
+            "⛔ Siz hech qanday studiyaga menejer sifatida topilmadingiz."
+        )
+        return
+
+    if len(studios) == 1:
+        await update.message.reply_text(
+            f"ℹ️ Sizda faqat bitta studiya bor — *{studios[0]['name']}*.\n"
+            f"Almashtirish shart emas.",
+            parse_mode="Markdown",
+        )
+        return
+
+    await update.message.reply_text(
+        "🔄 Qaysi studiya nomidan ishlashni xohlaysiz?",
+        reply_markup=_studio_switch_keyboard(studios),
+    )
+
+
+async def handle_studio_switch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """studio_switch_{id} tugmasi bosilganda — eski bog'lanishni tozalab,
+    yangisini o'rnatadi. handle_studio_pick bilan bir xil logikadan foydalanadi,
+    lekin alohida callback_data prefiksga ega (auth_gate() bilan to'qnashmasligi uchun)."""
+    query = update.callback_query
+    await query.answer()
+    studio_id = int(query.data.split("_")[-1])
+
+    studios = get_manager_studios(query.from_user.id)
+    studio = next((s for s in studios if s["id"] == studio_id), None)
+    if not studio:
+        await query.edit_message_text("⛔ Bu studiyaga sizning ruxsatingiz topilmadi.")
+        return
+
+    clear_binding(query.from_user.id)
+    bind_user(query.from_user.id, studio)
+    await query.edit_message_text(
+        f"✅ Endi *{studio['name']}* studiyasi nomidan ishlaysiz.\n\n"
+        f"Video yuboring — konvertatsiyadan so'ng shu studiyaga yuklashingiz mumkin.",
         parse_mode="Markdown",
     )
 
