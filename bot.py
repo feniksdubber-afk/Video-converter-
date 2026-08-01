@@ -805,8 +805,9 @@ def main():
     from handlers.studio_group import bind_group_command
     app.add_handler(CommandHandler("guruh_biriktirish", bind_group_command))
 
-    from handlers.studio_backfill import backfill_command
+    from handlers.studio_backfill import backfill_command, cancel_backfill_command
     app.add_handler(CommandHandler("kontent_toldirish", backfill_command))
+    app.add_handler(CommandHandler("toldirish_toxtat", cancel_backfill_command))
 
     # MUHIM: video/fayl/audio/rasm qabul qilish va "✅ Video qabul qilindi"
     # kabi konvertatsiya menyusi FAQAT shaxsiy chatda (bot bilan 1:1) ishlashi
