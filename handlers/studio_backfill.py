@@ -27,6 +27,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import RetryAfter, TelegramError
 from telegram.ext import ContextTypes
 
+from config import STUDIO_API_BASE
 from utils.studio_auth import get_bound_studio
 from utils.studio_group import (
     get_group, is_episode_posted, mark_episode_posted,
@@ -219,6 +220,25 @@ def _video_url(item: dict) -> str | None:
     return item.get("r2Url") or item.get("videoUrl") or item.get("url") or None
 
 
+async def _fetch_movie_detail(studio: dict, movie_id: str) -> dict | None:
+    """/movies ro'yxat endpointi r2Url/videoUrl qaytarmaydi (faqat hasVideo
+    bayrog'i beradi) -- shuning uchun bitta filmning to'liq ma'lumotini
+    (r2Url bilan) alohida so'rov bilan olamiz."""
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                f"{STUDIO_API_BASE}/studios/{studio['slug']}/content/movies/{movie_id}",
+                headers={"Authorization": f"Bearer {studio['api_token']}"},
+            )
+    except httpx.HTTPError as e:
+        logger.warning("Film detalini olishda tarmoq xatosi (id=%s): %s", movie_id, e)
+        return None
+    if resp.status_code >= 300:
+        logger.warning("Film detali xato (id=%s): %s %s", movie_id, resp.status_code, resp.text[:200])
+        return None
+    return resp.json()
+
+
 async def _check_posted_message(context, chat_id: int, message_id: int, probe_chat_id: int) -> str:
     """Oldin joylangan xabar hali guruh topicida mavjudligini va video
     (document emas) ekanligini tekshiradi -- guruhga hech narsa yozmasdan,
@@ -402,6 +422,11 @@ async def _run_backfill(context: ContextTypes.DEFAULT_TYPE, studio: dict, progre
                             pass
                     if resend:
                         url = _video_url(item)
+                        if not url:
+                            # Ro'yxat javobida URL yo'q -- filmning to'liq
+                            # detalini alohida so'rab, r2Url'ni shu yerdan olamiz.
+                            detail = await _fetch_movie_detail(studio, mid)
+                            url = _video_url(detail) if detail else None
                         if url:
                             header = f"🎬 {title}{year}"
                             msg_id, topic_id = await _send_with_topic_healing(
@@ -414,12 +439,11 @@ async def _run_backfill(context: ContextTypes.DEFAULT_TYPE, studio: dict, progre
                                 errors += 1
                             await asyncio.sleep(_THROTTLE_SECONDS)
                         else:
-                            # hasVideo=True, lekin r2Url/videoUrl/url maydonlarining
-                            # hech biri topilmadi -- API javobi kutilganidan boshqacha
-                            # shaklda bo'lishi mumkin. Jim o'tkazib yubormaymiz.
+                            # Detal so'rovidan keyin ham URL topilmadi -- API
+                            # javobi kutilganidan boshqacha shaklda bo'lishi mumkin.
                             logger.warning(
-                                "Film '%s' (id=%s) uchun hasVideo=True, lekin video URL topilmadi. Item keys: %s",
-                                title, mid, list(item.keys()),
+                                "Film '%s' (id=%s) uchun hasVideo=True, lekin video URL topilmadi (detail: %s). Item keys: %s",
+                                title, mid, list(detail.keys()) if detail else None, list(item.keys()),
                             )
                             errors += 1
                 elif not item.get("hasVideo") and not _video_url(item):
