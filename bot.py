@@ -149,7 +149,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_studio_manager(user_id) and not is_admin(user_id) and not is_allowed(user_id):
         _STUDIO_ALLOWED_PREFIXES = (
             "cat_video", "studio_", "pa_", "task_cancel", "queue_cancel_", "cancel", "back",
-            "convert", "resolution", "fmt_", "res_",
+            "convert", "resolution", "fmt_", "res_", "backfill_",
         )
         if not data.startswith(_STUDIO_ALLOWED_PREFIXES):
             await query.answer("⛔ Sizga faqat konvertatsiya va studiyaga yuklash ruxsat etilgan.", show_alert=True)
@@ -219,6 +219,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── Studiya menejeri: konvertatsiyalangan videoni platformaga yuklash ──
+    if data in ("backfill_go", "backfill_no"):
+        from handlers.studio_backfill import handle_backfill_choice
+        await handle_backfill_choice(update, context, go=(data == "backfill_go"))
+        return
+
     if data == "studio_upload":
         await show_studio_upload_entry(update, context)
         return
@@ -796,6 +801,12 @@ def main():
     app.add_handler(CommandHandler("studiya_chiqar", studio_unbind_handler))
     app.add_handler(CommandHandler("studiya_token", studio_token_handler))
     app.add_handler(CommandHandler("studiya_almashtirish", studio_switch_handler))
+
+    from handlers.studio_group import bind_group_command
+    app.add_handler(CommandHandler("guruh_biriktirish", bind_group_command))
+
+    from handlers.studio_backfill import backfill_command
+    app.add_handler(CommandHandler("kontent_toldirish", backfill_command))
 
     # MUHIM: video/fayl/audio/rasm qabul qilish va "✅ Video qabul qilindi"
     # kabi konvertatsiya menyusi FAQAT shaxsiy chatda (bot bilan 1:1) ishlashi
