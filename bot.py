@@ -91,7 +91,7 @@ from handlers.torrent_handler import torrent_handler, torrent_callback_handler
 from utils.auth_handlers import (
     auth_gate, allow_handler, deny_handler, users_handler,
     studios_list_handler, studio_unbind_handler, studio_token_handler, handle_studio_pick,
-    studio_switch_handler, handle_studio_switch,
+    studio_switch_handler, handle_studio_switch, handle_studio_switch_menu,
 )
 from handlers.studio_upload import show_studio_upload_entry, handle_kind_choice, handle_studio_text, handle_tg_video_attach
 from handlers.studio_content import (
@@ -103,7 +103,7 @@ from handlers.studio_content import (
 )
 from utils.auth import reload_auth
 from utils.task_manager import cancel_task, clear_task
-from utils.keyboards import main_menu_keyboard
+from utils.keyboards import main_menu_keyboard, studio_menu_keyboard
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -228,6 +228,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "studio_kind_series":
         await handle_kind_choice(update, context, "series")
         return
+    if data == "studio_switchmenu":
+        await handle_studio_switch_menu(update, context)
+        return
     if data.startswith("studio_pick_"):
         await handle_studio_pick(update, context)
         return
@@ -276,7 +279,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _, _, kind, item_id, field_code = data.split("_", 4)
         await handle_edit_field_choice(update, context, kind, item_id, field_code)
         return
-    if data.startswith("studio_tgv_"):
+    if data.startswith("studio_tgv_") or data.startswith("studio_tgva_"):
         await handle_tg_video_attach(update, context, data)
         return
     if data.startswith("studio_epss_"):
@@ -307,16 +310,32 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Umumiy ──────────────────────────────────────────────
     if data == "cancel":
+        from utils.studio_auth import get_bound_studio
         context.user_data["state"] = None
         await query.answer()
+        studio = get_bound_studio(query.from_user.id)
+        if studio:
+            await query.edit_message_text(
+                "❌ Bekor qilindi.\n\nYangi video yuboring yoki menyu:",
+                reply_markup=studio_menu_keyboard(),
+            )
+            return
         await query.edit_message_text(
             "❌ Bekor qilindi.\n\nYangi video yuboring yoki menyu:",
             reply_markup=main_menu_keyboard() if context.user_data.get("video_path") else None,
         )
         return
     if data == "back":
+        from utils.studio_auth import get_bound_studio
         context.user_data["state"] = None
         await query.answer()
+        studio = get_bound_studio(query.from_user.id)
+        if studio:
+            await query.edit_message_text(
+                "Kerakli amalni tanlang:",
+                reply_markup=studio_menu_keyboard(),
+            )
+            return
         has_video = bool(context.user_data.get("video_path"))
         if has_video:
             await query.edit_message_text(
@@ -552,7 +571,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # Studiyaga yuklash oqimi (film/serial ID, fasl, qism)
-        if state in ("studio_movie_id", "studio_series_id", "studio_season", "studio_episode"):
+        if state in ("studio_movie_id", "studio_series_id", "studio_episode"):
             if await handle_studio_text(update, context):
                 return
 
