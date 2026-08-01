@@ -80,12 +80,11 @@ async def backfill_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await status.edit_text(
         f"📊 Bazada topildi:\n🎬 {movies_total} ta film\n📺 {series_total} ta serial\n\n"
-        f"Bu jarayon *{group['title']}* guruhida har biriga alohida mavzu ochib, "
+        f"Bu jarayon \"{group['title']}\" guruhida har biriga alohida mavzu ochib, "
         "videolarni ketma-ket joylaydi. Kontent ko'p bo'lsa, uzoq davom etishi mumkin "
         "(flood-limitga tegmaslik uchun sekin ishlaydi) va istalgan vaqt "
         "/kontent_toldirish bilan qayta ishga tushirilsa, faqat qolganlarini davom ettiradi.\n\n"
         "Boshlaymizmi?",
-        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ Ha, boshlash", callback_data="backfill_go")],
             [InlineKeyboardButton("❌ Bekor qilish", callback_data="backfill_no")],
@@ -118,7 +117,7 @@ async def handle_backfill_choice(update: Update, context: ContextTypes.DEFAULT_T
 
 async def _edit_progress(context, chat_id, message_id, text):
     try:
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode="Markdown")
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
     except TelegramError:
         pass
 
@@ -193,7 +192,10 @@ async def post_text_to_topic_raw(context, chat_id, topic_id, text):
     try:
         await context.bot.send_message(chat_id=chat_id, message_thread_id=topic_id, text=text, parse_mode="Markdown")
     except TelegramError:
-        pass
+        try:
+            await context.bot.send_message(chat_id=chat_id, message_thread_id=topic_id, text=text)
+        except TelegramError:
+            pass
 
 
 class _Cancelled(Exception):

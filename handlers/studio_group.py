@@ -91,10 +91,9 @@ async def bind_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     bind_group(studio["slug"], chat.id, chat.title or "", user.id)
     await message.reply_text(
-        f"✅ *{chat.title}* guruhi *{studio['name']}* studiyasiga muvaffaqiyatli bog'landi!\n\n"
+        f"✅ \"{chat.title}\" guruhi \"{studio['name']}\" studiyasiga muvaffaqiyatli bog'landi!\n\n"
         "Bundan buyon botga yuklangan har bir film/serial uchun shu guruhda "
-        "avtomatik alohida mavzu (topic) ochiladi va kontent shu yerda saqlanadi.",
-        parse_mode="Markdown",
+        "avtomatik alohida mavzu (topic) ochiladi va kontent shu yerda saqlanadi."
     )
 
 
@@ -130,6 +129,28 @@ async def ensure_topic(
     return chat_id, topic_id
 
 
+async def _send_message_safe(context, chat_id, topic_id, text):
+    try:
+        await context.bot.send_message(chat_id=chat_id, message_thread_id=topic_id, text=text, parse_mode="Markdown")
+    except TelegramError:
+        await context.bot.send_message(chat_id=chat_id, message_thread_id=topic_id, text=text)
+
+
+async def _send_video_safe(context, chat_id, topic_id, caption, *, tg_file_id=None, file_obj=None):
+    kwargs = dict(chat_id=chat_id, message_thread_id=topic_id, caption=caption)
+    try:
+        if tg_file_id:
+            await context.bot.send_video(video=tg_file_id, parse_mode="Markdown", **kwargs)
+        else:
+            await context.bot.send_video(video=InputFile(file_obj), parse_mode="Markdown", **kwargs)
+    except TelegramError:
+        if tg_file_id:
+            await context.bot.send_video(video=tg_file_id, **kwargs)
+        else:
+            file_obj.seek(0)
+            await context.bot.send_video(video=InputFile(file_obj), **kwargs)
+
+
 async def post_text_to_topic(
     context: ContextTypes.DEFAULT_TYPE, studio: dict, kind: str, content_id, title: str, text: str,
 ) -> None:
@@ -138,9 +159,7 @@ async def post_text_to_topic(
         return
     chat_id, topic_id = dest
     try:
-        await context.bot.send_message(
-            chat_id=chat_id, message_thread_id=topic_id, text=text, parse_mode="Markdown",
-        )
+        await _send_message_safe(context, chat_id, topic_id, text)
     except TelegramError as e:
         logger.warning("Topic'ga xabar yuborishda xato: %s", e)
 
@@ -155,15 +174,9 @@ async def post_video_to_topic(
     chat_id, topic_id = dest
     try:
         if tg_file_id:
-            await context.bot.send_video(
-                chat_id=chat_id, message_thread_id=topic_id, video=tg_file_id,
-                caption=caption, parse_mode="Markdown",
-            )
+            await _send_video_safe(context, chat_id, topic_id, caption, tg_file_id=tg_file_id)
         elif video_path:
             with open(video_path, "rb") as f:
-                await context.bot.send_video(
-                    chat_id=chat_id, message_thread_id=topic_id,
-                    video=InputFile(f), caption=caption, parse_mode="Markdown",
-                )
+                await _send_video_safe(context, chat_id, topic_id, caption, file_obj=f)
     except TelegramError as e:
         logger.warning("Topic'ga video yuborishda xato: %s", e)

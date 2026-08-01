@@ -58,7 +58,7 @@ STUDIO_NEED_GROUP_TEXT = (
     "2️⃣ Guruh sozlamalaridan *Topics (Mavzular)* rejimini yoqing\n"
     "3️⃣ Botni guruhga qo'shing va *admin* qiling (\"Mavzularni boshqarish\" "
     "huquqi bilan)\n"
-    "4️⃣ Guruhda /guruh_biriktirish deb yozing\n\n"
+    "4️⃣ Guruhda `/guruh_biriktirish` deb yozing\n\n"
     "Guruh tayyor bo'lgach, botga qaytib /start bosing."
 )
 
