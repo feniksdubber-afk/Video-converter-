@@ -43,6 +43,9 @@ def studio_menu_keyboard() -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton("📋 Mening kontentim", callback_data="studio_browse"),
         ],
+        [
+            InlineKeyboardButton("🔄 Studiyani almashtirish", callback_data="studio_switchmenu"),
+        ],
     ])
 
 

@@ -122,33 +122,43 @@ async def handle_studio_pick(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
-async def studio_switch_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/studiya_almashtirish — menejerning o'zi bog'langan studiyani almashtirishi
-    uchun (adminni chaqirmasdan). Faqat 2+ studiyaga menejer bo'lganlarga foydali."""
-    user = update.effective_user
-    if not user:
-        return
-
-    studios = get_manager_studios(user.id)
+async def _studio_switch_core(user_id: int, reply) -> None:
+    """/studiya_almashtirish va '🔄 Studiyani almashtirish' tugmasi uchun
+    umumiy mantiq. `reply` — message.reply_text yoki query.edit_message_text."""
+    studios = get_manager_studios(user_id)
 
     if not studios:
-        await update.message.reply_text(
-            "⛔ Siz hech qanday studiyaga menejer sifatida topilmadingiz."
-        )
+        await reply("⛔ Siz hech qanday studiyaga menejer sifatida topilmadingiz.")
         return
 
     if len(studios) == 1:
-        await update.message.reply_text(
+        await reply(
             f"ℹ️ Sizda faqat bitta studiya bor — *{studios[0]['name']}*.\n"
             f"Almashtirish shart emas.",
             parse_mode="Markdown",
         )
         return
 
-    await update.message.reply_text(
+    await reply(
         "🔄 Qaysi studiya nomidan ishlashni xohlaysiz?",
         reply_markup=_studio_switch_keyboard(studios),
     )
+
+
+async def studio_switch_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/studiya_almashtirish — menejerning o'zi bog'langan studiyani almashtirishi
+    uchun (adminni chaqirmasdan). Faqat 2+ studiyaga menejer bo'lganlarga foydali."""
+    user = update.effective_user
+    if not user:
+        return
+    await _studio_switch_core(user.id, update.message.reply_text)
+
+
+async def handle_studio_switch_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Studiya menyusidagi '🔄 Studiyani almashtirish' tugmasi (callback versiyasi)."""
+    query = update.callback_query
+    await query.answer()
+    await _studio_switch_core(query.from_user.id, query.edit_message_text)
 
 
 async def handle_studio_switch(update: Update, context: ContextTypes.DEFAULT_TYPE):
