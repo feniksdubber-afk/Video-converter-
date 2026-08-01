@@ -361,6 +361,9 @@ async def handle_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     context.user_data.get("studio_items_cache", {}).pop(str(item_id), None)
     await update.message.reply_text("✅ Yangilandi.")
     return True
+
+
+async def handle_item_pick(update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str, kind: str, item_id: str):
     query = update.callback_query
     await query.answer()
 
