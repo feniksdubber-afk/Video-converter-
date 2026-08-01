@@ -94,6 +94,8 @@ from utils.auth_handlers import (
 )
 from handlers.studio_upload import show_studio_upload_entry, handle_kind_choice, handle_studio_text, handle_tg_video_attach
 from handlers.studio_content import (
+    show_episodes_entry, show_season_episodes, show_episode_detail,
+    handle_episode_upload, handle_new_episode_entry,
     show_browse_entry, handle_bkind_choice, handle_list_page, handle_item_pick,
     prompt_search, handle_clear_search, handle_manual_entry, handle_search_text,
     handle_edit_entry, handle_edit_field_choice, handle_edit_text,
@@ -272,6 +274,31 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if data.startswith("studio_tgv_"):
         await handle_tg_video_attach(update, context, data)
+        return
+    if data.startswith("studio_epss_"):
+        # studio_epss_{seriesId}_{season}
+        _, _, series_id, season = data.split("_")
+        await show_season_episodes(update, context, series_id, int(season))
+        return
+    if data.startswith("studio_epnew_"):
+        # studio_epnew_{seriesId}_{season}
+        _, _, series_id, season = data.split("_")
+        await handle_new_episode_entry(update, context, series_id, int(season))
+        return
+    if data.startswith("studio_epup_"):
+        # studio_epup_{seriesId}_{season}_{episode}
+        _, _, series_id, season, episode = data.split("_")
+        await handle_episode_upload(update, context, series_id, int(season), int(episode))
+        return
+    if data.startswith("studio_epi_"):
+        # studio_epi_{seriesId}_{season}_{episode}
+        _, _, series_id, season, episode = data.split("_")
+        await show_episode_detail(update, context, series_id, int(season), int(episode))
+        return
+    if data.startswith("studio_eps_"):
+        # studio_eps_{seriesId}
+        series_id = data.rsplit("_", 1)[1]
+        await show_episodes_entry(update, context, series_id)
         return
 
     # ── Umumiy ──────────────────────────────────────────────
