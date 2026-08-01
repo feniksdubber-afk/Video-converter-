@@ -229,12 +229,13 @@ async def handle_manual_entry(update: Update, context: ContextTypes.DEFAULT_TYPE
     """✏️ ID orqali kiritish -- eski qo'lda kiritish oqimiga qaytish."""
     query = update.callback_query
     await query.answer()
+    cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Bekor qilish", callback_data="cancel")]])
     if kind == "m":
         context.user_data["state"] = "studio_movie_id"
-        await query.edit_message_text("🎬 *Film ID'sini kiriting.*", parse_mode="Markdown")
+        await query.edit_message_text("🎬 *Film ID'sini kiriting.*", parse_mode="Markdown", reply_markup=cancel_kb)
     else:
         context.user_data["state"] = "studio_series_id"
-        await query.edit_message_text("📺 *Serial ID'sini kiriting.*", parse_mode="Markdown")
+        await query.edit_message_text("📺 *Serial ID'sini kiriting.*", parse_mode="Markdown", reply_markup=cancel_kb)
 
 
 async def _show_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, kind: str, item_id: str):
@@ -358,34 +359,28 @@ def _ep_mark(ep: dict) -> str:
     return mark
 
 
-async def show_episodes_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, series_id: str):
-    """📺 Qismlar tugmasi -- fasllar bo'yicha guruhlab ko'rsatadi."""
-    query = update.callback_query
-    await query.answer()
-
-    studio = get_bound_studio(update.effective_user.id)
+async def _render_seasons(reply, user_id: int, context: ContextTypes.DEFAULT_TYPE, series_id: str, back_cb: str):
+    studio = get_bound_studio(user_id)
     if not studio:
-        await query.edit_message_text("⛔ Studiya sifatida aniqlanmadingiz.")
+        await reply("⛔ Studiya sifatida aniqlanmadingiz.")
         return
 
     episodes = await _fetch_episodes(studio, series_id)
     if episodes is None:
-        await query.edit_message_text(
+        await reply(
             "❌ Qismlar ro'yxatini olishda xatolik yuz berdi. Birozdan so'ng qayta urinib ko'ring.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("⬅️ Orqaga", callback_data=f"studio_item_v_s_{series_id}"),
-            ]]),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Orqaga", callback_data=back_cb)]]),
         )
         return
 
     context.user_data.setdefault("studio_eps_cache", {})[str(series_id)] = episodes
 
     if not episodes:
-        await query.edit_message_text(
+        rows = [[InlineKeyboardButton("➕ 1-faslga qism qo'shish", callback_data=f"studio_epnew_{series_id}_1")]]
+        rows.append([InlineKeyboardButton("⬅️ Orqaga", callback_data=back_cb)])
+        await reply(
             "📺 Hali birorta qism qo'shilmagan.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("⬅️ Orqaga", callback_data=f"studio_item_v_s_{series_id}"),
-            ]]),
+            reply_markup=InlineKeyboardMarkup(rows),
         )
         return
 
@@ -398,12 +393,32 @@ async def show_episodes_entry(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"📁 {season}-fasl ({done}/{len(season_eps)})",
             callback_data=f"studio_epss_{series_id}_{season}",
         )])
-    rows.append([InlineKeyboardButton("⬅️ Orqaga", callback_data=f"studio_item_v_s_{series_id}")])
+    rows.append([InlineKeyboardButton("⬅️ Orqaga", callback_data=back_cb)])
 
-    await query.edit_message_text(
+    await reply(
         "📺 *Fasllar*\n✅ video bor · ⚠️ video kerak · 🤖 TG video bor\n\nFaslni tanlang:",
         reply_markup=InlineKeyboardMarkup(rows),
         parse_mode="Markdown",
+    )
+
+
+async def show_episodes_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, series_id: str):
+    """📺 Qismlar tugmasi -- fasllar bo'yicha guruhlab ko'rsatadi (ko'rish rejimi
+    va yuklash rejimi uchun umumiy — ikkalasida ham tugma orqali tanlanadi)."""
+    query = update.callback_query
+    await query.answer()
+    await _render_seasons(
+        query.edit_message_text, update.effective_user.id, context, series_id,
+        back_cb=f"studio_item_v_s_{series_id}",
+    )
+
+
+async def show_episodes_entry_msg(update: Update, context: ContextTypes.DEFAULT_TYPE, series_id: str):
+    """Qo'lda Serial ID kiritilgandan keyin (yuklash oqimi) — xuddi shu fasllar
+    ro'yxatini yangi xabar sifatida yuboradi (edit qilinadigan callback yo'q)."""
+    await _render_seasons(
+        update.message.reply_text, update.effective_user.id, context, series_id,
+        back_cb="cancel",
     )
 
 
@@ -503,7 +518,11 @@ async def handle_new_episode_entry(update: Update, context: ContextTypes.DEFAULT
     context.user_data["studio_series_id"] = series_id
     context.user_data["studio_season"] = season
     context.user_data["state"] = "studio_episode"
-    await query.edit_message_text(f"🔢 *{season}-fasl* uchun yangi qism raqamini kiriting (masalan: 1):", parse_mode="Markdown")
+    await query.edit_message_text(
+        f"🔢 *{season}-fasl* uchun yangi qism raqamini kiriting (masalan: 1):",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Bekor qilish", callback_data="cancel")]]),
+    )
 
 
 _EDIT_FIELDS = {
@@ -586,8 +605,8 @@ async def handle_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return True
 
     if resp.status_code >= 300:
-        logger.warning("Tahrirlash xato: %s %s", resp.status_code, resp.text[:200])
-        await update.message.reply_text(f"❌ Saqlashda xatolik: {resp.text[:200]}")
+        logger.warning("Tahrirlash xato: %s %s", resp.status_code, resp.text[:300])
+        await update.message.reply_text("❌ Saqlashda xatolik yuz berdi. Birozdan so'ng qayta urinib ko'ring yoki admin bilan bog'laning.")
         return True
 
     context.user_data.get("studio_items_cache", {}).pop(str(item_id), None)
@@ -614,6 +633,7 @@ async def handle_item_pick(update: Update, context: ContextTypes.DEFAULT_TYPE, m
         context.user_data["state"] = None
         await _do_movie_upload(update, context, item_id)
     else:
-        context.user_data["studio_series_id"] = item_id
-        context.user_data["state"] = "studio_season"
-        await query.edit_message_text("📁 Fasl raqamini kiriting (masalan: 1):")
+        # Fasl/qism endi matn bilan emas, mavjud tugma-asosli qismlar
+        # ro'yxati orqali tanlanadi (📋 Mening kontentim bilan bir xil oqim).
+        context.user_data["state"] = None
+        await show_episodes_entry(update, context, item_id)
