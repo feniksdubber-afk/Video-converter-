@@ -73,37 +73,62 @@ def _auth_headers(studio: dict) -> dict:
     return {"Authorization": f"Bearer {studio['api_token']}"}
 
 
-async def _presign_and_put(studio: dict, file_path: str, kind: str, filename: str) -> str | None:
-    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "mp4"
-    content_type = {
-        "mkv": "video/x-matroska", "mov": "video/quicktime",
-        "webm": "video/webm", "avi": "video/x-msvideo",
-    }.get(ext, "video/mp4")
+async def _presign_and_put(
+    studio: dict, file_path: str, kind: str, filename: str,
+    user_id: int = 0, status_msg=None,
+) -> str | None:
+    from utils.task_queue import new_ticket, acquire_slot, release_slot
 
-    async with httpx.AsyncClient(timeout=120) as client:
-        resp = await client.post(
-            f"{STUDIO_API_BASE}/studios/{studio['slug']}/uploads/presign",
-            headers=_auth_headers(studio),
-            json={"contentType": content_type, "filename": filename, "kind": kind},
-        )
-        data = resp.json()
-        upload_url = data.get("uploadUrl")
-        public_url = data.get("publicUrl")
-        if not upload_url:
-            logger.warning("Presign xato: %s", data)
-            return None
+    ticket_id = new_ticket()
+    if status_msg is not None:
+        got_slot = await acquire_slot(ticket_id, user_id, status_msg, label="📤 Studiyaga yuklash")
+        if not got_slot:
+            try:
+                await status_msg.edit_text("❌ Navbatdan chiqarildingiz.")
+            except Exception:
+                pass
+            return "cancelled"
 
-        with open(file_path, "rb") as f:
-            put_resp = await client.put(
-                upload_url,
-                headers={"Content-Type": content_type},
-                content=f.read(),
+    try:
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "mp4"
+        content_type = {
+            "mkv": "video/x-matroska", "mov": "video/quicktime",
+            "webm": "video/webm", "avi": "video/x-msvideo",
+        }.get(ext, "video/mp4")
+
+        if status_msg is not None:
+            try:
+                await status_msg.edit_text("⏳ Yuklanmoqda...")
+            except Exception:
+                pass
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(
+                f"{STUDIO_API_BASE}/studios/{studio['slug']}/uploads/presign",
+                headers=_auth_headers(studio),
+                json={"contentType": content_type, "filename": filename, "kind": kind},
             )
-        if put_resp.status_code >= 300:
-            logger.warning("R2 upload xato: %s %s", put_resp.status_code, put_resp.text[:300])
-            return None
+            data = resp.json()
+            upload_url = data.get("uploadUrl")
+            public_url = data.get("publicUrl")
+            if not upload_url:
+                logger.warning("Presign xato: %s", data)
+                return None
 
-    return public_url
+            with open(file_path, "rb") as f:
+                put_resp = await client.put(
+                    upload_url,
+                    headers={"Content-Type": content_type},
+                    content=f.read(),
+                )
+            if put_resp.status_code >= 300:
+                logger.warning("R2 upload xato: %s %s", put_resp.status_code, put_resp.text[:300])
+                return None
+
+        return public_url
+    finally:
+        if status_msg is not None:
+            release_slot()
 
 
 async def _do_movie_upload(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: str):
@@ -113,7 +138,12 @@ async def _do_movie_upload(update: Update, context: ContextTypes.DEFAULT_TYPE, m
     video_name = context.user_data.get("video_name", "video.mp4")
 
     status = await message.reply_text("⏳ Yuklanmoqda...")
-    public_url = await _presign_and_put(studio, video_path, "movies", video_name)
+    public_url = await _presign_and_put(
+        studio, video_path, "movies", video_name,
+        user_id=update.effective_user.id, status_msg=status,
+    )
+    if public_url == "cancelled":
+        return
     if not public_url:
         await status.edit_text("❌ Yuklashda xatolik yuz berdi. Qaytadan urinib ko'ring.")
         return
@@ -142,7 +172,12 @@ async def _do_episode_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
     episode = context.user_data["studio_episode"]
 
     status = await message.reply_text("⏳ Yuklanmoqda...")
-    public_url = await _presign_and_put(studio, video_path, "series", video_name)
+    public_url = await _presign_and_put(
+        studio, video_path, "series", video_name,
+        user_id=update.effective_user.id, status_msg=status,
+    )
+    if public_url == "cancelled":
+        return
     if not public_url:
         await status.edit_text("❌ Yuklashda xatolik yuz berdi. Qaytadan urinib ko'ring.")
         return
