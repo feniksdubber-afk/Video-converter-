@@ -19,7 +19,8 @@ from telegram.ext import ContextTypes
 from config import STUDIO_API_BASE
 from utils.studio_auth import get_bound_studio
 from utils.keyboards import studio_menu_keyboard
-from handlers.studio_group import post_video_to_topic
+from handlers.studio_group import post_video_to_topic, quality_label
+from utils.ffmpeg_utils import get_video_resolution
 
 logger = logging.getLogger(__name__)
 
@@ -163,9 +164,16 @@ async def _do_movie_upload(update: Update, context: ContextTypes.DEFAULT_TYPE, m
     await status.edit_text("✅ Tayyor — film videosi yuklandi va faollashtirildi.")
 
     title = context.user_data.get("studio_items_cache", {}).get(movie_id, {}).get("title") or f"Film #{movie_id}"
+    caption = f"🎬 *{title}*\n✅ Video yuklandi."
+    _w, _h = get_video_resolution(video_path)
+    _q = quality_label(_h)
+    if _q:
+        caption += f"\n🖼 Sifat: {_q}"
+    if public_url:
+        caption += f"\n\n🔗 R2: {public_url}"
     await post_video_to_topic(
         context, studio, kind="m", content_id=movie_id, title=title,
-        caption=f"🎬 *{title}*\n✅ Video yuklandi.",
+        caption=caption,
         video_path=video_path, tg_file_id=context.user_data.get("video_tg_file_id"),
     )
 
@@ -212,9 +220,16 @@ async def _do_episode_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await status.edit_text(f"✅ Tayyor — {season}-fasl {episode}-qism qo'shildi.")
 
     series_title = context.user_data.get("studio_items_cache", {}).get(series_id, {}).get("title") or f"Serial #{series_id}"
+    caption = f"📺 *{series_title}*\n{season}-fasl {episode}-qism yuklandi."
+    _w, _h = get_video_resolution(video_path)
+    _q = quality_label(_h)
+    if _q:
+        caption += f"\n🖼 Sifat: {_q}"
+    if public_url:
+        caption += f"\n\n🔗 R2: {public_url}"
     await post_video_to_topic(
         context, studio, kind="s", content_id=series_id, title=series_title,
-        caption=f"📺 *{series_title}*\n{season}-fasl {episode}-qism yuklandi.",
+        caption=caption,
         video_path=video_path, tg_file_id=context.user_data.get("video_tg_file_id"),
     )
 

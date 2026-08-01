@@ -16,6 +16,22 @@ from utils.studio_group import (
     bind_group, get_group, get_slug_by_chat_id, set_topic_id, get_topic_id,
 )
 
+
+def quality_label(height: int) -> str | None:
+    if not height:
+        return None
+    if height >= 2000:
+        return "4K"
+    if height >= 1000:
+        return "1080p"
+    if height >= 700:
+        return "720p"
+    if height >= 460:
+        return "480p"
+    if height >= 340:
+        return "360p"
+    return f"{height}p"
+
 logger = logging.getLogger(__name__)
 
 
