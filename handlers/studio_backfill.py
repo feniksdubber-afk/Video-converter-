@@ -413,6 +413,15 @@ async def _run_backfill(context: ContextTypes.DEFAULT_TYPE, studio: dict, progre
                             else:
                                 errors += 1
                             await asyncio.sleep(_THROTTLE_SECONDS)
+                        else:
+                            # hasVideo=True, lekin r2Url/videoUrl/url maydonlarining
+                            # hech biri topilmadi -- API javobi kutilganidan boshqacha
+                            # shaklda bo'lishi mumkin. Jim o'tkazib yubormaymiz.
+                            logger.warning(
+                                "Film '%s' (id=%s) uchun hasVideo=True, lekin video URL topilmadi. Item keys: %s",
+                                title, mid, list(item.keys()),
+                            )
+                            errors += 1
                 elif not item.get("hasVideo") and not _video_url(item):
                     await post_text_to_topic_raw(context, chat_id, topic_id, f"🎬 {title}{year}\n⚠️ Video hali yuklanmagan.")
                 done_movies += 1

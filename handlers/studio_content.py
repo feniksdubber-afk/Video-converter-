@@ -17,10 +17,12 @@ menejeri whitelist filtridan o'tishi uchun):
   studio_manual_{kind}           -> ID'ni qo'lda kiritish (faqat upload)
 """
 
+import asyncio
 import logging
 
 import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import RetryAfter, TelegramError
 from telegram.ext import ContextTypes
 
 from config import STUDIO_API_BASE
@@ -116,7 +118,21 @@ async def _render_list(
         await query.answer()
 
     studio = get_bound_studio(update.effective_user.id)
-    reply = query.edit_message_text if query else update.message.reply_text
+    raw_reply = query.edit_message_text if query else update.message.reply_text
+
+    async def reply(*args, **kwargs):
+        try:
+            await raw_reply(*args, **kwargs)
+        except RetryAfter as e:
+            logger.warning("Flood control (studio_content reply): %.0fs kutilmoqda", e.retry_after)
+            await asyncio.sleep(min(e.retry_after, 15) + 1)
+            try:
+                await raw_reply(*args, **kwargs)
+            except TelegramError as e2:
+                logger.warning("Qayta urinishda ham xato: %s", e2)
+        except TelegramError as e:
+            logger.warning("reply xatosi (studio_content): %s", e)
+
     if not studio:
         await reply("⛔ Studiya sifatida aniqlanmadingiz.")
         return
