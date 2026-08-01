@@ -52,6 +52,16 @@ async def run_ffmpeg_async(
     from utils.task_manager import (
         register_task, set_task_proc, is_cancelled, clear_task, progress_keyboard,
     )
+    from utils.task_queue import new_ticket, acquire_slot, release_slot
+
+    ticket_id = new_ticket()
+    got_slot = await acquire_slot(ticket_id, user_id, status_msg, label=label)
+    if not got_slot:
+        try:
+            await status_msg.edit_text("❌ Navbatdan chiqarildingiz.")
+        except Exception:
+            pass
+        return False, "Navbatda bekor qilindi"
 
     if user_id:
         register_task(user_id, label=label)
@@ -161,6 +171,7 @@ async def run_ffmpeg_async(
     finally:
         if user_id:
             clear_task(user_id)
+        release_slot()
 
 
 def _progress_bar(percent: int, length: int = 12) -> str:
