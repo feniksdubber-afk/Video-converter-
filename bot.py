@@ -91,6 +91,7 @@ from handlers.torrent_handler import torrent_handler, torrent_callback_handler
 from utils.auth_handlers import (
     auth_gate, allow_handler, deny_handler, users_handler,
     studios_list_handler, studio_unbind_handler, studio_token_handler, handle_studio_pick,
+    studio_switch_handler, handle_studio_switch,
 )
 from handlers.studio_upload import show_studio_upload_entry, handle_kind_choice, handle_studio_text, handle_tg_video_attach
 from handlers.studio_content import (
@@ -229,6 +230,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if data.startswith("studio_pick_"):
         await handle_studio_pick(update, context)
+        return
+    if data.startswith("studio_switch_"):
+        await handle_studio_switch(update, context)
         return
     if data == "studio_browse":
         await show_browse_entry(update, context)
@@ -772,6 +776,7 @@ def main():
     app.add_handler(CommandHandler("studiyalar", studios_list_handler))
     app.add_handler(CommandHandler("studiya_chiqar", studio_unbind_handler))
     app.add_handler(CommandHandler("studiya_token", studio_token_handler))
+    app.add_handler(CommandHandler("studiya_almashtirish", studio_switch_handler))
 
     # MUHIM: video/fayl/audio/rasm qabul qilish va "✅ Video qabul qilindi"
     # kabi konvertatsiya menyusi FAQAT shaxsiy chatda (bot bilan 1:1) ishlashi
