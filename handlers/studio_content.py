@@ -259,19 +259,211 @@ async def _show_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, kind:
 
     rows = []
     rows.append([InlineKeyboardButton("✏️ Tahrirlash", callback_data=f"studio_edit_{kind}_{item_id}")])
+    if kind == "s":
+        rows.append([InlineKeyboardButton("📺 Qismlar", callback_data=f"studio_eps_{item_id}")])
     video_path = context.user_data.get("video_path")
     tg_file_id = context.user_data.get("video_tg_file_id")
-    if video_path:
-        btn_label = "🔁 R2 Video almashtirish" if item.get("hasVideo") else "📤 R2 Video biriktirish"
-        rows.append([InlineKeyboardButton(btn_label, callback_data=f"studio_item_u_{kind}_{item_id}")])
-        if kind == "m" and tg_file_id:
-            tg_label = "🔁 TG Video almashtirish" if item.get("hasTgVideo") else "🎬 TG Video biriktirish"
-            rows.append([InlineKeyboardButton(tg_label, callback_data=f"studio_tgv_m_{item_id}")])
-    else:
-        lines.append("\nℹ️ Video biriktirish uchun avval botga video yuboring.")
+    if kind == "m":
+        if video_path:
+            btn_label = "🔁 R2 Video almashtirish" if item.get("hasVideo") else "📤 R2 Video biriktirish"
+            rows.append([InlineKeyboardButton(btn_label, callback_data=f"studio_item_u_{kind}_{item_id}")])
+            if tg_file_id:
+                tg_label = "🔁 TG Video almashtirish" if item.get("hasTgVideo") else "🎬 TG Video biriktirish"
+                rows.append([InlineKeyboardButton(tg_label, callback_data=f"studio_tgv_m_{item_id}")])
+        else:
+            lines.append("\nℹ️ Video biriktirish uchun avval botga video yuboring.")
     rows.append([InlineKeyboardButton("⬅️ Ro'yxatga qaytish", callback_data=f"studio_bkind_v_{kind}")])
 
     await query.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(rows), parse_mode="Markdown")
+
+
+# ── Serial qismlari (fasllar/qismlar) ro'yxati ──────────────────────────────
+
+async def _fetch_episodes(studio: dict, series_id: str) -> list[dict] | None:
+    """Serialning barcha qismlarini oladi. Kutilgan javob shakli:
+    {"episodes": [{"id", "season", "episode", "hasVideo", "hasTgVideo", ...}, ...]}
+    Backend hali shu shaklda javob bermasa, bu funksiya None qaytaradi va
+    foydalanuvchiga xatolik ko'rsatiladi -- API javobini moslashtirish kerak
+    bo'lishi mumkin."""
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                f"{STUDIO_API_BASE}/studios/{studio['slug']}/content/series/{series_id}/episodes",
+                headers=_auth_headers(studio),
+            )
+    except httpx.HTTPError as e:
+        logger.warning("Qismlar ro'yxatini olishda tarmoq xatosi: %s", e)
+        return None
+
+    if resp.status_code >= 300:
+        logger.warning("Qismlar ro'yxati xato: %s %s", resp.status_code, resp.text[:200])
+        return None
+    try:
+        data = resp.json()
+    except Exception:
+        return None
+    eps = data.get("episodes")
+    if eps is None and isinstance(data, list):
+        eps = data
+    return eps if isinstance(eps, list) else []
+
+
+def _ep_mark(ep: dict) -> str:
+    if ep.get("hasVideo"):
+        mark = "✅"
+    else:
+        mark = "⚠️"
+    if ep.get("hasTgVideo"):
+        mark += "🤖"
+    return mark
+
+
+async def show_episodes_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, series_id: str):
+    """📺 Qismlar tugmasi -- fasllar bo'yicha guruhlab ko'rsatadi."""
+    query = update.callback_query
+    await query.answer()
+
+    studio = get_bound_studio(update.effective_user.id)
+    if not studio:
+        await query.edit_message_text("⛔ Studiya sifatida aniqlanmadingiz.")
+        return
+
+    episodes = await _fetch_episodes(studio, series_id)
+    if episodes is None:
+        await query.edit_message_text(
+            "❌ Qismlar ro'yxatini olishda xatolik yuz berdi. Birozdan so'ng qayta urinib ko'ring.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Orqaga", callback_data=f"studio_item_v_s_{series_id}"),
+            ]]),
+        )
+        return
+
+    context.user_data.setdefault("studio_eps_cache", {})[str(series_id)] = episodes
+
+    if not episodes:
+        await query.edit_message_text(
+            "📺 Hali birorta qism qo'shilmagan.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Orqaga", callback_data=f"studio_item_v_s_{series_id}"),
+            ]]),
+        )
+        return
+
+    seasons = sorted({ep.get("season", 1) for ep in episodes})
+    rows = []
+    for season in seasons:
+        season_eps = [ep for ep in episodes if ep.get("season", 1) == season]
+        done = sum(1 for ep in season_eps if ep.get("hasVideo"))
+        rows.append([InlineKeyboardButton(
+            f"📁 {season}-fasl ({done}/{len(season_eps)})",
+            callback_data=f"studio_epss_{series_id}_{season}",
+        )])
+    rows.append([InlineKeyboardButton("⬅️ Orqaga", callback_data=f"studio_item_v_s_{series_id}")])
+
+    await query.edit_message_text(
+        "📺 *Fasllar*\n✅ video bor · ⚠️ video kerak · 🤖 TG video bor\n\nFaslni tanlang:",
+        reply_markup=InlineKeyboardMarkup(rows),
+        parse_mode="Markdown",
+    )
+
+
+async def show_season_episodes(update: Update, context: ContextTypes.DEFAULT_TYPE, series_id: str, season: int):
+    query = update.callback_query
+    await query.answer()
+
+    episodes = context.user_data.get("studio_eps_cache", {}).get(str(series_id))
+    if episodes is None:
+        studio = get_bound_studio(update.effective_user.id)
+        if not studio:
+            await query.edit_message_text("⛔ Studiya sifatida aniqlanmadingiz.")
+            return
+        episodes = await _fetch_episodes(studio, series_id)
+        if episodes is None:
+            await query.edit_message_text("❌ Ma'lumot eskirgan, qaytadan urinib ko'ring.")
+            return
+        context.user_data.setdefault("studio_eps_cache", {})[str(series_id)] = episodes
+
+    season_eps = sorted(
+        (ep for ep in episodes if ep.get("season", 1) == season),
+        key=lambda e: e.get("episode", 0),
+    )
+    rows = [
+        [InlineKeyboardButton(
+            f"{_ep_mark(ep)} {ep.get('episode')}-qism",
+            callback_data=f"studio_epi_{series_id}_{season}_{ep.get('episode')}",
+        )]
+        for ep in season_eps
+    ]
+    rows.append([InlineKeyboardButton("➕ Yangi qism qo'shish", callback_data=f"studio_epnew_{series_id}_{season}")])
+    rows.append([InlineKeyboardButton("⬅️ Fasllarga qaytish", callback_data=f"studio_eps_{series_id}")])
+
+    await query.edit_message_text(
+        f"📁 *{season}-fasl* — qismni tanlang:",
+        reply_markup=InlineKeyboardMarkup(rows),
+        parse_mode="Markdown",
+    )
+
+
+async def show_episode_detail(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, series_id: str, season: int, episode: int,
+):
+    query = update.callback_query
+    await query.answer()
+
+    episodes = context.user_data.get("studio_eps_cache", {}).get(str(series_id), [])
+    ep = next((e for e in episodes if e.get("season", 1) == season and e.get("episode") == episode), None)
+
+    lines = [f"📺 *{season}-fasl, {episode}-qism*"]
+    if ep:
+        lines.append(f"🎞 R2 Video: {'✅ mavjud' if ep.get('hasVideo') else '⚠️ hali yuklanmagan'}")
+        tg_ok = ep.get("hasTgVideo")
+        lines.append("🤖 TG Video: " + ("✅ mavjud" if tg_ok else "⚠️ yo'q"))
+
+    video_path = context.user_data.get("video_path")
+    tg_file_id = context.user_data.get("video_tg_file_id")
+    rows = []
+    if video_path:
+        btn_label = "🔁 R2 Video almashtirish" if (ep and ep.get("hasVideo")) else "📤 R2 Video biriktirish"
+        rows.append([InlineKeyboardButton(btn_label, callback_data=f"studio_epup_{series_id}_{season}_{episode}")])
+        if tg_file_id and ep and ep.get("id"):
+            tg_label = "🔁 TG Video almashtirish" if ep.get("hasTgVideo") else "🎬 TG Video biriktirish"
+            rows.append([InlineKeyboardButton(tg_label, callback_data=f"studio_tgv_s_{series_id}_{ep['id']}")])
+    else:
+        lines.append("\nℹ️ Video biriktirish uchun avval botga video yuboring.")
+    rows.append([InlineKeyboardButton("⬅️ Qismlarga qaytish", callback_data=f"studio_epss_{series_id}_{season}")])
+
+    await query.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(rows), parse_mode="Markdown")
+
+
+async def handle_episode_upload(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, series_id: str, season: int, episode: int,
+):
+    """Qismlar ro'yxatidan video biriktirish -- mavjud _do_episode_upload
+    oqimini qayta ishlatadi (season/episode qo'lda kiritilmasdan)."""
+    query = update.callback_query
+    await query.answer()
+
+    video_path = context.user_data.get("video_path")
+    if not video_path:
+        await query.edit_message_text("⚠️ Avval video yuboring (yoki konvertatsiya qiling)!")
+        return
+
+    from handlers.studio_upload import _do_episode_upload
+    context.user_data["studio_series_id"] = series_id
+    context.user_data["studio_season"] = season
+    context.user_data["studio_episode"] = episode
+    context.user_data.get("studio_eps_cache", {}).pop(str(series_id), None)
+    await _do_episode_upload(update, context)
+
+
+async def handle_new_episode_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, series_id: str, season: int):
+    """➕ Yangi qism qo'shish -- qism raqamini so'raydi, keyin yuklashni davom ettiradi."""
+    query = update.callback_query
+    await query.answer()
+    context.user_data["studio_series_id"] = series_id
+    context.user_data["studio_season"] = season
+    context.user_data["state"] = "studio_episode"
+    await query.edit_message_text(f"🔢 *{season}-fasl* uchun yangi qism raqamini kiriting (masalan: 1):", parse_mode="Markdown")
 
 
 _EDIT_FIELDS = {
