@@ -236,7 +236,9 @@ async def _fetch_movie_detail(studio: dict, movie_id: str) -> dict | None:
     if resp.status_code >= 300:
         logger.warning("Film detali xato (id=%s): %s %s", movie_id, resp.status_code, resp.text[:200])
         return None
-    return resp.json()
+    data = resp.json()
+    # Endpoint {"movie": {...}} shaklida qaytaradi -- ichidagi obyektni olamiz.
+    return data.get("movie") if isinstance(data, dict) and "movie" in data else data
 
 
 async def _check_posted_message(context, chat_id: int, message_id: int, probe_chat_id: int) -> str:
@@ -427,6 +429,12 @@ async def _run_backfill(context: ContextTypes.DEFAULT_TYPE, studio: dict, progre
                             # detalini alohida so'rab, r2Url'ni shu yerdan olamiz.
                             detail = await _fetch_movie_detail(studio, mid)
                             url = _video_url(detail) if detail else None
+                            if not url:
+                                logger.warning(
+                                    "Film '%s' (id=%s): hasVideo=True, lekin detail so'rovidan "
+                                    "keyin ham video URL topilmadi. Detail keys: %s",
+                                    title, mid, list(detail.keys()) if detail else None,
+                                )
                         if url:
                             header = f"🎬 {title}{year}"
                             msg_id, topic_id = await _send_with_topic_healing(
@@ -439,12 +447,6 @@ async def _run_backfill(context: ContextTypes.DEFAULT_TYPE, studio: dict, progre
                                 errors += 1
                             await asyncio.sleep(_THROTTLE_SECONDS)
                         else:
-                            # Detal so'rovidan keyin ham URL topilmadi -- API
-                            # javobi kutilganidan boshqacha shaklda bo'lishi mumkin.
-                            logger.warning(
-                                "Film '%s' (id=%s) uchun hasVideo=True, lekin video URL topilmadi (detail: %s). Item keys: %s",
-                                title, mid, list(detail.keys()) if detail else None, list(item.keys()),
-                            )
                             errors += 1
                 elif not item.get("hasVideo") and not _video_url(item):
                     await post_text_to_topic_raw(context, chat_id, topic_id, f"🎬 {title}{year}\n⚠️ Video hali yuklanmagan.")
