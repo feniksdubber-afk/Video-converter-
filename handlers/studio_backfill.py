@@ -4,9 +4,14 @@ topic'lariga "orqaga qarab" (backfill) joylash: /kontent_toldirish.
 
 Muhim tamoyillar:
   - Flood-limitga tegib qolmaslik uchun sekin-asta, orada pauza bilan ishlaydi.
-  - Davom ettiriladigan (resumable): allaqachon topic ochilgan/video
-    joylangan elementlar qayta ishlanmaydi -- studio_topics.json va
-    studio_posted.json orqali kuzatiladi.
+  - Davom ettiriladigan (resumable): studio_topics.json va studio_posted.json
+    orqali kuzatiladi.
+  - HAR SAFAR TEKSHIRADI (statik keshga ko'r-ko'rona ishonmaydi):
+      * Har bir kino/epizod uchun oldin joylangan xabar hali ham
+        guruhda mavjudligi va VIDEO (document emas) ekanligi tekshiriladi.
+        Yo'q bo'lsa yoki noto'g'ri formatda bo'lsa -- qayta yuboriladi.
+      * Topic (mavzu) Telegramda qo'lda o'chirilgan bo'lsa, keyingi safar
+        avtomatik qaytadan ochiladi va o'sha kontent qayta joylanadi.
   - Video studiyaning R2 bulutidan yuklab olinadi, so'ng mavjud
     `send_file` orqali (hajmiga qarab PTB/Pyrogram/R2) topicga TG video
     sifatida joylanadi.
@@ -23,8 +28,11 @@ from telegram.error import RetryAfter, TelegramError
 from telegram.ext import ContextTypes
 
 from utils.studio_auth import get_bound_studio
-from utils.studio_group import get_group, is_episode_posted, mark_episode_posted
-from handlers.studio_group import ensure_topic, post_text_to_topic, quality_label
+from utils.studio_group import (
+    get_group, is_episode_posted, mark_episode_posted,
+    get_posted_message_id, clear_topic_id,
+)
+from handlers.studio_group import ensure_topic, quality_label
 from handlers.studio_content import _fetch_list, _fetch_episodes
 from utils.sender import send_file
 from utils.ffmpeg_utils import get_video_resolution
@@ -42,6 +50,21 @@ _DOWNLOAD_DIR = os.environ.get("BACKFILL_TMP_DIR", "/opt/videobot/tmp")
 os.makedirs(_DOWNLOAD_DIR, exist_ok=True)
 
 _DOWNLOAD_TIMEOUT = httpx.Timeout(connect=30.0, read=120.0, write=120.0, pool=30.0)
+
+# Telegram xato matnida shu so'zlardan biri bo'lsa -- topic (forum thread)
+# o'chirilgan/yaroqsiz degani, oddiy yuborish xatosi emas.
+_THREAD_ERROR_HINTS = (
+    "thread not found",
+    "message thread not found",
+    "topic_deleted",
+    "topic deleted",
+    "TOPIC_ID_INVALID",
+)
+
+
+def _is_thread_error(e: TelegramError) -> bool:
+    msg = str(e).lower()
+    return any(hint.lower() in msg for hint in _THREAD_ERROR_HINTS)
 
 
 async def cancel_backfill_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -89,9 +112,11 @@ async def backfill_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await status.edit_text(
         f"📊 Bazada topildi:\n🎬 {movies_total} ta film\n📺 {series_total} ta serial\n\n"
         f"Bu jarayon \"{group['title']}\" guruhida har biriga alohida mavzu ochib, "
-        "videolarni ketma-ket joylaydi. Kontent ko'p bo'lsa, uzoq davom etishi mumkin "
-        "(flood-limitga tegmaslik uchun sekin ishlaydi) va istalgan vaqt "
-        "/kontent_toldirish bilan qayta ishga tushirilsa, faqat qolganlarini davom ettiradi.\n\n"
+        "videolarni ketma-ket joylaydi. Har bir kontent uchun avval joylangan "
+        "xabar hali mavjudligi va to'g'ri formatda ekani tekshiriladi -- yo'q "
+        "yoki noto'g'ri bo'lsa qayta yuboriladi. Kontent ko'p bo'lsa, uzoq davom "
+        "etishi mumkin (flood-limitga tegmaslik uchun sekin ishlaydi) va istalgan "
+        "vaqt /kontent_toldirish bilan qayta ishga tushirilsa, davom ettiradi.\n\n"
         "Boshlaymizmi?",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ Ha, boshlash", callback_data="backfill_go")],
@@ -161,21 +186,67 @@ def _video_url(item: dict) -> str | None:
     return item.get("r2Url") or item.get("videoUrl") or item.get("url") or None
 
 
-async def _send_one_video(context, message, chat_id, topic_id, url, filename, header, link) -> bool:
-    """True qaytaradi -- faqat video haqiqatan topicga joylanganda.
-    Chaqiruvchi shu qiymatga qarab mark_episode_posted chaqirishi kerak,
-    aks holda yuborilmagan video "yuborilgan" deb belgilanib, keyingi
-    /kontent_toldirish safar qayta urinilmay qoladi.
+async def _check_posted_message(context, chat_id: int, message_id: int, probe_chat_id: int) -> str:
+    """Oldin joylangan xabar hali guruh topicida mavjudligini va video
+    (document emas) ekanligini tekshiradi -- guruhga hech narsa yozmasdan,
+    xabarni admin'ning shaxsiy (progress) chatiga forward qilib, darhol o'chiradi.
 
-    header: masalan "🎬 Doktor Stoun (2019)" yoki
-            "📺 Doktor Stoun (2019) — 1-fasl, 7-qism"
-    link:   video URL (bo'lishi shart emas)
+    Qaytaradi:
+      "ok"           -- xabar mavjud va video sifatida joylangan
+      "wrong_format" -- xabar mavjud, lekin video emas (masalan document) -- qayta yuborish kerak
+      "missing"      -- xabar (yoki uni o'z ichiga olgan topic) o'chirilgan -- qayta yuborish kerak
+    """
+    try:
+        fwd = await context.bot.forward_message(
+            chat_id=probe_chat_id, from_chat_id=chat_id, message_id=message_id,
+            disable_notification=True,
+        )
+    except TelegramError:
+        return "missing"
+    try:
+        await context.bot.delete_message(chat_id=probe_chat_id, message_id=fwd.message_id)
+    except TelegramError:
+        pass
+    return "ok" if fwd.video else "wrong_format"
+
+
+async def _needs_resend(context, slug: str, content_key: str, sub_key: str, chat_id: int, probe_chat_id: int) -> tuple[bool, int | None]:
+    """Shu kontent qismini qayta yuborish kerakmi -- tekshiradi.
+    Qaytaradi: (kerakmi, eski_message_id_agar_bor_bolsa_va_ochirish_kerak_bolsa)"""
+    if not is_episode_posted(slug, content_key, sub_key):
+        return True, None
+
+    stored_id = get_posted_message_id(slug, content_key, sub_key)
+    if not stored_id:
+        # Eski yozuv (message_id bilmaymiz, funksiya qo'shilishidan oldin
+        # yuborilgan -- odatda document sifatida). Xavfsizroq: qayta yuboramiz.
+        return True, None
+
+    status = await _check_posted_message(context, chat_id, stored_id, probe_chat_id)
+    if status == "ok":
+        return False, None
+    # "missing" yoki "wrong_format" -- qayta yuborish kerak.
+    # "wrong_format" holida eski document xabarni tozalab qo'yamiz.
+    old_id = stored_id if status == "wrong_format" else None
+    return True, old_id
+
+
+async def _send_one_video(context, message, chat_id, topic_id, url, filename, header, link):
+    """Video yuklab, guruh topicga video sifatida joylaydi.
+
+    Qaytaradi:
+      int            -- muvaffaqiyatli joylandi, qiymat -- Telegram message_id
+      "THREAD_GONE"  -- topic o'chirilgan; chaqiruvchi topic'ni qayta yaratib,
+                         qaytadan chaqirishi kerak
+      None           -- boshqa sabab bilan muvaffaqiyatsiz
     """
     tmp_path = await _download_to_temp(url)
     if not tmp_path:
         await post_text_to_topic_raw(context, chat_id, topic_id, header + "\n\n⚠️ Videoni yuklab olishda xatolik bo'ldi.")
-        return False
-    sent = False
+        return None
+
+    message_id = None
+    thread_gone = False
     try:
         _w, _h = get_video_resolution(tmp_path)
         _q = quality_label(_h)
@@ -186,26 +257,47 @@ async def _send_one_video(context, message, chat_id, topic_id, url, filename, he
             caption += f"\n\n🔗 Video: {link}"
         for attempt in range(3):
             try:
-                await send_file(
+                message_id = await send_file(
                     message, tmp_path, filename, caption=caption, context=context,
                     target_chat_id=chat_id, message_thread_id=topic_id,
                     force_upload_mode="video",
                 )
-                sent = True
                 break
             except RetryAfter as e:
                 await asyncio.sleep(e.retry_after + 1)
             except TelegramError as e:
                 logger.warning("send_file xato: %s", e)
+                if _is_thread_error(e):
+                    thread_gone = True
                 break
-        if not sent:
+        if thread_gone:
+            return "THREAD_GONE"
+        if not message_id:
             await post_text_to_topic_raw(context, chat_id, topic_id, caption + "\n\n⚠️ Videoni joylashda xatolik bo'ldi.")
     finally:
         try:
             os.remove(tmp_path)
         except OSError:
             pass
-    return sent
+    return message_id
+
+
+async def _send_with_topic_healing(context, studio, kind, content_id, title, message, chat_id, topic_id, url, filename, header, link):
+    """_send_one_video'ni chaqiradi; agar topic o'chirilgan bo'lsa, uni qaytadan
+    yaratib, bir marta qayta urinadi. Qaytaradi: (message_id | None, yangi_topic_id)."""
+    result = await _send_one_video(context, message, chat_id, topic_id, url, filename, header, link)
+    if result != "THREAD_GONE":
+        return (result if isinstance(result, int) else None), topic_id
+
+    slug = studio["slug"]
+    content_key = f"{kind}_{content_id}"
+    clear_topic_id(slug, content_key)
+    dest = await ensure_topic(context, studio, kind, content_id, title)
+    if not dest:
+        return None, topic_id
+    new_chat_id, new_topic_id = dest
+    result2 = await _send_one_video(context, message, new_chat_id, new_topic_id, url, filename, header, link)
+    return (result2 if isinstance(result2, int) else None), new_topic_id
 
 
 async def post_text_to_topic_raw(context, chat_id, topic_id, text):
@@ -260,25 +352,36 @@ async def _run_backfill(context: ContextTypes.DEFAULT_TYPE, studio: dict, progre
                 mid = str(item.get("id"))
                 title = item.get("title") or f"Film #{mid}"
                 year = f" ({item['year']})" if item.get("year") else ""
+                content_key = f"m_{mid}"
+
                 dest = await ensure_topic(context, studio, "m", mid, f"{title}{year}")
                 if not dest:
                     errors += 1
                     continue
-                _, topic_id = dest
-                if not is_episode_posted(slug, f"m_{mid}", "main") and (item.get("hasVideo") or _video_url(item)):
-                    url = _video_url(item)
-                    if url:
-                        sent = await _send_one_video(
-                            context, quiet_msg, chat_id, topic_id, url,
-                            f"{title}.mp4", f"🎬 {title}{year}", url,
-                        )
-                        if sent:
-                            mark_episode_posted(slug, f"m_{mid}", "main")
-                        else:
-                            errors += 1
-                        await asyncio.sleep(_THROTTLE_SECONDS)
+                chat_id, topic_id = dest
+
+                if item.get("hasVideo") or _video_url(item):
+                    resend, old_msg_id = await _needs_resend(context, slug, content_key, "main", chat_id, progress_chat_id)
+                    if old_msg_id:
+                        try:
+                            await context.bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
+                        except TelegramError:
+                            pass
+                    if resend:
+                        url = _video_url(item)
+                        if url:
+                            header = f"🎬 {title}{year}"
+                            msg_id, topic_id = await _send_with_topic_healing(
+                                context, studio, "m", mid, f"{title}{year}",
+                                quiet_msg, chat_id, topic_id, url, f"{title}.mp4", header, url,
+                            )
+                            if msg_id:
+                                mark_episode_posted(slug, content_key, "main", msg_id)
+                            else:
+                                errors += 1
+                            await asyncio.sleep(_THROTTLE_SECONDS)
                 elif not item.get("hasVideo") and not _video_url(item):
-                    await post_text_to_topic_raw(context, chat_id, topic_id, f"🎬 *{title}{year}*\n⚠️ Video hali yuklanmagan.")
+                    await post_text_to_topic_raw(context, chat_id, topic_id, f"🎬 {title}{year}\n⚠️ Video hali yuklanmagan.")
                 done_movies += 1
                 if done_movies % 3 == 0:
                     await _edit_progress(
@@ -301,30 +404,41 @@ async def _run_backfill(context: ContextTypes.DEFAULT_TYPE, studio: dict, progre
                 sid = str(item.get("id"))
                 title = item.get("title") or f"Serial #{sid}"
                 year = f" ({item['year']})" if item.get("year") else ""
+                content_key = f"s_{sid}"
+
                 dest = await ensure_topic(context, studio, "s", sid, f"{title}{year}")
                 if not dest:
                     errors += 1
                     continue
-                _, topic_id = dest
+                chat_id, topic_id = dest
 
                 episodes = await _fetch_episodes(studio, sid) or []
                 for ep in episodes:
                     _check_cancel(slug)
                     ep_key = f"{ep.get('season')}x{ep.get('episode')}"
-                    if is_episode_posted(slug, f"s_{sid}", ep_key):
-                        continue
                     if not ep.get("hasVideo"):
                         continue
                     url = _video_url(ep)
                     if not url:
                         continue
+
+                    resend, old_msg_id = await _needs_resend(context, slug, content_key, ep_key, chat_id, progress_chat_id)
+                    if old_msg_id:
+                        try:
+                            await context.bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
+                        except TelegramError:
+                            pass
+                    if not resend:
+                        continue
+
                     header = f"📺 {title}{year} — {ep.get('season')}-fasl, {ep.get('episode')}-qism"
-                    sent = await _send_one_video(
-                        context, quiet_msg, chat_id, topic_id, url,
-                        f"{title}_S{ep.get('season')}E{ep.get('episode')}.mp4", header, url,
+                    filename = f"{title}_S{ep.get('season')}E{ep.get('episode')}.mp4"
+                    msg_id, topic_id = await _send_with_topic_healing(
+                        context, studio, "s", sid, f"{title}{year}",
+                        quiet_msg, chat_id, topic_id, url, filename, header, url,
                     )
-                    if sent:
-                        mark_episode_posted(slug, f"s_{sid}", ep_key)
+                    if msg_id:
+                        mark_episode_posted(slug, content_key, ep_key, msg_id)
                         done_eps += 1
                     else:
                         errors += 1
