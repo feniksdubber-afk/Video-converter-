@@ -19,6 +19,7 @@ from telegram.ext import ContextTypes
 from config import STUDIO_API_BASE
 from utils.studio_auth import get_bound_studio
 from utils.keyboards import studio_menu_keyboard
+from handlers.studio_group import post_video_to_topic
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +161,14 @@ async def _do_movie_upload(update: Update, context: ContextTypes.DEFAULT_TYPE, m
         return
 
     await status.edit_text("✅ Tayyor — film videosi yuklandi va faollashtirildi.")
+
+    title = context.user_data.get("studio_items_cache", {}).get(movie_id, {}).get("title") or f"Film #{movie_id}"
+    await post_video_to_topic(
+        context, studio, kind="m", content_id=movie_id, title=title,
+        caption=f"🎬 *{title}*\n✅ Video yuklandi.",
+        video_path=video_path, tg_file_id=context.user_data.get("video_tg_file_id"),
+    )
+
     await _offer_tg_video(update, context, kind="m", movie_id=movie_id)
 
 
@@ -201,6 +210,14 @@ async def _do_episode_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         pass
 
     await status.edit_text(f"✅ Tayyor — {season}-fasl {episode}-qism qo'shildi.")
+
+    series_title = context.user_data.get("studio_items_cache", {}).get(series_id, {}).get("title") or f"Serial #{series_id}"
+    await post_video_to_topic(
+        context, studio, kind="s", content_id=series_id, title=series_title,
+        caption=f"📺 *{series_title}*\n{season}-fasl {episode}-qism yuklandi.",
+        video_path=video_path, tg_file_id=context.user_data.get("video_tg_file_id"),
+    )
+
     await _offer_tg_video(update, context, kind="s", movie_id=None, series_id=series_id, episode_id=ep_id)
 
 

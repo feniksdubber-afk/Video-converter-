@@ -48,13 +48,35 @@ STUDIO_START_TEXT = (
     "📤 *Boshlash uchun video yuboring.*"
 )
 
+STUDIO_NEED_GROUP_TEXT = (
+    "👋 *Xush kelibsiz, {studio_name}!*\n\n"
+    "📁 Kontentingiz professional tartibda saqlanishi uchun avval studiyangiz "
+    "uchun alohida Telegram guruh kerak. Bu guruhda har bir film/serial uchun "
+    "bot avtomatik mavzu (topic) ochib, videolarni tartibli saqlaydi.\n\n"
+    "*Qanday sozlash kerak:*\n"
+    "1️⃣ Yangi guruh yarating\n"
+    "2️⃣ Guruh sozlamalaridan *Topics (Mavzular)* rejimini yoqing\n"
+    "3️⃣ Botni guruhga qo'shing va *admin* qiling (\"Mavzularni boshqarish\" "
+    "huquqi bilan)\n"
+    "4️⃣ Guruhda /guruh_biriktirish deb yozing\n\n"
+    "Guruh tayyor bo'lgach, botga qaytib /start bosing."
+)
+
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from utils.studio_auth import get_bound_studio
+    from utils.studio_group import get_group
     from utils.keyboards import studio_menu_keyboard
 
     studio = get_bound_studio(update.effective_user.id)
     if studio:
+        if not get_group(studio["slug"]):
+            await update.message.reply_text(
+                STUDIO_NEED_GROUP_TEXT.format(studio_name=studio["name"]),
+                parse_mode="Markdown",
+                reply_markup=studio_menu_keyboard(),
+            )
+            return
         await update.message.reply_text(
             STUDIO_START_TEXT.format(studio_name=studio["name"]),
             parse_mode="Markdown",
