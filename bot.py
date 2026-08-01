@@ -144,7 +144,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from utils.studio_auth import is_studio_manager
     if is_studio_manager(user_id) and not is_admin(user_id) and not is_allowed(user_id):
         _STUDIO_ALLOWED_PREFIXES = (
-            "cat_video", "studio_", "pa_", "task_cancel", "cancel", "back",
+            "cat_video", "studio_", "pa_", "task_cancel", "queue_cancel_", "cancel", "back",
             "convert", "resolution", "fmt_", "res_",
         )
         if not data.startswith(_STUDIO_ALLOWED_PREFIXES):
@@ -183,6 +183,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         else:
             await query.answer("Faol vazifa yo'q", show_alert=True)
+        return
+
+    # ── Navbatda kutayotgan vazifadan chiqish ─────────────────────────────────
+    if data.startswith("queue_cancel_"):
+        await query.answer()
+        from utils.task_queue import cancel_ticket
+        ticket_id = int(data.rsplit("_", 1)[1])
+        cancel_ticket(ticket_id)
         return
 
     # ── Post-action (yuborish / davom etish / versiya tanlash) ──
