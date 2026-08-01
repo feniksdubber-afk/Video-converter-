@@ -302,10 +302,46 @@ async def _fetch_episodes(studio: dict, series_id: str) -> list[dict] | None:
         data = resp.json()
     except Exception:
         return None
+    logger.info("Qismlar API javobi (series=%s): %s", series_id, str(data)[:1500])
+    if isinstance(data, list):
+        return [_normalize_episode(e) for e in data]
+    if not isinstance(data, dict):
+        return []
     eps = data.get("episodes")
-    if eps is None and isinstance(data, list):
-        eps = data
-    return eps if isinstance(eps, list) else []
+    if eps is None:
+        # ba'zi API'lar {"seasons": [{"episodes": [...]}]} yoki {"data": [...]}
+        # kabi ichma-ich shaklda qaytarishi mumkin -- keng qidiruv qilamiz
+        for key in ("data", "items", "results"):
+            if isinstance(data.get(key), list):
+                eps = data[key]
+                break
+        if eps is None and isinstance(data.get("seasons"), list):
+            eps = []
+            for season_obj in data["seasons"]:
+                season_num = season_obj.get("season") or season_obj.get("number")
+                for e in season_obj.get("episodes", []):
+                    e = dict(e)
+                    e.setdefault("season", season_num)
+                    eps.append(e)
+    return [_normalize_episode(e) for e in eps] if isinstance(eps, list) else []
+
+
+def _normalize_episode(e: dict) -> dict:
+    """Turli xil maydon nomlari bo'lishi mumkin bo'lgan backend javobini
+    botning kutgan kanonik kalitlariga moslaydi (season/episode/hasVideo/
+    hasTgVideo/id), asl maydonlarni ham saqlab qoladi."""
+    if not isinstance(e, dict):
+        return {}
+    out = dict(e)
+    if "season" not in out:
+        out["season"] = e.get("seasonNumber") or e.get("season_number") or 1
+    if "episode" not in out:
+        out["episode"] = e.get("episodeNumber") or e.get("episode_number") or e.get("number")
+    if "hasVideo" not in out:
+        out["hasVideo"] = bool(e.get("r2Url") or e.get("videoUrl") or e.get("hasR2Video"))
+    if "hasTgVideo" not in out:
+        out["hasTgVideo"] = bool(e.get("tgFileId") or e.get("tgVideoId") or e.get("telegramFileId"))
+    return out
 
 
 def _ep_mark(ep: dict) -> str:
