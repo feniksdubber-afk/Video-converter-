@@ -67,6 +67,24 @@ def _is_thread_error(e: TelegramError) -> bool:
     return any(hint.lower() in msg for hint in _THREAD_ERROR_HINTS)
 
 
+async def _safe_edit(message, text, **kwargs):
+    """message.edit_text() ni RetryAfter/TelegramError'dan himoyalab chaqiradi.
+    Flood-control tegsa -- bitta marta kutib qayta urinadi, aks holda
+    xatoni yutib, jarayonni to'xtatib qo'ymaydi."""
+    try:
+        await message.edit_text(text, **kwargs)
+    except RetryAfter as e:
+        wait = min(e.retry_after, 30) + 1
+        logger.warning("Flood control (edit_text): %.0fs kutilmoqda", e.retry_after)
+        await asyncio.sleep(wait)
+        try:
+            await message.edit_text(text, **kwargs)
+        except TelegramError as e2:
+            logger.warning("Qayta urinishda ham xato: %s", e2)
+    except TelegramError as e:
+        logger.warning("edit_text xatosi: %s", e)
+
+
 async def cancel_backfill_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     studio = get_bound_studio(update.effective_user.id)
@@ -99,17 +117,25 @@ async def backfill_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Bir foydalanuvchi buyruqni qayta-qayta bosib yubormasligi uchun --
+    # aks holda har safar 1-2 tadan himoyasiz edit_text chaqiriladi va
+    # tezda Telegram flood-control'iga (429 RetryAfter) tegib qolamiz.
+    if studio["slug"] in _running:
+        await message.reply_text("⏳ Backfill allaqachon shu studiya uchun ishlamoqda.")
+        return
+
     status = await message.reply_text("🔎 Bazadagi kontent soni tekshirilmoqda...")
     movies_data = await _fetch_list(studio, "m", 1, "")
     series_data = await _fetch_list(studio, "s", 1, "")
     if movies_data is None or series_data is None:
-        await status.edit_text("❌ Kontent sonini olishda xatolik. Birozdan so'ng qayta urinib ko'ring.")
+        await _safe_edit(status, "❌ Kontent sonini olishda xatolik. Birozdan so'ng qayta urinib ko'ring.")
         return
 
     movies_total = movies_data.get("total", 0)
     series_total = series_data.get("total", 0)
 
-    await status.edit_text(
+    await _safe_edit(
+        status,
         f"📊 Bazada topildi:\n🎬 {movies_total} ta film\n📺 {series_total} ta serial\n\n"
         f"Bu jarayon \"{group['title']}\" guruhida har biriga alohida mavzu ochib, "
         "videolarni ketma-ket joylaydi. Har bir kontent uchun avval joylangan "
@@ -151,6 +177,13 @@ async def handle_backfill_choice(update: Update, context: ContextTypes.DEFAULT_T
 async def _edit_progress(context, chat_id, message_id, text):
     try:
         await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
+    except RetryAfter as e:
+        logger.warning("Flood control (progress edit): %.0fs kutilmoqda", e.retry_after)
+        await asyncio.sleep(min(e.retry_after, 30) + 1)
+        try:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
+        except TelegramError:
+            pass
     except TelegramError:
         pass
 
