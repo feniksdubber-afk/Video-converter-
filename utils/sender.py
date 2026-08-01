@@ -261,6 +261,7 @@ async def send_file(
     context=None,
     force_r2: bool = False,
     force_document: bool = False,
+    force_upload_mode: str | None = None,
     target_chat_id: int | None = None,
     message_thread_id: int | None = None,
     r2_object_key: str | None = None,
@@ -269,6 +270,11 @@ async def send_file(
     """
     pyro_client_override: agar berilgan bo'lsa, 50MB-2GB Pyrogram MTProto
     yuborish bosqichida bot_session o'rniga shu client ishlatiladi.
+
+    force_upload_mode: berilsa ("video"/"document"/"audio"), foydalanuvchi
+    sozlamasidan (upload_mode) qat'iy nazar shu rejim ishlatiladi. Masalan
+    studio backfill har doim "video" sifatida yuborishni xohlaydi —
+    tetiklovchi shaxsning shaxsiy /settings holatiga bog'liq bo'lmasligi kerak.
 
     Nega kerak: ARCHIVE_GROUP_ID kabi guruhlar -100... (kanal/supergroup)
     bo'lsa, ularning MTProto darajasidagi update'lari alohida channel_pts
@@ -285,12 +291,15 @@ async def send_file(
     is_video = ext in VIDEO_EXTENSIONS
     is_audio = ext in AUDIO_EXTENSIONS
 
-    upload_mode = "document"
-    if context is not None and not force_document:
-        from utils.user_settings import get as get_setting
-        upload_mode = get_setting(context, "upload_mode")
-    elif force_document:
+    if force_upload_mode is not None:
+        upload_mode = force_upload_mode
+    else:
         upload_mode = "document"
+        if context is not None and not force_document:
+            from utils.user_settings import get as get_setting
+            upload_mode = get_setting(context, "upload_mode")
+        elif force_document:
+            upload_mode = "document"
 
     dest_chat = target_chat_id or message.chat_id
 
