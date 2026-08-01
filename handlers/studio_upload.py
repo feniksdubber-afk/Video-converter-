@@ -159,7 +159,7 @@ async def _do_movie_upload(update: Update, context: ContextTypes.DEFAULT_TYPE, m
         return
 
     await status.edit_text("✅ Tayyor — film videosi yuklandi va faollashtirildi.")
-    await message.reply_text("Yana amal tanlang:", reply_markup=studio_menu_keyboard())
+    await _offer_tg_video(update, context, kind="m", movie_id=movie_id)
 
 
 async def _do_episode_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -192,8 +192,84 @@ async def _do_episode_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await status.edit_text(f"❌ Qismni qo'shishda xatolik: {resp.text[:200]}")
         return
 
+    ep_id = None
+    try:
+        ep_id = resp.json().get("episode", {}).get("id")
+    except Exception:
+        pass
+
     await status.edit_text(f"✅ Tayyor — {season}-fasl {episode}-qism qo'shildi.")
-    await message.reply_text("Yana amal tanlang:", reply_markup=studio_menu_keyboard())
+    await _offer_tg_video(update, context, kind="s", movie_id=None, series_id=series_id, episode_id=ep_id)
+
+
+async def _offer_tg_video(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, kind: str,
+    movie_id: str = None, series_id: str = None, episode_id=None,
+):
+    """R2 yuklangandan keyin, agar video Telegram video sifatida yuborilgan
+    bo'lsa, uni TG video (file_id) sifatida ham biriktirishni taklif qiladi
+    -- bu ba'zi mijozlarda tezroq ochilishi uchun ishlatiladi."""
+    message = update.effective_message
+    tg_file_id = context.user_data.get("video_tg_file_id")
+
+    if not tg_file_id or (kind == "s" and not episode_id):
+        await message.reply_text("Yana amal tanlang:", reply_markup=studio_menu_keyboard())
+        return
+
+    if kind == "m":
+        cb = f"studio_tgv_m_{movie_id}"
+    else:
+        cb = f"studio_tgv_s_{series_id}_{episode_id}"
+
+    await message.reply_text(
+        "🎬 Bu videoni *TG Video* sifatida ham biriktiraylikmi?\n"
+        "(ba'zi qurilmalarda tezroq ochiladi)",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Ha, biriktirish", callback_data=cb)],
+            [InlineKeyboardButton("O'tkazib yuborish", callback_data="studio_upload")],
+        ]),
+        parse_mode="Markdown",
+    )
+
+
+async def handle_tg_video_attach(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str):
+    query = update.callback_query
+    await query.answer()
+
+    tg_file_id = context.user_data.get("video_tg_file_id")
+    if not tg_file_id:
+        await query.edit_message_text("⚠️ Video topilmadi, qaytadan yuboring.")
+        return
+
+    studio = get_bound_studio(update.effective_user.id)
+    if not studio:
+        await query.edit_message_text("⛔ Studiya sifatida aniqlanmadingiz.")
+        return
+
+    parts = data.split("_")  # studio_tgv_m_{id} | studio_tgv_s_{seriesId}_{episodeId}
+    kind = parts[2]
+    if kind == "m":
+        movie_id = parts[3]
+        url = f"{STUDIO_API_BASE}/studios/{studio['slug']}/content/movies/{movie_id}/tg-video"
+    else:
+        series_id, episode_id = parts[3], parts[4]
+        url = f"{STUDIO_API_BASE}/studios/{studio['slug']}/content/series/{series_id}/episodes/{episode_id}/tg-video"
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(url, headers=_auth_headers(studio), json={"fileId": tg_file_id})
+    except httpx.HTTPError as e:
+        logger.warning("TG video biriktirishda tarmoq xatosi: %s", e)
+        await query.edit_message_text("❌ Tarmoq xatosi. Qaytadan urinib ko'ring.")
+        return
+
+    if resp.status_code >= 300:
+        logger.warning("TG video xato: %s %s", resp.status_code, resp.text[:200])
+        await query.edit_message_text(f"❌ Xatolik: {resp.text[:200]}")
+        return
+
+    await query.edit_message_text("✅ TG Video ham biriktirildi.")
+    await update.effective_message.reply_text("Yana amal tanlang:", reply_markup=studio_menu_keyboard())
 
 
 async def handle_studio_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:

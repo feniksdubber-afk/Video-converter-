@@ -251,16 +251,22 @@ async def _show_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, kind:
     lines.append(f"⭐ Reyting: {item.get('rating', 0)}")
     lines.append(f"👁 Ko'rishlar: {item.get('views', 0)}")
     if kind == "m":
-        lines.append(f"🎞 Video: {'✅ mavjud' if item.get('hasVideo') else '⚠️ hali yuklanmagan'}")
+        lines.append(f"🎞 R2 Video: {'✅ mavjud' if item.get('hasVideo') else '⚠️ hali yuklanmagan'}")
+        tg_status = "✅ mavjud" if item.get("hasTgVideo") else "⚠️ yo'q"
+        lines.append(f"🤖 TG Video: {tg_status}")
     if item.get("isPremium"):
         lines.append("💎 Premium kontent")
 
     rows = []
     rows.append([InlineKeyboardButton("✏️ Tahrirlash", callback_data=f"studio_edit_{kind}_{item_id}")])
     video_path = context.user_data.get("video_path")
+    tg_file_id = context.user_data.get("video_tg_file_id")
     if video_path:
-        btn_label = "🔁 Video almashtirish" if item.get("hasVideo") else "📤 Video biriktirish"
+        btn_label = "🔁 R2 Video almashtirish" if item.get("hasVideo") else "📤 R2 Video biriktirish"
         rows.append([InlineKeyboardButton(btn_label, callback_data=f"studio_item_u_{kind}_{item_id}")])
+        if kind == "m" and tg_file_id:
+            tg_label = "🔁 TG Video almashtirish" if item.get("hasTgVideo") else "🎬 TG Video biriktirish"
+            rows.append([InlineKeyboardButton(tg_label, callback_data=f"studio_tgv_m_{item_id}")])
     else:
         lines.append("\nℹ️ Video biriktirish uchun avval botga video yuboring.")
     rows.append([InlineKeyboardButton("⬅️ Ro'yxatga qaytish", callback_data=f"studio_bkind_v_{kind}")])

@@ -85,6 +85,7 @@ async def video_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         context.user_data["video_path"] = local_path
         context.user_data["video_name"] = file_name
+        context.user_data["video_tg_file_id"] = message.video.file_id if message.video else None
         context.user_data["state"] = None
 
         from utils.video_history import init_history
