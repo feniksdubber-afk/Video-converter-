@@ -44,10 +44,20 @@ _STAGE_LABEL = {
     "upload":   "☁️  R2 bulutiga yuklanmoqda",
     "register": "📝  Studiya bazasiga ro'yxatga olinmoqda",
 }
+# Har bir bosqich item ichida qancha ulush (0..1) egallashi -- bar/foiz shu
+# yordamida bitta katta video ishlanayotganda ham sekin-asta oldinga siljiydi
+# (faqat item to'liq tugaganda emas, "muzlab qolgandek" ko'rinmasligi uchun).
+_STAGE_FRACTION = {
+    None:       0.0,
+    "download": 0.05,
+    "prepare":  0.35,
+    "upload":   0.55,
+    "register": 0.90,
+}
 
 
-def _progress_bar(done: int, total: int) -> str:
-    filled = round(_BAR_LEN * done / total) if total else 0
+def _progress_bar(fraction: float) -> str:
+    filled = round(_BAR_LEN * fraction)
     filled = max(0, min(_BAR_LEN, filled))
     return "🟩" * filled + "⬜️" * (_BAR_LEN - filled)
 
@@ -74,7 +84,10 @@ def _render_progress(
 ) -> str:
     icon = "🎬" if kind == "m" else "📺"
     processed = done + errors
-    pct = int(round(100 * processed / total)) if total else 0
+    # "Silliq" progress: to'liq tugagan itemlar + joriy item ichidagi bosqich ulushi
+    fractional = processed + (_STAGE_FRACTION.get(stage, 0.0) if current_item is not None else 0.0)
+    fraction = (fractional / total) if total else 0.0
+    pct = int(round(100 * fraction))
 
     lines = [
         "✨━━━━━━━━━━━━━━━━━━━━━✨",
@@ -83,7 +96,7 @@ def _render_progress(
         "",
         f"{icon} *{title}*",
         "",
-        f"{_progress_bar(processed, total)}",
+        f"{_progress_bar(fraction)}",
         f"*{pct}%*   ·   {processed}/{total} video",
         "",
     ]
@@ -103,9 +116,12 @@ def _render_progress(
             lines.append(f"  {'✅' if ok else '⚠️'} {label}")
         lines.append("")
 
-    avg = elapsed / processed if processed else 0
-    eta = avg * (total - processed)
-    lines.append(f"🕓 O'tgan: {_fmt_duration(elapsed)}" + (f"   ·   ⏱ Qoldi: ~{_fmt_duration(eta)}" if processed < total else ""))
+    eta_text = ""
+    if fractional > 0:
+        avg_per_unit = elapsed / fractional
+        eta = avg_per_unit * (total - fractional)
+        eta_text = f"   ·   ⏱ Qoldi: ~{_fmt_duration(eta)}"
+    lines.append(f"🕓 O'tgan: {_fmt_duration(elapsed)}{eta_text}")
     lines.append(f"✔️ Joylandi: *{done}*   ⚠️ Xatolar: *{errors}*   ⏳ Navbatda: *{total - processed}*")
     return "\n".join(lines)
 
@@ -124,7 +140,7 @@ def _render_finished(
         "",
         f"{icon} *{title}*",
         "",
-        _progress_bar(total, total),
+        _progress_bar(1.0),
         "*100%*",
         "",
         f"✔️ Muvaffaqiyatli joylandi: *{done}*",
