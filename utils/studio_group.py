@@ -104,6 +104,22 @@ def get_topic_id(slug: str, content_key: str) -> int | None:
     return _topics.get(slug, {}).get(content_key)
 
 
+def get_content_key_by_topic(slug: str, topic_id: int) -> str | None:
+    """Topic_id -> content_key teskari qidiruvi (masalan topic ichida
+    yuborilgan videoni qaysi film/serialga tegishli ekanini bilish uchun)."""
+    _ensure_loaded()
+    for key, tid in _topics.get(slug, {}).items():
+        if tid == topic_id:
+            return key
+    return None
+
+
+def list_groups() -> dict[str, dict]:
+    """Barcha bog'langan studiya guruhlari: slug -> {chat_id, title, ...}."""
+    _ensure_loaded()
+    return dict(_groups)
+
+
 def set_topic_id(slug: str, content_key: str, topic_id: int) -> None:
     _ensure_loaded()
     _topics.setdefault(slug, {})[content_key] = topic_id
