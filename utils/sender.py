@@ -15,6 +15,7 @@ import json
 import logging
 import time
 import aiohttp
+from pyrogram.errors import PeerIdInvalid
 from telegram import Message, InlineKeyboardButton, InlineKeyboardMarkup
 from handlers.video_handler import get_pyrogram_client
 from utils.r2_manager import upload_file as r2_upload, is_configured as r2_ok, R2_THRESHOLD, fmt_size as r2_fmt
@@ -495,10 +496,26 @@ async def send_file(
             await client.get_chat(dest_chat)
         except Exception as _pe:
             logger.warning(
-                "Pyrogram client '%s' chatini cache'lay olmadi: %s — "
-                "send chaqiruvi 'Peer id invalid' bilan qulashi mumkin.",
+                "Pyrogram client '%s' chatini cache'lay olmadi (%s) — "
+                "get_dialogs orqali peer keshini majburan yangilashga urinamiz.",
                 dest_chat, _pe,
             )
+            try:
+                # Deploydan keyin session'ning peer keshi bo'sh bo'ladi va
+                # get_chat yolg'iz kifoya qilmasligi mumkin (ayniqsa guruh hali
+                # userbot "dialog" ro'yxatida bo'lmasa). get_dialogs() barcha
+                # dialoglarni MTProto orqali qayta olib, ularning peer'larini
+                # sessiya keshiga yozadi — shundan keyin get_chat odatda o'tadi.
+                async for _ in client.get_dialogs():
+                    pass
+                await client.get_chat(dest_chat)
+                logger.info("Peer '%s' get_dialogs orqali muvaffaqiyatli keshlandi.", dest_chat)
+            except Exception as _pe2:
+                logger.warning(
+                    "get_dialogs bilan ham '%s' peer'ini keshlab bo'lmadi: %s — "
+                    "send chaqiruvi 'Peer id invalid' bilan qulashi mumkin.",
+                    dest_chat, _pe2,
+                )
 
     last_percent = [-1]
     total_mb = file_size / 1024 / 1024
@@ -524,17 +541,17 @@ async def send_file(
     # Hech qachon abadiy osilib qolmasin: hajmga qarab, lekin kamida 5 daqiqa.
     upload_timeout = max(300, int(total_mb * 4))
 
-    pyro_sent = None
-    try:
-        pyro_kw = {}
-        if message_thread_id:
-            # MUHIM: bu o'rnatilgan Pyrogram versiyasida (2.0.106) send_video/
-            # send_audio/send_document message_thread_id parametrini QABUL
-            # QILMAYDI (TypeError: unexpected keyword argument). Forum topic'ga
-            # MTProto darajasida reply_to_message_id orqali yo'naltiriladi.
-            pyro_kw["reply_to_message_id"] = message_thread_id
+    pyro_kw = {}
+    if message_thread_id:
+        # MUHIM: bu o'rnatilgan Pyrogram versiyasida (2.0.106) send_video/
+        # send_audio/send_document message_thread_id parametrini QABUL
+        # QILMAYDI (TypeError: unexpected keyword argument). Forum topic'ga
+        # MTProto darajasida reply_to_message_id orqali yo'naltiriladi.
+        pyro_kw["reply_to_message_id"] = message_thread_id
+
+    async def _do_send():
         if upload_mode == "video" and is_video:
-            pyro_sent = await asyncio.wait_for(
+            return await asyncio.wait_for(
                 client.send_video(
                     chat_id=dest_chat, video=file_path,
                     file_name=filename, caption=caption,
@@ -548,7 +565,7 @@ async def send_file(
                 timeout=upload_timeout,
             )
         elif upload_mode == "audio" and is_audio:
-            pyro_sent = await asyncio.wait_for(
+            return await asyncio.wait_for(
                 client.send_audio(
                     chat_id=dest_chat, audio=file_path,
                     file_name=filename, caption=caption,
@@ -558,7 +575,7 @@ async def send_file(
                 timeout=upload_timeout,
             )
         else:
-            pyro_sent = await asyncio.wait_for(
+            return await asyncio.wait_for(
                 client.send_document(
                     chat_id=dest_chat, document=file_path,
                     file_name=filename, caption=caption,
@@ -567,6 +584,19 @@ async def send_file(
                 ),
                 timeout=upload_timeout,
             )
+
+    pyro_sent = None
+    try:
+        try:
+            pyro_sent = await _do_send()
+        except PeerIdInvalid:
+            logger.warning(
+                "'%s' uchun PeerIdInvalid — get_dialogs bilan qayta urinilmoqda.",
+                dest_chat,
+            )
+            async for _ in client.get_dialogs():
+                pass
+            pyro_sent = await _do_send()
     except asyncio.TimeoutError:
         try:
             await status_msg.edit_text(
