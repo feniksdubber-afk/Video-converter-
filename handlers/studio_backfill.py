@@ -35,7 +35,7 @@ from utils.studio_group import (
 )
 from handlers.studio_group import ensure_topic, quality_label
 from handlers.studio_content import _fetch_list, _fetch_episodes
-from utils.sender import send_file
+from utils.sender import send_file, PYROGRAM_LIMIT, PYROGRAM_PREMIUM_LIMIT
 from utils.ffmpeg_utils import get_video_resolution
 
 logger = logging.getLogger(__name__)
@@ -307,6 +307,7 @@ async def _send_one_video(context, message, chat_id, topic_id, url, filename, he
     message_id = None
     thread_gone = False
     try:
+        file_size = os.path.getsize(tmp_path)
         _w, _h = get_video_resolution(tmp_path)
         _q = quality_label(_h)
         caption = header
@@ -314,6 +315,30 @@ async def _send_one_video(context, message, chat_id, topic_id, url, filename, he
             caption += f"\n▸ {_q}"
         if link:
             caption += f"\n\n🔗 Video: {link}"
+
+        # 2 GB dan katta fayllarni oddiy Bot API orqali yuborib bo'lmaydi.
+        # send_file bu holda avtomatik R2/Gofile'ga *qayta* yuklab, natijani
+        # faqat admin'ning shaxsiy chatiga yozadi -- topicga hech narsa
+        # tushmaydi. Fayl allaqachon R2'da (`link`) turgani uchun uni qayta
+        # yuklashning ma'nosi yo'q -- Premium userbot ulanmagan bo'lsa,
+        # to'g'ridan-to'g'ri mavjud havolani matn sifatida joylaymiz.
+        if file_size > PYROGRAM_LIMIT:
+            premium_ok = False
+            if file_size <= PYROGRAM_PREMIUM_LIMIT:
+                try:
+                    from handlers.save_restricted import get_user_client, is_user_premium
+                    _client = await get_user_client()
+                    premium_ok = bool(_client) and await is_user_premium()
+                except Exception as e:
+                    logger.warning("Premium userbot tekshiruvida xato: %s", e)
+            if not premium_ok:
+                await post_text_to_topic_raw(
+                    context, chat_id, topic_id,
+                    caption + "\n\nℹ️ Fayl 2 GB dan katta -- Telegram orqali video "
+                    "sifatida yuborib bo'lmaydi, yuqoridagi havoladan ko'rish mumkin.",
+                )
+                return None
+
         for attempt in range(3):
             try:
                 message_id = await send_file(
