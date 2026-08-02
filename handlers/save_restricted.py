@@ -1500,6 +1500,29 @@ async def save_series_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         if from_msg_id:
             media_ids = [mid for mid in media_ids if mid >= from_msg_id]
 
+        # Fallback: agar get_discussion_replies hech narsa bermasa (bu odatda
+        # manba ODDIY KANAL bo'lib, forum-topic yoki izohlar (comments)
+        # yoqilmagan bo'lsa yuz beradi — ya'ni havola aslida
+        # topic-link emas, balki oddiy post/albom oralig'i edi),
+        # xabarlarni to'g'ridan-to'g'ri ID oralig'i bo'yicha olishga
+        # harakat qilamiz: src_thread dan from_msg_id (yoki shu ID)gacha.
+        if not media_ids:
+            range_end = from_msg_id or src_thread
+            range_start = min(src_thread, range_end)
+            range_end = max(src_thread, range_end)
+            ids = list(range(range_start, range_end + 1))
+            try:
+                msgs = await client.get_messages(src_chat, ids)
+                if not isinstance(msgs, list):
+                    msgs = [msgs]
+                for m in msgs:
+                    if m and not m.empty and m.media:
+                        media_ids.append(m.id)
+                        captions[m.id] = m.caption or ""
+                media_ids = sorted(set(media_ids))
+            except Exception:
+                pass
+
         if not media_ids:
             await status.edit_text("❌ Manba topicda media topilmadi.")
             clear_task(user_id)
