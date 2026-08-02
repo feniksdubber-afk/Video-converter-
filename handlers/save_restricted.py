@@ -1503,25 +1503,55 @@ async def save_series_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         # Fallback: agar get_discussion_replies hech narsa bermasa (bu odatda
         # manba ODDIY KANAL bo'lib, forum-topic yoki izohlar (comments)
         # yoqilmagan bo'lsa yuz beradi — ya'ni havola aslida
-        # topic-link emas, balki oddiy post/albom oralig'i edi),
-        # xabarlarni to'g'ridan-to'g'ri ID oralig'i bo'yicha olishga
-        # harakat qilamiz: src_thread dan from_msg_id (yoki shu ID)gacha.
+        # topic-link emas, balki oddiy post/albom havolasi edi).
+        # Bunday holda haqiqiy qismlar (videolar) ko'pincha havoladagi
+        # oraliqdan TASHQARIDA, undan keyingi ID'larda joylashgan bo'ladi
+        # (masalan: muqova-post 9160-9161, keyin 1-qism 9170, 2-qism 9185...).
+        # Shuning uchun from_msg_id'ni qattiq chegara sifatida emas, balki
+        # boshlang'ich nuqta sifatida ishlatib, videolar tugaguncha
+        # OLDINGA qarab ochiq skanerlaymiz (ketma-ket ko'p bo'sh xabar
+        # chiqsa — kanalning shu bo'limi tugagan deb to'xtaymiz).
         if not media_ids:
-            range_end = from_msg_id or src_thread
-            range_start = min(src_thread, range_end)
-            range_end = max(src_thread, range_end)
-            ids = list(range(range_start, range_end + 1))
-            try:
-                msgs = await client.get_messages(src_chat, ids)
+            scan_start = min(src_thread, from_msg_id) if from_msg_id else src_thread
+            chunk_size = 100
+            max_total = 1500  # xavfsizlik chegarasi
+            empty_streak = 0
+            empty_streak_limit = 25
+            cur = scan_start
+            scanned_fb = 0
+            while scanned_fb < max_total and empty_streak < empty_streak_limit:
+                ids = list(range(cur, cur + chunk_size))
+                try:
+                    msgs = await client.get_messages(src_chat, ids)
+                except Exception:
+                    break
                 if not isinstance(msgs, list):
                     msgs = [msgs]
+                chunk_had_content = False
                 for m in msgs:
-                    if m and not m.empty and m.media:
-                        media_ids.append(m.id)
-                        captions[m.id] = m.caption or ""
-                media_ids = sorted(set(media_ids))
-            except Exception:
-                pass
+                    scanned_fb += 1
+                    if m and not m.empty:
+                        chunk_had_content = True
+                        if m.media:
+                            media_ids.append(m.id)
+                            captions[m.id] = m.caption or ""
+                            empty_streak = 0
+                        else:
+                            empty_streak += 1
+                    else:
+                        empty_streak += 1
+                    if empty_streak >= empty_streak_limit:
+                        break
+                if not chunk_had_content and not media_ids:
+                    # boshlanish nuqtasi ham noto'g'ri bo'lishi mumkin —
+                    # bitta bo'sh chunk'dan keyin to'xtaymiz
+                    break
+                cur += chunk_size
+                try:
+                    await status.edit_text(f"🔍 {scanned_fb} xabar tekshirildi, {len(media_ids)} ta media topildi...")
+                except Exception:
+                    pass
+            media_ids = sorted(set(media_ids))
 
         if not media_ids:
             await status.edit_text("❌ Manba topicda media topilmadi.")
