@@ -823,8 +823,9 @@ def main():
     app.add_handler(CommandHandler("kontent_toldirish", backfill_command))
     app.add_handler(CommandHandler("toldirish_toxtat", cancel_backfill_command))
 
-    from handlers.studio_topic_upload import on_topic_video_message, joylash_command
+    from handlers.studio_topic_upload import on_topic_video_message, joylash_command, bogla_command
     app.add_handler(CommandHandler("joylash", joylash_command))
+    app.add_handler(CommandHandler("bogla", bogla_command))
     # Studiya guruhi kontent topic'larida tashlangan xom videolarni navbatga
     # yozib oladi (darhol ishlamaydi -- /joylash kutadi). filters.ChatType.GROUPS
     # bilan cheklangani uchun shaxsiy chatdagi konvertatsiya oqimiga
