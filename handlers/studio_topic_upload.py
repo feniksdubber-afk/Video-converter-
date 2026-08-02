@@ -13,13 +13,15 @@ Oqim:
      shart emas -- faqat caption tahrirlanadi).
 """
 
+import asyncio
 import logging
 import os
 import re
+import time
 
 import httpx
 from telegram import Update
-from telegram.error import TelegramError
+from telegram.error import RetryAfter, TelegramError
 from telegram.ext import ContextTypes
 
 from config import STUDIO_API_BASE
@@ -32,6 +34,115 @@ from handlers.studio_upload import _presign_and_put, _auth_headers
 from handlers.studio_backfill import _fetch_movie_detail
 
 logger = logging.getLogger(__name__)
+
+# ── /joylash progress UI ────────────────────────────────────────────────────
+
+_BAR_LEN = 14
+_STAGE_LABEL = {
+    "download": "📥 Telegram'dan yuklab olinmoqda",
+    "prepare":  "🔄 Formatga tayyorlanmoqda (ffmpeg)",
+    "upload":   "☁️ R2 bulutiga yuklanmoqda",
+    "register": "📝 Studiya bazasiga ro'yxatga olinmoqda",
+}
+
+
+def _progress_bar(done: int, total: int) -> str:
+    filled = round(_BAR_LEN * done / total) if total else 0
+    filled = max(0, min(_BAR_LEN, filled))
+    return "▓" * filled + "░" * (_BAR_LEN - filled)
+
+
+def _item_label(kind: str, title: str, item: dict) -> str:
+    if kind == "m":
+        return f"🎬 {title}"
+    return f"📺 {title} — {item['season']}-fasl {item['episode']}-qism"
+
+
+def _render_progress(
+    *, title: str, kind: str, total: int, done: int, errors: int,
+    current_item: dict | None, stage: str | None,
+    recent: list[tuple[str, bool]],
+) -> str:
+    icon = "🎬" if kind == "m" else "📺"
+    lines = [f"🚀 *Joylanmoqda* — {icon} {title}", ""]
+    lines.append(f"{_progress_bar(done + errors, total)}  {done + errors}/{total}")
+    lines.append("")
+
+    if current_item is not None and stage:
+        lines.append(f"▶️ {_item_label(kind, title, current_item)}")
+        lines.append(f"   {_STAGE_LABEL.get(stage, stage)}...")
+        lines.append("")
+
+    if recent:
+        lines.append("*Oxirgi natijalar:*")
+        for label, ok in recent[-5:]:
+            lines.append(f"{'✅' if ok else '⚠️'} {label}")
+        lines.append("")
+
+    lines.append(f"✔️ Joylandi: {done}   ⚠️ Xatolar: {errors}   ⏳ Qoldi: {total - done - errors}")
+    return "\n".join(lines)
+
+
+class _ProgressPainter:
+    """Telegram flood-controliga tegib qolmaslik uchun tez-tez kelgan
+    edit_message_text so'rovlarini vaqt bo'yicha siqib (throttle) yuboradi --
+    stage o'zgarganda darhol emas, kamida _MIN_INTERVAL soniyada bir marta
+    (force=True bo'lsa har doim darhol)."""
+
+    _MIN_INTERVAL = 1.2
+
+    def __init__(self, context, chat_id: int, message_id: int, *, title: str, kind: str, total: int):
+        self._context = context
+        self._chat_id = chat_id
+        self._message_id = message_id
+        self._title = title
+        self._kind = kind
+        self._total = total
+        self._done = 0
+        self._errors = 0
+        self._recent: list[tuple[str, bool]] = []
+        self._last_edit = 0.0
+        self._last_text = ""
+
+    async def update(self, *, current_item: dict | None, stage: str | None, force: bool = False) -> None:
+        text = _render_progress(
+            title=self._title, kind=self._kind, total=self._total,
+            done=self._done, errors=self._errors,
+            current_item=current_item, stage=stage, recent=self._recent,
+        )
+        if text == self._last_text:
+            return
+        now = time.monotonic()
+        if not force and (now - self._last_edit) < self._MIN_INTERVAL:
+            return
+        self._last_edit = now
+        self._last_text = text
+        try:
+            await self._context.bot.edit_message_text(
+                chat_id=self._chat_id, message_id=self._message_id, text=text, parse_mode="Markdown",
+            )
+        except RetryAfter as e:
+            wait = min(e.retry_after, 20) + 1
+            await asyncio.sleep(wait)
+            try:
+                await self._context.bot.edit_message_text(
+                    chat_id=self._chat_id, message_id=self._message_id, text=text, parse_mode="Markdown",
+                )
+            except TelegramError:
+                pass
+        except TelegramError:
+            pass
+
+    def mark_done(self, label: str) -> None:
+        self._done += 1
+        self._recent.append((label, True))
+
+    def mark_error(self, label: str) -> None:
+        self._errors += 1
+        self._recent.append((label, False))
+
+    async def finish(self) -> None:
+        await self.update(current_item=None, stage=None, force=True)
 
 _SE_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
 _E_ONLY_RE = re.compile(r"^\s*(\d+)\s*$")
@@ -188,8 +299,6 @@ async def joylash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("ℹ️ Navbatda video yo'q.")
         return
 
-    status = await update.effective_message.reply_text(f"⏳ {len(queue)} ta video qayta ishlanmoqda...")
-
     detail = None
     title = "Kontent"
     if kind == "m":
@@ -198,25 +307,38 @@ async def joylash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         detail = await _fetch_series_detail(studio, content_id)
     title = _title_from_detail(detail, title)
 
-    done, errors = 0, 0
+    status = await update.effective_message.reply_text(
+        _render_progress(title=title, kind=kind, total=len(queue), done=0, errors=0,
+                          current_item=None, stage=None, recent=[]),
+        parse_mode="Markdown",
+    )
+    painter = _ProgressPainter(context, chat_id, status.message_id, title=title, kind=kind, total=len(queue))
+
     for item in queue:
         dl_path = None
         prepared_path = None
+        label = _item_label(kind, title, item)
         try:
+            await painter.update(current_item=item, stage="download")
             tg_file = await context.bot.get_file(item["file_id"], read_timeout=120, connect_timeout=30)
             dl_path = make_temp_path("mp4")
             await tg_file.download_to_drive(
                 dl_path, read_timeout=1800, connect_timeout=30, write_timeout=1800,
             )
 
+            await painter.update(current_item=item, stage="prepare")
             prepared_path, _changed = await _run_in_executor(prepare_for_telegram, dl_path)
 
+            await painter.update(current_item=item, stage="upload")
             if kind == "m":
                 filename = f"{title}.mp4"
                 public_url = await _presign_and_put(studio, prepared_path, "movies", filename)
                 if not public_url or public_url == "cancelled":
-                    errors += 1
+                    painter.mark_error(label)
+                    await painter.update(current_item=None, stage=None)
                     continue
+
+                await painter.update(current_item=item, stage="register")
                 async with httpx.AsyncClient(timeout=60) as client:
                     resp = await client.patch(
                         f"{STUDIO_API_BASE}/studios/{slug}/content/movies/{content_id}",
@@ -228,8 +350,11 @@ async def joylash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 filename = f"{title}_S{item['season']}E{item['episode']}.mp4"
                 public_url = await _presign_and_put(studio, prepared_path, "series", filename)
                 if not public_url or public_url == "cancelled":
-                    errors += 1
+                    painter.mark_error(label)
+                    await painter.update(current_item=None, stage=None)
                     continue
+
+                await painter.update(current_item=item, stage="register")
                 async with httpx.AsyncClient(timeout=60) as client:
                     resp = await client.post(
                         f"{STUDIO_API_BASE}/studios/{slug}/content/series/{content_id}/episodes",
@@ -240,7 +365,8 @@ async def joylash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if resp.status_code >= 300:
                 logger.warning("Ro'yxatga olishda xato: %s %s", resp.status_code, resp.text[:300])
-                errors += 1
+                painter.mark_error(label)
+                await painter.update(current_item=None, stage=None)
                 continue
 
             new_caption = caption_label + f"\n\n🔗 Video: {public_url}"
@@ -251,13 +377,16 @@ async def joylash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except TelegramError as e:
                 logger.warning("Caption tahrirlashda xato (message_id=%s): %s", item["message_id"], e)
 
-            done += 1
+            painter.mark_done(label)
+            await painter.update(current_item=None, stage=None)
         except TelegramError as e:
             logger.warning("Topic video qayta ishlashda xato (message_id=%s): %s", item["message_id"], e)
-            errors += 1
+            painter.mark_error(label)
+            await painter.update(current_item=None, stage=None)
         except Exception as e:
             logger.warning("Kutilmagan xato (message_id=%s): %s", item["message_id"], e)
-            errors += 1
+            painter.mark_error(label)
+            await painter.update(current_item=None, stage=None)
         finally:
             for p in (dl_path, prepared_path):
                 if p and os.path.exists(p):
@@ -267,4 +396,4 @@ async def joylash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         pass
 
     clear_queue(slug, topic_id)
-    await status.edit_text(f"✅ Tugadi!\n✔️ Joylandi: {done}\n⚠️ Xatolar: {errors}")
+    await painter.finish()
