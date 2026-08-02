@@ -82,7 +82,7 @@ from handlers.batch import (
 from handlers.r2_browser import r2_command, r2_callback, r2_rename_text, r2_mkdir_text, _show_r2_list_cb
 from handlers.save_restricted import (
     save_link_handler, save_topic_handler, save_confirm_callback, handle_save_new_topic_name,
-    audio_link_handler, save_audio_topic_handler,
+    audio_link_handler, save_audio_topic_handler, save_series_handler,
 )
 from handlers.kino_sender import kino_sender_handler, kino_callback_handler
 from handlers.netfilm_handler import netfilm_handler, netfilm_callback_handler
@@ -802,6 +802,7 @@ def main():
     app.add_handler(CommandHandler("r2", r2_command))
     app.add_handler(CommandHandler("batch", batch_command))
     app.add_handler(CommandHandler("save", save_topic_handler))
+    app.add_handler(CommandHandler("fasl_import", save_series_handler))
     app.add_handler(CommandHandler("savea", save_audio_topic_handler))
     app.add_handler(CommandHandler("a", audio_link_handler))
     app.add_handler(CommandHandler("kino", kino_sender_handler))
