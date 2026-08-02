@@ -1485,6 +1485,7 @@ async def save_series_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         scanned = 0
         dr_error = None
         type_samples = []
+        stub_ids = []
         last_update = time.monotonic()
         try:
             async for m in client.get_discussion_replies(src_chat, src_thread):
@@ -1492,18 +1493,22 @@ async def save_series_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                 if m.media:
                     media_ids.append(m.id)
                     captions[m.id] = m.caption or ""
-                elif len(type_samples) < 5:
-                    # Diagnostika uchun: media bo'lmagan xabar aslida
-                    # nima ekanini (matn/web-preview/boshqa) yozib qo'yamiz
-                    kinds = []
-                    if getattr(m, "video", None): kinds.append("video")
-                    if getattr(m, "document", None): kinds.append("document")
-                    if getattr(m, "photo", None): kinds.append("photo")
-                    if getattr(m, "web_page", None): kinds.append("web_page")
-                    if getattr(m, "text", None): kinds.append("text")
-                    if getattr(m, "reply_markup", None): kinds.append("has_buttons")
-                    if getattr(m, "service", None): kinds.append("service")
-                    type_samples.append(f"#{m.id}:{','.join(kinds) or 'none'}")
+                else:
+                    # get_discussion_replies topic uchun ko'pincha
+                    # QISQARTIRILGAN (stub) xabar qaytaradi — faqat ID/sana
+                    # bor, media/caption yo'q. Shu ID'larni keyinroq
+                    # get_messages bilan TO'LIQ qayta so'raymiz.
+                    stub_ids.append(m.id)
+                    if len(type_samples) < 5:
+                        kinds = []
+                        if getattr(m, "video", None): kinds.append("video")
+                        if getattr(m, "document", None): kinds.append("document")
+                        if getattr(m, "photo", None): kinds.append("photo")
+                        if getattr(m, "web_page", None): kinds.append("web_page")
+                        if getattr(m, "text", None): kinds.append("text")
+                        if getattr(m, "reply_markup", None): kinds.append("has_buttons")
+                        if getattr(m, "service", None): kinds.append("service")
+                        type_samples.append(f"#{m.id}:{','.join(kinds) or 'none'}")
                 now = time.monotonic()
                 if now - last_update >= 2.0:
                     last_update = now
@@ -1513,6 +1518,23 @@ async def save_series_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                         pass
         except Exception as e:
             dr_error = repr(e)
+
+        # Stub xabarlarni to'liq mazmuni bilan qayta so'raymiz (100 tadan
+        # bo'lib, Telegram limitiga mos).
+        refetch_error = None
+        if stub_ids:
+            try:
+                for i in range(0, len(stub_ids), 100):
+                    batch = stub_ids[i:i + 100]
+                    full_msgs = await client.get_messages(src_chat, batch)
+                    if not isinstance(full_msgs, list):
+                        full_msgs = [full_msgs]
+                    for fm in full_msgs:
+                        if fm and not fm.empty and fm.media:
+                            media_ids.append(fm.id)
+                            captions[fm.id] = fm.caption or ""
+            except Exception as e:
+                refetch_error = repr(e)
 
         media_ids = sorted(set(media_ids))
         if from_msg_id:
@@ -1581,6 +1603,8 @@ async def save_series_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             diag_lines = ["❌ Manba topicda media topilmadi.", "", "🩺 Diagnostika:"]
             diag_lines.append(f"• get_messages(root): {'xato: ' + root_error if root_error else 'OK'}")
             diag_lines.append(f"• get_discussion_replies: {scanned} ta xabar ko'rildi" + (f", xato: {dr_error}" if dr_error else ""))
+            if refetch_error:
+                diag_lines.append(f"• qayta so'rash xatosi: {refetch_error}")
             if type_samples:
                 diag_lines.append("• namunalar: " + " | ".join(type_samples))
             diag_lines.append(f"• qidiruv sarlavhasi: {title_query or 'topilmadi'}" + (f" (probe xato: {probe_error})" if probe_error else ""))
