@@ -1473,28 +1473,33 @@ async def save_series_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         media_ids = []
         captions: dict[int, str] = {}
+        root_error = None
         try:
             root = await client.get_messages(src_chat, src_thread)
             if root and not root.empty and root.media:
                 media_ids.append(root.id)
                 captions[root.id] = root.caption or ""
-        except Exception:
-            pass
+        except Exception as e:
+            root_error = repr(e)
 
         scanned = 0
+        dr_error = None
         last_update = time.monotonic()
-        async for m in client.get_discussion_replies(src_chat, src_thread):
-            scanned += 1
-            if m.media:
-                media_ids.append(m.id)
-                captions[m.id] = m.caption or ""
-            now = time.monotonic()
-            if now - last_update >= 2.0:
-                last_update = now
-                try:
-                    await status.edit_text(f"🔍 {scanned} xabar tekshirildi, {len(media_ids)} ta media topildi...")
-                except Exception:
-                    pass
+        try:
+            async for m in client.get_discussion_replies(src_chat, src_thread):
+                scanned += 1
+                if m.media:
+                    media_ids.append(m.id)
+                    captions[m.id] = m.caption or ""
+                now = time.monotonic()
+                if now - last_update >= 2.0:
+                    last_update = now
+                    try:
+                        await status.edit_text(f"🔍 {scanned} xabar tekshirildi, {len(media_ids)} ta media topildi...")
+                    except Exception:
+                        pass
+        except Exception as e:
+            dr_error = repr(e)
 
         media_ids = sorted(set(media_ids))
         if from_msg_id:
@@ -1510,20 +1515,37 @@ async def save_series_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         # mediali xabarlarni yig'amiz.
         if not media_ids:
             title_query = None
+            probe_error = None
             try:
-                root_msg = await client.get_messages(src_chat, src_thread)
-                cap = (root_msg.caption or root_msg.text or "") if root_msg and not root_msg.empty else ""
-                m_title = re.search(r'[“"]([^"”]{2,60})[”"]', cap)
-                if m_title:
-                    title_query = m_title.group(1).strip()
-                elif cap:
-                    title_query = cap.strip().splitlines()[0][:60]
-            except Exception:
-                pass
+                # src_thread'ning o'zida caption bo'lmasligi mumkin (masalan
+                # albomning caption'siz a'zosi). Shu sabab atrofdagi bir
+                # nechta xabarni tekshirib, birinchi topilgan captiondan
+                # sarlavhani chiqarib olamiz.
+                probe_ids = list(range(src_thread, src_thread + 20))
+                if from_msg_id:
+                    probe_ids += list(range(from_msg_id, from_msg_id + 5))
+                probe_msgs = await client.get_messages(src_chat, probe_ids)
+                if not isinstance(probe_msgs, list):
+                    probe_msgs = [probe_msgs]
+                for pm in probe_msgs:
+                    if not pm or pm.empty:
+                        continue
+                    cap = pm.caption or pm.text or ""
+                    if not cap.strip():
+                        continue
+                    m_title = re.search(r'[“"]([^"”]{2,60})[”"]', cap)
+                    if m_title:
+                        title_query = m_title.group(1).strip()
+                        break
+                    if title_query is None:
+                        title_query = cap.strip().splitlines()[0][:60]
+            except Exception as e:
+                probe_error = repr(e)
 
+            search_error = None
+            scanned_fb = 0
             if title_query:
                 try:
-                    scanned_fb = 0
                     async for m in client.search_messages(src_chat, query=title_query):
                         scanned_fb += 1
                         if m and not m.empty and m.media:
@@ -1538,12 +1560,18 @@ async def save_series_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                                 pass
                         if scanned_fb >= 500:
                             break
-                except Exception:
-                    pass
+                except Exception as e:
+                    search_error = repr(e)
                 media_ids = sorted(set(media_ids))
 
         if not media_ids:
-            await status.edit_text("❌ Manba topicda media topilmadi.")
+            diag_lines = ["❌ Manba topicda media topilmadi.", "", "🩺 Diagnostika:"]
+            diag_lines.append(f"• get_messages(root): {'xato: ' + root_error if root_error else 'OK'}")
+            diag_lines.append(f"• get_discussion_replies: {scanned} ta xabar ko'rildi" + (f", xato: {dr_error}" if dr_error else ""))
+            diag_lines.append(f"• qidiruv sarlavhasi: {title_query or 'topilmadi'}" + (f" (probe xato: {probe_error})" if probe_error else ""))
+            if title_query:
+                diag_lines.append(f"• search_messages: {scanned_fb} ta natija" + (f", xato: {search_error}" if search_error else ""))
+            await status.edit_text("\n".join(diag_lines))
             clear_task(user_id)
             return
 
