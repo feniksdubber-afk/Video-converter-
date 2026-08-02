@@ -1484,6 +1484,7 @@ async def save_series_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         scanned = 0
         dr_error = None
+        type_samples = []
         last_update = time.monotonic()
         try:
             async for m in client.get_discussion_replies(src_chat, src_thread):
@@ -1491,6 +1492,18 @@ async def save_series_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                 if m.media:
                     media_ids.append(m.id)
                     captions[m.id] = m.caption or ""
+                elif len(type_samples) < 5:
+                    # Diagnostika uchun: media bo'lmagan xabar aslida
+                    # nima ekanini (matn/web-preview/boshqa) yozib qo'yamiz
+                    kinds = []
+                    if getattr(m, "video", None): kinds.append("video")
+                    if getattr(m, "document", None): kinds.append("document")
+                    if getattr(m, "photo", None): kinds.append("photo")
+                    if getattr(m, "web_page", None): kinds.append("web_page")
+                    if getattr(m, "text", None): kinds.append("text")
+                    if getattr(m, "reply_markup", None): kinds.append("has_buttons")
+                    if getattr(m, "service", None): kinds.append("service")
+                    type_samples.append(f"#{m.id}:{','.join(kinds) or 'none'}")
                 now = time.monotonic()
                 if now - last_update >= 2.0:
                     last_update = now
@@ -1568,6 +1581,8 @@ async def save_series_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             diag_lines = ["❌ Manba topicda media topilmadi.", "", "🩺 Diagnostika:"]
             diag_lines.append(f"• get_messages(root): {'xato: ' + root_error if root_error else 'OK'}")
             diag_lines.append(f"• get_discussion_replies: {scanned} ta xabar ko'rildi" + (f", xato: {dr_error}" if dr_error else ""))
+            if type_samples:
+                diag_lines.append("• namunalar: " + " | ".join(type_samples))
             diag_lines.append(f"• qidiruv sarlavhasi: {title_query or 'topilmadi'}" + (f" (probe xato: {probe_error})" if probe_error else ""))
             if title_query:
                 diag_lines.append(f"• search_messages: {scanned_fb} ta natija" + (f", xato: {search_error}" if search_error else ""))
