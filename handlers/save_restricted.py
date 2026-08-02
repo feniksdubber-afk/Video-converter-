@@ -403,10 +403,22 @@ def parse_topic_link(text: str):
     """chat_id, thread_id, from_msg_id ni qaytaradi.
     from_msg_id — havolada 3-segment (konkret xabar) bo'lsa shu, aks holda None.
     Masalan: t.me/c/123/12616/12617 → thread_id=12616, from_msg_id=12617
-             t.me/c/123/12616        → thread_id=12616, from_msg_id=None"""
+             t.me/c/123/12616        → thread_id=12616, from_msg_id=None
+    Ochiq (username) kanallar uchun ham ishlaydi:
+             t.me/Minxotv_Arxiv/9352/9360 → chat_id="Minxotv_Arxiv" (username),
+             thread_id=9352, from_msg_id=9360
+    chat_id qaytishi mumkin: int (yopiq guruh/kanal, -100... ko'rinishida)
+    yoki str (ochiq kanal username'i) — ikkalasi ham Pyrogram uchun to'g'ri
+    identifikator."""
     m = re.search(r"https?://t\.me/c/(\d+)/(\d+)(?:/(\d+))?", text)
     if m:
         chat_id = int("-100" + m.group(1))
+        thread_id = int(m.group(2))
+        from_msg_id = int(m.group(3)) if m.group(3) else None
+        return chat_id, thread_id, from_msg_id
+    m = re.search(r"https?://t\.me/([A-Za-z][A-Za-z0-9_]{3,31})/(\d+)(?:/(\d+))?", text)
+    if m and m.group(1).lower() not in ("c", "s", "share", "joinchat"):
+        chat_id = "@" + m.group(1)
         thread_id = int(m.group(2))
         from_msg_id = int(m.group(3)) if m.group(3) else None
         return chat_id, thread_id, from_msg_id
@@ -414,6 +426,20 @@ def parse_topic_link(text: str):
 
 
 async def _resolve_peer_safe(client: Client, chat_id):
+    if isinstance(chat_id, str):
+        # Username (masalan "@Minxotv_Arxiv") — resolve_peer buni ham
+        # to'g'ridan-to'g'ri qabul qiladi, kanal ochiq bo'lsa userbot
+        # a'zo bo'lmasa ham ishlaydi.
+        try:
+            await client.resolve_peer(chat_id)
+            return True
+        except Exception:
+            pass
+        try:
+            await client.get_chat(chat_id)
+            return True
+        except Exception:
+            return False
     try:
         await client.resolve_peer(chat_id)
         return True
@@ -507,6 +533,7 @@ async def _download_and_send(
     report=None,
     chunk_delay: float = 0.0,
     send_gate=None,
+    caption_override: str | None = None,
 ) -> bool:
     from utils.sender import send_file, _r2_pending
     from utils.db import is_already_saved, mark_saved
@@ -641,7 +668,7 @@ async def _download_and_send(
             except Exception:
                 pass
 
-        caption = msg.caption or ""
+        caption = caption_override if caption_override is not None else (msg.caption or "")
         from utils.db import db_load
         settings = await db_load(user_id)
 
@@ -756,6 +783,45 @@ async def _get_album_messages(client: Client, chat_id, msg) -> list:
     return parts
 
 
+async def _try_fast_copy(
+    client: Client, from_chat, msg, dest_chat_id: int, dest_thread_id: int | None,
+    caption_override: str | None, report=None,
+) -> bool:
+    """Ba'zi manba guruh/kanallarda kontent ulashish CHEKLANMAGAN (himoyalanmagan
+    emas). Bunday holda Telegram serverlari orqali to'g'ridan-to'g'ri nusxalash
+    mumkin (file_id asosida, copy_message/copy_media_group) — bizning serverimiz
+    faylni umuman yuklab olmaydi va qayta yubormaydi, shuning uchun bir necha
+    barobar tezroq va disk/trafik sarflamaydi. Manba "himoyalangan kontent"
+    (forward taqiqlangan) bo'lsa Telegram xato qaytaradi — False qaytariladi va
+    chaqiruvchi avvalgi (yuklab-qayta yuborish) usulga o'tadi."""
+    try:
+        kwargs = {}
+        if dest_thread_id:
+            # MUHIM: shu Pyrogram versiyasida (2.0.106) forum topic'ga
+            # reply_to_message_id orqali yo'naltiriladi (sender.py'dagi
+            # xuddi shu izohga qarang).
+            kwargs["reply_to_message_id"] = dest_thread_id
+        if caption_override is not None:
+            kwargs["caption"] = caption_override
+        if getattr(msg, "media_group_id", None):
+            await client.copy_media_group(
+                chat_id=dest_chat_id, from_chat_id=from_chat, message_id=msg.id, **kwargs,
+            )
+        else:
+            await client.copy_message(
+                chat_id=dest_chat_id, from_chat_id=from_chat, message_id=msg.id, **kwargs,
+            )
+        if report:
+            report("⚡ to'g'ridan nusxalandi (disksiz)")
+        return True
+    except Exception as e:
+        logger.info(
+            "Tez nusxalash muvaffaqiyatsiz (%s uchun) — sekin (yuklab-qayta "
+            "yuborish) usulga o'tiladi: %s", msg.id, e,
+        )
+        return False
+
+
 async def _download_and_send_one(
     client: Client,
     from_chat,
@@ -770,6 +836,7 @@ async def _download_and_send_one(
     report=None,
     chunk_delay: float = 0.0,
     send_gate=None,
+    caption_override: str | None = None,
 ) -> bool:
     try:
         await _resolve_peer_safe(client, from_chat)
@@ -780,6 +847,26 @@ async def _download_and_send_one(
             if send_gate is not None:
                 send_gate.advance()
             return False
+
+        # ⚡ Avval tez (disksiz) yo'lni sinaymiz. Guruhdagi tartibni saqlash
+        # uchun bu yerda ham o'z navbatimizni kutamiz — muvaffaqiyatli
+        # bo'lsa navbat shu yerda bo'shatiladi va pastdagi sekin yo'lga
+        # umuman tushmaymiz.
+        if send_gate is not None:
+            if report:
+                report("⏳ navbatda (nusxalash uchun)")
+            await send_gate.wait_turn()
+        if await _try_fast_copy(client, from_chat, msg, dest_chat_id, dest_thread_id, caption_override, report=report):
+            if send_gate is not None:
+                send_gate.advance()
+            try:
+                from utils.db import mark_saved
+                source_chat_id = getattr(getattr(msg, "chat", None), "id", None)
+                if source_chat_id is not None:
+                    await mark_saved(source_chat_id, msg.id, dest_chat_id, dest_thread_id)
+            except Exception:
+                pass
+            return True
 
         album = await _get_album_messages(client, from_chat, msg)
         ok_any = False
@@ -793,11 +880,15 @@ async def _download_and_send_one(
             # ichida allaqachon ketma-ket yuboriladi (parallel emas) — shu
             # sababli faqat BIRINCHI qism navbatni kutadi/bo'shatadi. Qolgan
             # qismlar send_gate'siz, lekin baribir tartibli yuboriladi.
+            # (Bu yerga faqat tez nusxalash muvaffaqiyatsiz bo'lganda
+            # yetib kelamiz — navbat allaqachon shu turn uchun ochilgan,
+            # shuning uchun wait_turn() darhol o'tadi, qayta bloklanmaydi.)
             part_gate = send_gate if i == 0 else None
             if await _download_and_send(
                 client, part, status_msg, user_id,
                 dest_chat_id, dest_thread_id, bot, silent=silent, report=report,
                 chunk_delay=chunk_delay, send_gate=part_gate,
+                caption_override=caption_override if i == 0 else None,
             ):
                 ok_any = True
             await asyncio.sleep(0.8)
@@ -824,7 +915,7 @@ async def _download_and_send_one(
         return await _download_and_send_one(
             client, from_chat, msg_id, status_msg, user_id,
             dest_chat_id, dest_thread_id, bot, _retry + 1, silent=silent, report=report,
-            chunk_delay=chunk_delay,
+            chunk_delay=chunk_delay, caption_override=caption_override,
         )
     except OSError as e:
         if _retry < 3:
@@ -832,7 +923,7 @@ async def _download_and_send_one(
             return await _download_and_send_one(
                 client, from_chat, msg_id, status_msg, user_id,
                 dest_chat_id, dest_thread_id, bot, _retry + 1, silent=silent, report=report,
-                chunk_delay=chunk_delay,
+                chunk_delay=chunk_delay, caption_override=caption_override,
             )
         logger.error("msg %s OSError: %s", msg_id, e)
         return False
@@ -913,6 +1004,7 @@ async def _send_batch(
     bot_data: dict | None = None,
     batch_concurrency: int = _DEFAULT_BATCH_CONCURRENCY,
     chunk_delay: float = 0.0,
+    caption_map: dict[int, str] | None = None,
 ):
     total = len(ids)
     if total == 0:
@@ -952,6 +1044,7 @@ async def _send_batch(
                 client, from_chat, mid, status_msg, user_id,
                 dest_chat_id, dest_thread_id, bot, silent=True, report=_report,
                 chunk_delay=chunk_delay, send_gate=send_gate.bind(turn),
+                caption_override=(caption_map or {}).get(mid),
             )
             slots.pop(slot, None)
             async with lock:
@@ -1011,6 +1104,7 @@ async def _send_batch(
         bot_data[retry_key] = {
             "chat_id": from_chat, "ids": failed_ids,
             "user_id": user_id, "dest_chat": dest_chat_id, "dest_thread": dest_thread_id,
+            "caption_map": caption_map,
         }
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton(f"🔁 Qayta urinish ({len(failed_ids)})", callback_data=f"sr_retry|{retry_key}"),
@@ -1266,6 +1360,210 @@ async def save_topic_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await status.edit_text(f"❌ Xato: {e}")
 
 
+_EPISODE_PATTERNS = [
+    re.compile(r"(\d{1,4})\s*[-–—]\s*qism", re.IGNORECASE),
+    re.compile(r"(\d{1,4})\s*[-–—]\s*epizod", re.IGNORECASE),
+    re.compile(r"(\d{1,4})\s*[-–—]\s*seriya", re.IGNORECASE),
+    re.compile(r"(\d{1,4})\s*[-–—]\s*son\b", re.IGNORECASE),
+    re.compile(r"(\d{1,4})\s*[-–—]\s*final", re.IGNORECASE),  # "8-Final" — oxirgi qism, raqami baribir 8
+    re.compile(r"\bS\d{1,3}E(\d{1,4})\b", re.IGNORECASE),      # S01E08 uslubi (ustuvor — E12 emas, aniq S..E.. juftlik)
+    re.compile(r"(?<![A-Za-z0-9])E(\d{1,4})\b", re.IGNORECASE),  # yolg'iz "E08" (S bo'lmasa ham)
+    re.compile(r"[\[\(]\s*(\d{1,4})\s*[\]\)]"),                # "[08]" kabi qavs ichidagi raqam
+]
+
+_SEASON_PATTERNS = [
+    re.compile(r"(\d{1,3})\s*[-–—]\s*fasl", re.IGNORECASE),
+    re.compile(r"(\d{1,3})\s*[-–—]\s*mavsum", re.IGNORECASE),
+    re.compile(r"\bS(\d{1,3})E\d{1,4}\b", re.IGNORECASE),      # S01E08 uslubi
+]
+
+
+def _detect_episode(caption: str) -> int | None:
+    if not caption:
+        return None
+    for pat in _EPISODE_PATTERNS:
+        m = pat.search(caption)
+        if m:
+            try:
+                return int(m.group(1))
+            except (ValueError, IndexError):
+                continue
+    return None
+
+
+def _detect_season(caption: str) -> int | None:
+    if not caption:
+        return None
+    for pat in _SEASON_PATTERNS:
+        m = pat.search(caption)
+        if m:
+            try:
+                return int(m.group(1))
+            except (ValueError, IndexError):
+                continue
+    return None
+
+
+async def save_series_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/fasl_import <havola> [fasl_raqami]
+
+    Boshqa (ochiq yoki yopiq) guruhning bitta topic'idagi barcha
+    qismlarni skanlab, JORIY topic'ga (buyruq qaysi topicda yozilgan
+    bo'lsa o'shanga) "<fasl>-<qism>" (masalan 1-1, 1-2, 1-3...)
+    sarlavhasi bilan joylaydi.
+
+    Har bir faylning ASL tavsifidan (caption) fasl/qism raqami avtomatik
+    aniqlanishga harakat qilinadi ("8-Final", "3-fasl 5-qism", "S01E08"
+    kabi formatlar tushuniladi). Agar caption'dan hech narsa topilmasa —
+    berilgan <fasl_raqami> (yoki topilmasa 1) va ketma-ket qism raqami
+    ishlatiladi.
+
+    Foydalanish (ElevenStudio guruhidagi kerakli topic ichida):
+      /fasl_import https://t.me/Minxotv_Arxiv/9352/9360
+      /fasl_import https://t.me/Minxotv_Arxiv/9352/9360 1   (fasl aniq bo'lmasa shu ishlatiladi)
+    """
+    args = update.message.text.split(maxsplit=2)
+    if len(args) < 2:
+        await update.message.reply_text(
+            "❗ Foydalanish:\n"
+            "`/fasl_import <havola> [fasl_raqami]`\n\n"
+            "Misol:\n`/fasl_import https://t.me/Minxotv_Arxiv/9352/9360`\n\n"
+            "Fasl/qism raqami tavsifdan (caption) avtomatik aniqlanadi. "
+            "Aniqlanmasa, siz bergan fasl_raqami (yoki 1) va ketma-ket "
+            "qism raqami ishlatiladi.\n\n"
+            "Bu buyruqni albatta filmingiz/serialingiz *o'z topic'i ichida* yozing.",
+            parse_mode="Markdown",
+        )
+        return
+
+    link_text = args[1]
+    default_season = 1
+    if len(args) >= 3 and args[2].strip().isdigit():
+        default_season = int(args[2].strip())
+
+    dest_thread = getattr(update.message, "message_thread_id", None)
+    if not dest_thread:
+        await update.message.reply_text(
+            "⚠️ Bu buyruqni umumiy chatda emas, kerakli *topic ichida* yozing — "
+            "aks holda qaysi topicga joylashni bilmayman.",
+            parse_mode="Markdown",
+        )
+        return
+    dest_chat = update.effective_chat.id
+
+    client = await get_user_client()
+    if client is None:
+        await update.message.reply_text("⚠️ Save Restricted sozlanmagan.")
+        return
+
+    src_chat, src_thread, from_msg_id = parse_topic_link(link_text)
+    if not src_chat or not src_thread:
+        await update.message.reply_text("❌ Havola xato. `t.me/c/...` yoki `t.me/username/...` formatida bo'lishi kerak.", parse_mode="Markdown")
+        return
+
+    status = await update.message.reply_text("🔍 Manba topic skanlanmoqda...")
+    user_id = update.effective_user.id
+    register_task(user_id, label=f"Fasl import: {default_season}-fasl")
+
+    try:
+        if not await _resolve_peer_safe(client, src_chat):
+            await status.edit_text("❌ Manba guruh/kanalga ulanib bo'lmadi — userbot u yerga a'zo emas yoki username xato.")
+            clear_task(user_id)
+            return
+
+        media_ids = []
+        captions: dict[int, str] = {}
+        try:
+            root = await client.get_messages(src_chat, src_thread)
+            if root and not root.empty and root.media:
+                media_ids.append(root.id)
+                captions[root.id] = root.caption or ""
+        except Exception:
+            pass
+
+        scanned = 0
+        last_update = time.monotonic()
+        async for m in client.get_discussion_replies(src_chat, src_thread):
+            scanned += 1
+            if m.media:
+                media_ids.append(m.id)
+                captions[m.id] = m.caption or ""
+            now = time.monotonic()
+            if now - last_update >= 2.0:
+                last_update = now
+                try:
+                    await status.edit_text(f"🔍 {scanned} xabar tekshirildi, {len(media_ids)} ta media topildi...")
+                except Exception:
+                    pass
+
+        media_ids = sorted(set(media_ids))
+        if from_msg_id:
+            media_ids = [mid for mid in media_ids if mid >= from_msg_id]
+
+        if not media_ids:
+            await status.edit_text("❌ Manba topicda media topilmadi.")
+            clear_task(user_id)
+            return
+
+        # Har bir fayl uchun avval ASL caption'dan fasl/qism raqamini
+        # aniqlashga harakat qilamiz. Topilmasa — berilgan/standart fasl
+        # va shu fasl ichidagi navbatdagi bo'sh qism raqami ishlatiladi
+        # (band qilingan raqamlar bilan to'qnashmasligi uchun).
+        caption_map: dict[int, str] = {}
+        used_pairs: set[tuple[int, int]] = set()
+        auto_detected = 0
+
+        # Birinchi o'tishda — caption'dan aniq topilgan (fasl, qism)
+        # juftliklarini oldindan "band" qilib qo'yamiz, shunda ikkinchi
+        # o'tishdagi avtomatik hisoblagich ularga to'qnashmaydi.
+        detected: dict[int, tuple[int, int]] = {}
+        for mid in media_ids:
+            cap = captions.get(mid, "")
+            ep = _detect_episode(cap)
+            if ep is not None:
+                ssn = _detect_season(cap) or default_season
+                detected[mid] = (ssn, ep)
+                used_pairs.add((ssn, ep))
+
+        next_ep_for_season: dict[int, int] = {}
+        for mid in media_ids:
+            if mid in detected:
+                ssn, ep = detected[mid]
+                auto_detected += 1
+            else:
+                ssn = _detect_season(captions.get(mid, "")) or default_season
+                ep = next_ep_for_season.get(ssn, 1)
+                while (ssn, ep) in used_pairs:
+                    ep += 1
+                used_pairs.add((ssn, ep))
+                next_ep_for_season[ssn] = ep + 1
+            caption_map[mid] = f"{ssn}-{ep}"
+
+        count = len(media_ids)
+
+        sr_cfg = await _load_sr_settings(user_id)
+        batch_conc = await _smart_batch_concurrency(sr_cfg["parallel"])
+        chunk_delay = _smart_chunk_delay()
+
+        preview = ", ".join(list(caption_map.values())[:5]) + ("..." if count > 5 else "")
+        detect_note = f"\n🔎 {auto_detected}/{count} tasida fasl/qism tavsifdan avtomatik aniqlandi." if auto_detected else "\n⚠️ Tavsiflardan aniqlanmadi — ketma-ket raqamlanadi."
+        await status.edit_text(
+            f"📦 {count} ta qism topildi: {preview}{detect_note}",
+            parse_mode="Markdown",
+            reply_markup=_refresh_kb(status.message_id),
+        )
+        await _send_batch(
+            client, src_chat, media_ids, status, user_id, dest_chat, dest_thread, context.bot,
+            context.bot_data, batch_concurrency=batch_conc, chunk_delay=chunk_delay,
+            caption_map=caption_map,
+        )
+        clear_task(user_id)
+    except Exception as e:
+        logger.error("save_series_handler: %s", e, exc_info=True)
+        clear_task(user_id)
+        await status.edit_text(f"❌ Xato: {e}")
+
+
 async def _continue_link_save(key: str, dest_chat: int, dest_thread: int | None, bot, status_ref, bot_data: dict):
     """Topic tanlangandan keyin — bitta havola (link) saqlashni davom ettiradi."""
     pending = bot_data.pop(key, None)
@@ -1454,6 +1752,7 @@ async def save_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TY
             uid, data["dest_chat"], data["dest_thread"], context.bot, context.bot_data,
             batch_concurrency=await _smart_batch_concurrency(sr_cfg["parallel"]),
             chunk_delay=_smart_chunk_delay(),
+            caption_map=data.get("caption_map"),
         )
         clear_task(uid)
         return
