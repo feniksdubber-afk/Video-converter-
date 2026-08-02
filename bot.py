@@ -754,6 +754,20 @@ async def _post_init(app):
     logger.info("✅ Auth whitelist yuklandi.")
     _cleanup_temp_dir()
 
+    async def _autotopic_loop():
+        from utils.studio_autotopic import sync_all_studio_topics
+        # Bot to'liq ishga tushishini kutamiz, so'ng har 2 daqiqada studiya
+        # kontentlarini tekshirib, topic'i yo'qlarga avtomatik topic ochadi.
+        await asyncio.sleep(20)
+        while True:
+            try:
+                await sync_all_studio_topics(app)
+            except Exception as e:
+                logger.warning("Avtomatik topic tsiklida xato: %s", e)
+            await asyncio.sleep(120)
+
+    asyncio.create_task(_autotopic_loop())
+
 
 def main():
     if not BOT_TOKEN:
@@ -808,6 +822,17 @@ def main():
     from handlers.studio_backfill import backfill_command, cancel_backfill_command
     app.add_handler(CommandHandler("kontent_toldirish", backfill_command))
     app.add_handler(CommandHandler("toldirish_toxtat", cancel_backfill_command))
+
+    from handlers.studio_topic_upload import on_topic_video_message, joylash_command
+    app.add_handler(CommandHandler("joylash", joylash_command))
+    # Studiya guruhi kontent topic'larida tashlangan xom videolarni navbatga
+    # yozib oladi (darhol ishlamaydi -- /joylash kutadi). filters.ChatType.GROUPS
+    # bilan cheklangani uchun shaxsiy chatdagi konvertatsiya oqimiga
+    # (pastdagi PRIVATE handler) ta'sir qilmaydi.
+    app.add_handler(MessageHandler(
+        (filters.VIDEO | filters.Document.VIDEO) & filters.ChatType.GROUPS,
+        on_topic_video_message,
+    ))
 
     # MUHIM: video/fayl/audio/rasm qabul qilish va "✅ Video qabul qilindi"
     # kabi konvertatsiya menyusi FAQAT shaxsiy chatda (bot bilan 1:1) ishlashi
