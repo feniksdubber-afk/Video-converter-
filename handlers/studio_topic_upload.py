@@ -25,7 +25,8 @@ from telegram.error import RetryAfter, TelegramError
 from telegram.ext import ContextTypes
 
 from config import STUDIO_API_BASE
-from utils.studio_auth import get_bound_studio
+from utils.shared_db import get_manager_studios
+from utils.studio_auth import get_bound_studio, bind_user
 from utils.studio_group import get_slug_by_chat_id, get_content_key_by_topic, set_topic_id
 from utils.studio_topic_queue import add_item, get_queue, clear_queue
 from utils.ffmpeg_utils import prepare_for_telegram, _run_in_executor, make_temp_path
@@ -256,10 +257,12 @@ async def _fetch_series_detail(studio: dict, series_id: str) -> dict | None:
     return data.get("series") if isinstance(data, dict) and "series" in data else data
 
 
-def _resolve_topic_context(update: Update):
+def _resolve_topic_context(update: Update) -> tuple | None:
     """Guruh/topic'dan slug + content_key'ni aniqlaydi.
     Qaytaradi: (studio, slug, chat_id, topic_id, kind, content_id) yoki
-    None qiymatlar bilan tuple, agar mos kelmasa."""
+    None -- bu guruh/topic botga umuman aloqador emasligini bildiradi
+    (bunday holatda jim turish to'g'ri, chunki bot ko'p begona guruhda ham
+    bo'lishi mumkin)."""
     message = update.effective_message
     chat = update.effective_chat
     if not chat or chat.type not in ("group", "supergroup"):
@@ -275,11 +278,62 @@ def _resolve_topic_context(update: Update):
         return None
     kind, content_id = content_key.split("_", 1)
 
-    studio = get_bound_studio(update.effective_user.id) if update.effective_user else None
-    if not studio or studio.get("slug") != slug:
+    user_id = update.effective_user.id if update.effective_user else None
+    if not user_id:
         return None
 
+    studio = get_bound_studio(user_id)
+    if not studio or studio.get("slug") != slug:
+        # Bu guruh aniq shu studiyaga bog'langan -- agar foydalanuvchi asosiy
+        # platformada (AfsonaMovieBot) haqiqatan ham shu studiyaga menejer
+        # bo'lsa, lekin botda hali "bog'lanmagan" bo'lsa (masalan hech qachon
+        # shaxsiy chatda /start bosmagan) -- shu yerning o'zida avtomatik
+        # bog'laymiz. Aks holda guruhga video tashlashning o'zi ishlamay,
+        # sababi tushunarsiz qolib ketardi.
+        candidates = get_manager_studios(user_id)
+        match = next((s for s in candidates if s["slug"] == slug), None)
+        if not match:
+            return None
+        bind_user(user_id, match)
+        studio = get_bound_studio(user_id)
+        if not studio:
+            return None
+
     return studio, slug, chat.id, topic_id, kind, content_id
+
+
+def _explain_unresolved(update: Update) -> str | None:
+    """_resolve_topic_context() None qaytarganda, sababini foydalanuvchiga
+    tushuntirish uchun qisqa matn tanlaydi. Agar bu guruh/topic botga umuman
+    aloqador bo'lmasa (masalan begona guruh) -- None qaytaradi, chaqiruvchi
+    hech narsa yozmasligi kerak."""
+    message = update.effective_message
+    chat = update.effective_chat
+    if not chat or chat.type not in ("group", "supergroup"):
+        return None
+    topic_id = message.message_thread_id
+    if not topic_id:
+        return None
+    slug = get_slug_by_chat_id(chat.id)
+    if not slug:
+        return None  # bu guruh botga umuman bog'lanmagan -- jim turamiz
+    content_key = get_content_key_by_topic(slug, topic_id)
+    if not content_key:
+        return (
+            "⚠️ Bu topic hali hech qanday film/serialga bog'lanmagan.\n"
+            "`/bogla m 45` yoki `/bogla s 123` bilan bog'lang "
+            "(ID'ni MiniApp -> Studiya paneli -> kontent ro'yxatidan oling)."
+        )
+    user_id = update.effective_user.id if update.effective_user else None
+    if not user_id:
+        return None
+    candidates = get_manager_studios(user_id)
+    if not any(s["slug"] == slug for s in candidates):
+        return (
+            "⛔ Siz bu studiyaning menejeri sifatida aniqlanmadingiz.\n"
+            "Agar menejer bo'lsangiz, Bosh admin bilan bog'laning."
+        )
+    return None  # boshqa noaniq holat -- jim turamiz
 
 
 async def bogla_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -329,7 +383,10 @@ async def on_topic_video_message(update: Update, context: ContextTypes.DEFAULT_T
     """Topic ichiga tashlangan video(lar)ni navbatga qo'shadi (darhol ishlamaydi)."""
     ctx = _resolve_topic_context(update)
     if not ctx:
-        return  # bog'liq bo'lmagan guruh/topic yoki tanilmagan foydalanuvchi -- e'tibor bermaymiz
+        hint = _explain_unresolved(update)
+        if hint:
+            await update.effective_message.reply_text(hint, parse_mode="Markdown")
+        return  # bog'liq bo'lmagan guruh/topic -- jim turamiz
     studio, slug, chat_id, topic_id, kind, content_id = ctx
 
     message = update.effective_message
@@ -371,9 +428,10 @@ async def joylash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Navbatdagi barcha videolarni ketma-ket qayta ishlaydi va joylaydi."""
     ctx = _resolve_topic_context(update)
     if not ctx:
-        await update.effective_message.reply_text(
+        hint = _explain_unresolved(update) or (
             "⚠️ Bu buyruq faqat studiyangizga bog'langan guruhning kontent topic'ida ishlaydi."
         )
+        await update.effective_message.reply_text(hint, parse_mode="Markdown")
         return
     studio, slug, chat_id, topic_id, kind, content_id = ctx
 
