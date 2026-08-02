@@ -203,9 +203,11 @@ async def joylash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         dl_path = None
         prepared_path = None
         try:
-            tg_file = await context.bot.get_file(item["file_id"])
+            tg_file = await context.bot.get_file(item["file_id"], read_timeout=120, connect_timeout=30)
             dl_path = make_temp_path("mp4")
-            await tg_file.download_to_drive(dl_path)
+            await tg_file.download_to_drive(
+                dl_path, read_timeout=1800, connect_timeout=30, write_timeout=1800,
+            )
 
             prepared_path, _changed = await _run_in_executor(prepare_for_telegram, dl_path)
 
