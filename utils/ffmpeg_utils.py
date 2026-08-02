@@ -473,6 +473,82 @@ def softsub_video(video_path: str, subtitle_path: str) -> tuple[bool, str, str]:
 
 # ── Yordamchi: video o'lchamini olish ────────────────────────────────────────
 
+def get_stream_info(input_path: str) -> dict:
+    """Video codec, pixel format va audio codec'ni bitta so'rovda qaytaradi.
+    Xato bo'lsa bo'sh qiymatlar bilan qaytadi."""
+    info = {"vcodec": "", "pixfmt": "", "acodec": ""}
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name,pix_fmt", "-of", "csv=p=0", input_path],
+            capture_output=True, text=True, timeout=15,
+        )
+        parts = r.stdout.strip().split(",")
+        if len(parts) >= 1:
+            info["vcodec"] = parts[0]
+        if len(parts) >= 2:
+            info["pixfmt"] = parts[1]
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=codec_name", "-of", "csv=p=0", input_path],
+            capture_output=True, text=True, timeout=15,
+        )
+        info["acodec"] = r.stdout.strip()
+    except Exception:
+        pass
+    return info
+
+
+def prepare_for_telegram(input_path: str) -> tuple[str, bool]:
+    """MiniApp'dagi Termux/Kompyuter yuklash skriptidagi `prepare_video()`
+    bilan bir xil mantiq: agar fayl allaqachon universal mos bo'lsa
+    (mp4 konteyner + h264 + yuv420p + aac), faqat faststart (moov atom
+    boshiga) qo'llaniladi -- tez, sifat yo'qolmaydi. Aks holda to'liq
+    H.264 High/yuv420p/AAC'ga qayta kodlanadi (barcha qurilmalar,
+    ayniqsa iPhone/Safari uchun mos).
+
+    Qaytaradi: (natija_fayl_yo'li, o'zgartirilganmi).
+    Agar ffmpeg/ffprobe topilmasa yoki xato bo'lsa, original yo'lni va
+    False'ni qaytaradi (chaqiruvchi originalni ishlatishda davom etadi).
+    """
+    ext = os.path.splitext(input_path)[1].lower().lstrip(".")
+    info = get_stream_info(input_path)
+
+    if ext == "mp4" and info["vcodec"] == "h264" and info["pixfmt"] == "yuv420p" and info["acodec"] == "aac":
+        out_path = make_temp_path("mp4")
+        ok, err = run_ffmpeg(["-i", input_path, "-c", "copy", "-movflags", "+faststart", out_path], timeout=600)
+        if ok:
+            return out_path, True
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+        return input_path, False
+
+    out_path = make_temp_path("mp4")
+    threads = _thread_count()
+    args = [
+        "-i", input_path,
+        "-threads", threads,
+        "-c:v", "libx264", "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p",
+        "-preset", "veryfast", "-crf", "23",
+        "-c:a", "aac", "-profile:a", "aac_low", "-b:a", "128k", "-ac", "2", "-ar", "48000",
+        "-movflags", "+faststart",
+        out_path,
+    ]
+    ok, err = run_ffmpeg(args, timeout=7200)
+    if ok:
+        return out_path, True
+    try:
+        os.remove(out_path)
+    except OSError:
+        pass
+    return input_path, False
+
+
 def get_video_resolution(input_path: str) -> tuple[int, int]:
     """(kenglik, balandlik) qaytaradi. Xato bo'lsa (0, 0)."""
     try:
