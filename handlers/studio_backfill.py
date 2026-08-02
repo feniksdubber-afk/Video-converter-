@@ -36,7 +36,7 @@ from utils.studio_group import (
 from handlers.studio_group import ensure_topic, quality_label
 from handlers.studio_content import _fetch_list, _fetch_episodes
 from utils.sender import send_file, PYROGRAM_LIMIT, PYROGRAM_PREMIUM_LIMIT
-from utils.ffmpeg_utils import get_video_resolution
+from utils.ffmpeg_utils import get_video_resolution, prepare_for_telegram, _run_in_executor
 
 logger = logging.getLogger(__name__)
 
@@ -339,10 +339,16 @@ async def _send_one_video(context, message, chat_id, topic_id, url, filename, he
                 )
                 return None
 
+        # Termux/Kompyuter yuklash skriptidagi tekshiruv bilan bir xil:
+        # fayl allaqachon mp4/h264/yuv420p/aac bo'lsa faqat faststart
+        # qo'llaniladi (tez), aks holda to'liq qayta kodlanadi -- shunda
+        # Telegram'da video darhol (oxirigacha yuklanmasdan) ijro etiladi.
+        send_path, _prepared = await _run_in_executor(prepare_for_telegram, tmp_path)
+
         for attempt in range(3):
             try:
                 message_id = await send_file(
-                    message, tmp_path, filename, caption=caption, context=context,
+                    message, send_path, filename, caption=caption, context=context,
                     target_chat_id=chat_id, message_thread_id=topic_id,
                     force_upload_mode="video",
                 )
@@ -363,6 +369,11 @@ async def _send_one_video(context, message, chat_id, topic_id, url, filename, he
             os.remove(tmp_path)
         except OSError:
             pass
+        if 'send_path' in locals() and send_path != tmp_path:
+            try:
+                os.remove(send_path)
+            except OSError:
+                pass
     return message_id
 
 
