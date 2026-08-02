@@ -517,7 +517,7 @@ def prepare_for_telegram(input_path: str) -> tuple[str, bool]:
     ext = os.path.splitext(input_path)[1].lower().lstrip(".")
     info = get_stream_info(input_path)
 
-    if ext == "mp4" and info["vcodec"] == "h264" and info["pixfmt"] == "yuv420p" and info["acodec"] == "aac":
+    if ext == "mp4" and info["vcodec"] == "h264" and info["pixfmt"] in ("yuv420p", "yuvj420p") and info["acodec"] == "aac":
         out_path = make_temp_path("mp4")
         ok, err = run_ffmpeg(["-i", input_path, "-c", "copy", "-movflags", "+faststart", out_path], timeout=600)
         if ok:
