@@ -24,7 +24,7 @@ from telegram.ext import ContextTypes
 
 from config import STUDIO_API_BASE
 from utils.studio_auth import get_bound_studio
-from utils.studio_group import get_slug_by_chat_id, get_content_key_by_topic
+from utils.studio_group import get_slug_by_chat_id, get_content_key_by_topic, set_topic_id
 from utils.studio_topic_queue import add_item, get_queue, clear_queue
 from utils.ffmpeg_utils import prepare_for_telegram, _run_in_executor, make_temp_path
 from handlers.studio_group import quality_label
@@ -34,6 +34,7 @@ from handlers.studio_backfill import _fetch_movie_detail
 logger = logging.getLogger(__name__)
 
 _SE_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
+_E_ONLY_RE = re.compile(r"^\s*(\d+)\s*$")
 
 
 def _title_from_detail(detail: dict | None, fallback: str) -> str:
@@ -87,6 +88,49 @@ def _resolve_topic_context(update: Update):
     return studio, slug, chat.id, topic_id, kind, content_id
 
 
+async def bogla_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Qo'lda ochilgan (avtomatik yaratilmagan) topic'ni film/serialga bog'laydi.
+    Foydalanish: /bogla s 123   (serial, ID=123)
+                 /bogla m 45    (film, ID=45)"""
+    message = update.effective_message
+    chat = update.effective_chat
+    if not chat or chat.type not in ("group", "supergroup") or not message.message_thread_id:
+        await message.reply_text("⚠️ Bu buyruq faqat guruh topic'i ichida ishlaydi.")
+        return
+
+    slug = get_slug_by_chat_id(chat.id)
+    if not slug:
+        await message.reply_text("⚠️ Bu guruh hech qanday studiyaga bog'lanmagan.")
+        return
+
+    studio = get_bound_studio(update.effective_user.id) if update.effective_user else None
+    if not studio or studio.get("slug") != slug:
+        await message.reply_text("⛔ Siz bu studiyaning menejeri sifatida aniqlanmadingiz.")
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) != 3 or parts[1] not in ("m", "s") or not parts[2].isdigit():
+        await message.reply_text(
+            "Foydalanish:\n`/bogla s 123` — serial (ID=123)\n`/bogla m 45` — film (ID=45)\n\n"
+            "ID'ni MiniApp -> Studiya paneli -> kontent ro'yxatidan bilib olishingiz mumkin.",
+            parse_mode="Markdown",
+        )
+        return
+    kind, content_id = parts[1], parts[2]
+
+    if kind == "m":
+        detail = await _fetch_movie_detail(studio, content_id)
+    else:
+        detail = await _fetch_series_detail(studio, content_id)
+    if not detail:
+        await message.reply_text("❌ Shu ID bilan kontent topilmadi (yoki bu studiyaga tegishli emas).")
+        return
+    title = _title_from_detail(detail, f"#{content_id}")
+
+    set_topic_id(slug, f"{kind}_{content_id}", message.message_thread_id)
+    await message.reply_text(f"✅ Bu topic endi bog'landi: {'📺' if kind == 's' else '🎬'} {title}\n\nEndi video tashlab, /joylash yuborishingiz mumkin.")
+
+
 async def on_topic_video_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Topic ichiga tashlangan video(lar)ni navbatga qo'shadi (darhol ishlamaydi)."""
     ctx = _resolve_topic_context(update)
@@ -105,13 +149,19 @@ async def on_topic_video_message(update: Update, context: ContextTypes.DEFAULT_T
         season, episode = 0, 0
     else:
         m = _SE_RE.match(caption)
-        if not m:
-            await message.reply_text(
-                "⚠️ Serial qismi uchun caption \"fasl-qism\" shaklida bo'lishi kerak "
-                "(masalan: 2-5 = 2-fasl 5-qism). Bu video navbatga qo'shilmadi."
-            )
-            return
-        season, episode = int(m.group(1)), int(m.group(2))
+        if m:
+            season, episode = int(m.group(1)), int(m.group(2))
+        else:
+            m2 = _E_ONLY_RE.match(caption)
+            if m2:
+                season, episode = 1, int(m2.group(1))  # faqat raqam -> 1-fasl deb olinadi
+            else:
+                await message.reply_text(
+                    "⚠️ Serial qismi uchun caption'ga qism raqamini yozing (masalan: 3), "
+                    "yoki bir nechta mavsum bo'lsa \"fasl-qism\" shaklida (masalan: 2-5 = "
+                    "2-fasl 5-qism). Bu video navbatga qo'shilmadi."
+                )
+                return
 
     ok, err = add_item(slug, topic_id, message.message_id, season, episode, file_id)
     if not ok:
