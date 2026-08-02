@@ -39,47 +39,104 @@ logger = logging.getLogger(__name__)
 
 _BAR_LEN = 14
 _STAGE_LABEL = {
-    "download": "📥 Telegram'dan yuklab olinmoqda",
-    "prepare":  "🔄 Formatga tayyorlanmoqda (ffmpeg)",
-    "upload":   "☁️ R2 bulutiga yuklanmoqda",
-    "register": "📝 Studiya bazasiga ro'yxatga olinmoqda",
+    "download": "📥  Telegram'dan yuklab olinmoqda",
+    "prepare":  "🔄  Formatga tayyorlanmoqda (ffmpeg)",
+    "upload":   "☁️  R2 bulutiga yuklanmoqda",
+    "register": "📝  Studiya bazasiga ro'yxatga olinmoqda",
 }
 
 
 def _progress_bar(done: int, total: int) -> str:
     filled = round(_BAR_LEN * done / total) if total else 0
     filled = max(0, min(_BAR_LEN, filled))
-    return "▓" * filled + "░" * (_BAR_LEN - filled)
+    return "🟩" * filled + "⬜️" * (_BAR_LEN - filled)
 
 
 def _item_label(kind: str, title: str, item: dict) -> str:
     if kind == "m":
         return f"🎬 {title}"
-    return f"📺 {title} — {item['season']}-fasl {item['episode']}-qism"
+    return f"{item['season']}-fasl, {item['episode']}-qism"
+
+
+def _fmt_duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
 
 
 def _render_progress(
     *, title: str, kind: str, total: int, done: int, errors: int,
     current_item: dict | None, stage: str | None,
-    recent: list[tuple[str, bool]],
+    recent: list[tuple[str, bool]], elapsed: float,
 ) -> str:
     icon = "🎬" if kind == "m" else "📺"
-    lines = [f"🚀 *Joylanmoqda* — {icon} {title}", ""]
-    lines.append(f"{_progress_bar(done + errors, total)}  {done + errors}/{total}")
-    lines.append("")
+    processed = done + errors
+    pct = int(round(100 * processed / total)) if total else 0
+
+    lines = [
+        "✨━━━━━━━━━━━━━━━━━━━━━✨",
+        "     🚀 *STUDIYAGA JOYLASH*",
+        "✨━━━━━━━━━━━━━━━━━━━━━✨",
+        "",
+        f"{icon} *{title}*",
+        "",
+        f"{_progress_bar(processed, total)}",
+        f"*{pct}%*   ·   {processed}/{total} video",
+        "",
+    ]
 
     if current_item is not None and stage:
-        lines.append(f"▶️ {_item_label(kind, title, current_item)}")
-        lines.append(f"   {_STAGE_LABEL.get(stage, stage)}...")
-        lines.append("")
+        lines += [
+            "┌─ 🎯 *Joriy video* ─────────────",
+            f"│  ▶️ {_item_label(kind, title, current_item)}",
+            f"│  {_STAGE_LABEL.get(stage, stage)}...",
+            "└─────────────────────────────────",
+            "",
+        ]
 
     if recent:
-        lines.append("*Oxirgi natijalar:*")
+        lines.append("📋 *Oxirgi natijalar:*")
         for label, ok in recent[-5:]:
-            lines.append(f"{'✅' if ok else '⚠️'} {label}")
+            lines.append(f"  {'✅' if ok else '⚠️'} {label}")
         lines.append("")
 
-    lines.append(f"✔️ Joylandi: {done}   ⚠️ Xatolar: {errors}   ⏳ Qoldi: {total - done - errors}")
+    avg = elapsed / processed if processed else 0
+    eta = avg * (total - processed)
+    lines.append(f"🕓 O'tgan: {_fmt_duration(elapsed)}" + (f"   ·   ⏱ Qoldi: ~{_fmt_duration(eta)}" if processed < total else ""))
+    lines.append(f"✔️ Joylandi: *{done}*   ⚠️ Xatolar: *{errors}*   ⏳ Navbatda: *{total - processed}*")
+    return "\n".join(lines)
+
+
+def _render_finished(
+    *, title: str, kind: str, total: int, done: int, errors: int, elapsed: float,
+) -> str:
+    icon = "🎬" if kind == "m" else "📺"
+    all_ok = errors == 0
+    header = "🎉━━━━━━━━━━━━━━━━━━━━━🎉" if all_ok else "⚠️━━━━━━━━━━━━━━━━━━━━━⚠️"
+    title_line = "   ✅ *JOYLASH YAKUNLANDI!*" if all_ok else "   ☑️ *JOYLASH TUGADI (xatolar bilan)*"
+    lines = [
+        header,
+        title_line,
+        header,
+        "",
+        f"{icon} *{title}*",
+        "",
+        _progress_bar(total, total),
+        "*100%*",
+        "",
+        f"✔️ Muvaffaqiyatli joylandi: *{done}*",
+        f"⚠️ Xatolar: *{errors}*",
+        f"🕓 Jami vaqt: {_fmt_duration(elapsed)}",
+    ]
+    if all_ok:
+        lines.append("")
+        lines.append("🥳 Barcha videolar studiyaga muvaffaqiyatli joylandi!")
+    else:
+        lines.append("")
+        lines.append("ℹ️ Xatolik bergan videolarni qayta navbatga qo'shib, /joylash ni qayta yuboring.")
     return "\n".join(lines)
 
 
@@ -103,13 +160,26 @@ class _ProgressPainter:
         self._recent: list[tuple[str, bool]] = []
         self._last_edit = 0.0
         self._last_text = ""
+        self._started = time.monotonic()
 
     async def update(self, *, current_item: dict | None, stage: str | None, force: bool = False) -> None:
         text = _render_progress(
             title=self._title, kind=self._kind, total=self._total,
             done=self._done, errors=self._errors,
             current_item=current_item, stage=stage, recent=self._recent,
+            elapsed=time.monotonic() - self._started,
         )
+        await self._send(text, force=force)
+
+    async def finish(self) -> None:
+        text = _render_finished(
+            title=self._title, kind=self._kind, total=self._total,
+            done=self._done, errors=self._errors,
+            elapsed=time.monotonic() - self._started,
+        )
+        await self._send(text, force=True)
+
+    async def _send(self, text: str, *, force: bool) -> None:
         if text == self._last_text:
             return
         now = time.monotonic()
@@ -140,9 +210,6 @@ class _ProgressPainter:
     def mark_error(self, label: str) -> None:
         self._errors += 1
         self._recent.append((label, False))
-
-    async def finish(self) -> None:
-        await self.update(current_item=None, stage=None, force=True)
 
 _SE_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
 _E_ONLY_RE = re.compile(r"^\s*(\d+)\s*$")
@@ -309,7 +376,7 @@ async def joylash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     status = await update.effective_message.reply_text(
         _render_progress(title=title, kind=kind, total=len(queue), done=0, errors=0,
-                          current_item=None, stage=None, recent=[]),
+                          current_item=None, stage=None, recent=[], elapsed=0),
         parse_mode="Markdown",
     )
     painter = _ProgressPainter(context, chat_id, status.message_id, title=title, kind=kind, total=len(queue))
