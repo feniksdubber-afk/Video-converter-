@@ -600,7 +600,13 @@ async def _download_and_send(
                 limit_gb = _limit / 1024 / 1024 / 1024
                 if report:
                     report(f"⚠️ {short_name} {limit_gb:.0f}GB limitdan katta")
-                if not silent and _r2_ok():
+                # MUHIM: bu xabar status_msg'ni EDIT qilmaydi — batch rejimida
+                # (silent=True) status_msg umumiy progress xabari, uni bosib
+                # yozib qo'ysak umumiy progress ko'rinishi buziladi. Shu sababli
+                # doim ALOHIDA xabar sifatida yuboriladi, silent'dan qat'i nazar
+                # — bu chindan ham muhim/harakat talab qiladigan holat, oddiy
+                # progress emas.
+                if _r2_ok():
                     confirm_key = secrets.token_hex(4)
                     _big_file_pending[confirm_key] = {
                         "chat_id": source_chat_id,
@@ -611,11 +617,14 @@ async def _download_and_send(
                         "ts": time.time(),
                     }
                     try:
-                        await status_msg.edit_text(
-                            f"⚠️ *{filename}*\n"
-                            f"Hajmi: `{gb:.2f} GB` — userbot limiti (`{limit_gb:.0f} GB`) dan katta, "
-                            f"Telegram orqali yuklab bo'lmaydi.\n\n"
-                            f"☁️ R2'ga yuklashni istaysizmi?",
+                        await bot.send_message(
+                            chat_id=status_msg.chat_id,
+                            text=(
+                                f"⚠️ *{filename}*\n"
+                                f"Hajmi: `{gb:.2f} GB` — userbot limiti (`{limit_gb:.0f} GB`) dan katta, "
+                                f"Telegram orqali yuklab bo'lmaydi.\n\n"
+                                f"☁️ R2'ga yuklashni istaysizmi?"
+                            ),
                             parse_mode="Markdown",
                             reply_markup=InlineKeyboardMarkup([[
                                 InlineKeyboardButton("☁️ Ha, R2'ga yukla", callback_data=f"sr_r2big|{confirm_key}"),
@@ -624,13 +633,15 @@ async def _download_and_send(
                         )
                     except Exception:
                         pass
-                elif not silent:
+                else:
                     try:
-                        await status_msg.edit_text(
-                            f"❌ *{filename}* hajmi (`{gb:.2f} GB`) userbot limitidan "
-                            f"(`{limit_gb:.0f} GB`) katta — o'tkazib yuborildi.",
+                        await bot.send_message(
+                            chat_id=status_msg.chat_id,
+                            text=(
+                                f"❌ *{filename}* hajmi (`{gb:.2f} GB`) userbot limitidan "
+                                f"(`{limit_gb:.0f} GB`) katta — o'tkazib yuborildi."
+                            ),
                             parse_mode="Markdown",
-                            reply_markup=_refresh_kb(status_msg.message_id),
                         )
                     except Exception:
                         pass
