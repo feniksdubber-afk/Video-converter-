@@ -288,6 +288,11 @@ _user_client_premium: bool | None = None
 
 _progress_state: dict = {}
 
+# Limitdan katta fayllar uchun "R2'ga yuklaymizmi?" tasdiqlash kutilmoqda.
+# {confirm_key: {"chat_id", "msg_id", "filename", "file_size", "user_id", "ts"}}
+_big_file_pending: dict[str, dict] = {}
+_BIG_FILE_PENDING_TTL = 3600  # 1 soat
+
 
 async def get_user_client() -> Client | None:
     global _user_client, _user_client_premium
@@ -580,6 +585,56 @@ async def _download_and_send(
         file_size = getattr(media_obj, "file_size", 0) or 0
         total_mb = file_size / 1024 / 1024 if file_size else 0
         last_pct = [-1]
+
+        # ── Fayl hajmi userbot limitidan katta bo'lsa (Premium: 4GB, oddiy: 2GB) ──
+        # Telegram MTProto darajasida bu limitdan katta faylni userbot session
+        # yuklab (va/yoki qayta yuborib) bo'lmaydi. Shu sababli download
+        # boshlanishidan OLDIN tekshiramiz va foydalanuvchidan R2'ga
+        # yuklashni xohlaydimi-yo'qmi so'raymiz — jim skip qilib qo'ymaymiz.
+        if file_size:
+            from utils.sender import PYROGRAM_LIMIT, PYROGRAM_PREMIUM_LIMIT
+            from utils.r2_manager import is_configured as _r2_ok
+            _limit = PYROGRAM_PREMIUM_LIMIT if await is_user_premium() else PYROGRAM_LIMIT
+            if file_size > _limit:
+                gb = file_size / 1024 / 1024 / 1024
+                limit_gb = _limit / 1024 / 1024 / 1024
+                if report:
+                    report(f"⚠️ {short_name} {limit_gb:.0f}GB limitdan katta")
+                if not silent and _r2_ok():
+                    confirm_key = secrets.token_hex(4)
+                    _big_file_pending[confirm_key] = {
+                        "chat_id": source_chat_id,
+                        "msg_id": msg.id,
+                        "filename": filename,
+                        "file_size": file_size,
+                        "user_id": user_id,
+                        "ts": time.time(),
+                    }
+                    try:
+                        await status_msg.edit_text(
+                            f"⚠️ *{filename}*\n"
+                            f"Hajmi: `{gb:.2f} GB` — userbot limiti (`{limit_gb:.0f} GB`) dan katta, "
+                            f"Telegram orqali yuklab bo'lmaydi.\n\n"
+                            f"☁️ R2'ga yuklashni istaysizmi?",
+                            parse_mode="Markdown",
+                            reply_markup=InlineKeyboardMarkup([[
+                                InlineKeyboardButton("☁️ Ha, R2'ga yukla", callback_data=f"sr_r2big|{confirm_key}"),
+                                InlineKeyboardButton("❌ Yo'q", callback_data=f"sr_r2big_no|{confirm_key}"),
+                            ]]),
+                        )
+                    except Exception:
+                        pass
+                elif not silent:
+                    try:
+                        await status_msg.edit_text(
+                            f"❌ *{filename}* hajmi (`{gb:.2f} GB`) userbot limitidan "
+                            f"(`{limit_gb:.0f} GB`) katta — o'tkazib yuborildi.",
+                            parse_mode="Markdown",
+                            reply_markup=_refresh_kb(status_msg.message_id),
+                        )
+                    except Exception:
+                        pass
+                return False
 
         async def _dl_progress(current, total):
             if is_cancelled(user_id):
@@ -1864,6 +1919,97 @@ async def save_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TY
             caption_map=data.get("caption_map"),
         )
         clear_task(uid)
+        return
+
+    if query.data.startswith("sr_r2big_no|"):
+        await query.answer("❌ Bekor qilindi")
+        key = query.data.split("|", 1)[1]
+        _big_file_pending.pop(key, None)
+        try:
+            await query.edit_message_text("⏭ O'tkazib yuborildi.")
+        except Exception:
+            pass
+        return
+
+    if query.data.startswith("sr_r2big|"):
+        await query.answer()
+        key = query.data.split("|", 1)[1]
+        data = _big_file_pending.pop(key, None)
+        if not data:
+            await query.edit_message_text("❌ Ma'lumot topilmadi yoki eskirgan (1 soatdan eski).")
+            return
+
+        client = await get_user_client()
+        if client is None:
+            await query.edit_message_text("⚠️ Userbot ulanmagan.")
+            return
+
+        filename = data["filename"]
+        file_size = data["file_size"]
+        from utils.sender import _fmt_size
+        try:
+            await query.edit_message_text(
+                f"⬇️ *{filename}* (`{_fmt_size(file_size)}`) yuklab olinmoqda...",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
+
+        tmp_path = None
+        prepared_path = None
+        try:
+            src_msg = await client.get_messages(data["chat_id"], data["msg_id"])
+            media_obj = _media_obj(src_msg)
+            if not media_obj:
+                await query.edit_message_text("❌ Fayl topilmadi (o'chirilgan bo'lishi mumkin).")
+                return
+
+            ext = os.path.splitext(filename)[1].lstrip(".") or "bin"
+            tmp_path = os.path.join(TEMP_DIR, f"sr_big_{data['msg_id']}_{data['user_id']}_{int(time.time()*1000)}.{ext}")
+            await client.download_media(media_obj, file_name=tmp_path)
+
+            if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
+                await query.edit_message_text("❌ Yuklab bo'lmadi, qayta urinib ko'ring.")
+                return
+
+            # Avvalgidek: mp4 konteyner + h264 + yuv420p + aac bo'lsa faqat
+            # faststart (moov atom boshiga), aks holda to'liq qayta kodlanadi.
+            video_ext = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".m4v", ".ts", ".wmv"}
+            if os.path.splitext(filename)[1].lower() in video_ext:
+                try:
+                    await query.edit_message_text(
+                        f"🎬 *{filename}*\nmp4/faststart tekshirilmoqda...",
+                        parse_mode="Markdown",
+                    )
+                except Exception:
+                    pass
+                from utils.ffmpeg_utils import prepare_for_telegram, _run_in_executor
+                prepared_path, changed = await _run_in_executor(prepare_for_telegram, tmp_path)
+                if changed and prepared_path != tmp_path:
+                    filename = os.path.splitext(filename)[0] + ".mp4"
+
+            upload_path = prepared_path or tmp_path
+            upload_size = os.path.getsize(upload_path)
+
+            from utils.sender import _upload_to_r2
+            from utils.r2_manager import user_upload_key
+            from config import R2_USER_PREFIX
+            r2_key = user_upload_key(data["user_id"], filename, R2_USER_PREFIX)
+            await _upload_to_r2(
+                query.message, upload_path, filename, upload_size,
+                user_id=data["user_id"], r2_object_key=r2_key,
+            )
+        except Exception as e:
+            logger.error("sr_r2big xato: %s", e, exc_info=True)
+            try:
+                await query.edit_message_text(f"❌ Xato:\n`{e}`", parse_mode="Markdown")
+            except Exception:
+                pass
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            if prepared_path and prepared_path != tmp_path and os.path.exists(prepared_path):
+                os.remove(prepared_path)
         return
 
     if query.data.startswith("sr_progress|"):
