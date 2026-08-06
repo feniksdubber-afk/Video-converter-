@@ -33,6 +33,7 @@ from utils.ffmpeg_utils import prepare_for_telegram, _run_in_executor, make_temp
 from handlers.studio_group import quality_label
 from handlers.studio_upload import _presign_and_put, _auth_headers
 from handlers.studio_backfill import _fetch_movie_detail
+from handlers.studio_content import _fetch_episodes
 
 logger = logging.getLogger(__name__)
 
@@ -78,13 +79,22 @@ def _fmt_duration(seconds: float) -> str:
     return f"{m}:{s:02d}"
 
 
+def _short_error(text: str, limit: int = 150) -> str:
+    """Xato matnini progress xabariga sig'diradigan qilib qisqartiradi."""
+    text = " ".join(str(text).split())  # ko'p qatorli/ortiqcha probellarni yig'ish
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip() + "…"
+    return text or "noma'lum xato"
+
+
 def _render_progress(
-    *, title: str, kind: str, total: int, done: int, errors: int,
+    *, title: str, kind: str, total: int, done: int, errors: int, skipped: int = 0,
     current_item: dict | None, stage: str | None,
-    recent: list[tuple[str, bool]], elapsed: float,
+    recent: list[tuple[str, bool | None, str | None]], elapsed: float,
+    retry_note: str | None = None,
 ) -> str:
     icon = "🎬" if kind == "m" else "📺"
-    processed = done + errors
+    processed = done + errors + skipped
     # "Silliq" progress: to'liq tugagan itemlar + joriy item ichidagi bosqich ulushi
     fractional = processed + (_STAGE_FRACTION.get(stage, 0.0) if current_item is not None else 0.0)
     fraction = (fractional / total) if total else 0.0
@@ -107,14 +117,21 @@ def _render_progress(
             "┌─ 🎯 *Joriy video* ─────────────",
             f"│  ▶️ {_item_label(kind, title, current_item)}",
             f"│  {_STAGE_LABEL.get(stage, stage)}...",
+        ]
+        if retry_note:
+            lines.append(f"│  {retry_note}")
+        lines += [
             "└─────────────────────────────────",
             "",
         ]
 
     if recent:
         lines.append("📋 *Oxirgi natijalar:*")
-        for label, ok in recent[-5:]:
-            lines.append(f"  {'✅' if ok else '⚠️'} {label}")
+        for label, ok, detail in recent[-5:]:
+            icon_r = "✅" if ok else ("⏭️" if ok is None else "⚠️")
+            lines.append(f"  {icon_r} {label}")
+            if detail:
+                lines.append(f"     └ {detail}")
         lines.append("")
 
     eta_text = ""
@@ -123,12 +140,13 @@ def _render_progress(
         eta = avg_per_unit * (total - fractional)
         eta_text = f"   ·   ⏱ Qoldi: ~{_fmt_duration(eta)}"
     lines.append(f"🕓 O'tgan: {_fmt_duration(elapsed)}{eta_text}")
-    lines.append(f"✔️ Joylandi: *{done}*   ⚠️ Xatolar: *{errors}*   ⏳ Navbatda: *{total - processed}*")
+    skip_text = f"   ⏭️ O'tkazildi: *{skipped}*" if skipped else ""
+    lines.append(f"✔️ Joylandi: *{done}*   ⚠️ Xatolar: *{errors}*{skip_text}   ⏳ Navbatda: *{total - processed}*")
     return "\n".join(lines)
 
 
 def _render_finished(
-    *, title: str, kind: str, total: int, done: int, errors: int, elapsed: float,
+    *, title: str, kind: str, total: int, done: int, errors: int, skipped: int = 0, elapsed: float,
 ) -> str:
     icon = "🎬" if kind == "m" else "📺"
     all_ok = errors == 0
@@ -145,6 +163,10 @@ def _render_finished(
         "*100%*",
         "",
         f"✔️ Muvaffaqiyatli joylandi: *{done}*",
+    ]
+    if skipped:
+        lines.append(f"⏭️ Bazada mavjud bo'lgani uchun o'tkazildi: *{skipped}*")
+    lines += [
         f"⚠️ Xatolar: *{errors}*",
         f"🕓 Jami vaqt: {_fmt_duration(elapsed)}",
     ]
@@ -174,24 +196,28 @@ class _ProgressPainter:
         self._total = total
         self._done = 0
         self._errors = 0
-        self._recent: list[tuple[str, bool]] = []
+        self._skipped = 0
+        self._recent: list[tuple[str, bool | None, str | None]] = []
         self._last_edit = 0.0
         self._last_text = ""
         self._started = time.monotonic()
 
-    async def update(self, *, current_item: dict | None, stage: str | None, force: bool = False) -> None:
+    async def update(
+        self, *, current_item: dict | None, stage: str | None, force: bool = False,
+        retry_note: str | None = None,
+    ) -> None:
         text = _render_progress(
             title=self._title, kind=self._kind, total=self._total,
-            done=self._done, errors=self._errors,
+            done=self._done, errors=self._errors, skipped=self._skipped,
             current_item=current_item, stage=stage, recent=self._recent,
-            elapsed=time.monotonic() - self._started,
+            elapsed=time.monotonic() - self._started, retry_note=retry_note,
         )
         await self._send(text, force=force)
 
     async def finish(self) -> None:
         text = _render_finished(
             title=self._title, kind=self._kind, total=self._total,
-            done=self._done, errors=self._errors,
+            done=self._done, errors=self._errors, skipped=self._skipped,
             elapsed=time.monotonic() - self._started,
         )
         await self._send(text, force=True)
@@ -222,11 +248,15 @@ class _ProgressPainter:
 
     def mark_done(self, label: str) -> None:
         self._done += 1
-        self._recent.append((label, True))
+        self._recent.append((label, True, None))
 
-    def mark_error(self, label: str) -> None:
+    def mark_error(self, label: str, detail: str | None = None) -> None:
         self._errors += 1
-        self._recent.append((label, False))
+        self._recent.append((label, False, _short_error(detail) if detail else None))
+
+    def mark_skip(self, label: str, detail: str | None = None) -> None:
+        self._skipped += 1
+        self._recent.append((label, None, detail))
 
 _SE_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
 _E_ONLY_RE = re.compile(r"^\s*(\d+)\s*$")
@@ -448,6 +478,22 @@ async def joylash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         detail = await _fetch_series_detail(studio, content_id)
     title = _title_from_detail(detail, title)
 
+    # ── Oldindan tekshiruv: bazada allaqachon video bor bo'lgan
+    # film/qismlarni aniqlaymiz -- ularni Telegram'dan yuklab olishning
+    # o'zi shart emas, shuning uchun navbatdan darhol o'tkazib yuboramiz. ──
+    movie_already_has_video = False
+    existing_episodes: set[tuple[int, int]] = set()
+    if kind == "m":
+        movie_already_has_video = bool(
+            detail and (detail.get("r2Url") or detail.get("videoUrl") or detail.get("hasVideo"))
+        )
+    else:
+        eps = await _fetch_episodes(studio, content_id)
+        if eps:
+            for ep in eps:
+                if ep.get("hasVideo") and ep.get("season") is not None and ep.get("episode") is not None:
+                    existing_episodes.add((int(ep["season"]), int(ep["episode"])))
+
     status = await update.effective_message.reply_text(
         _render_progress(title=title, kind=kind, total=len(queue), done=0, errors=0,
                           current_item=None, stage=None, recent=[], elapsed=0),
@@ -456,85 +502,122 @@ async def joylash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     painter = _ProgressPainter(context, chat_id, status.message_id, title=title, kind=kind, total=len(queue))
 
     for item in queue:
-        dl_path = None
-        prepared_path = None
         label = _item_label(kind, title, item)
-        try:
-            await painter.update(current_item=item, stage="download")
-            tg_file = await context.bot.get_file(item["file_id"], read_timeout=120, connect_timeout=30)
-            dl_path = make_temp_path("mp4")
-            await tg_file.download_to_drive(
-                dl_path, read_timeout=1800, connect_timeout=30, write_timeout=1800,
+
+        already_exists = (
+            movie_already_has_video if kind == "m"
+            else (item.get("season"), item.get("episode")) in existing_episodes
+        )
+        if already_exists:
+            painter.mark_skip(label, "Bazada allaqachon mavjud")
+            await painter.update(current_item=None, stage=None)
+            continue
+
+        error_text = await _process_one_item(
+            context=context, painter=painter, studio=studio, slug=slug, chat_id=chat_id,
+            kind=kind, content_id=content_id, title=title, item=item,
+        )
+        if error_text:
+            # Bitta xatodan keyin darhol 1 marta avtomatik qayta urinamiz --
+            # ko'p xatolar vaqtinchalik tarmoq/flood muammolaridan bo'ladi.
+            await painter.update(
+                current_item=item, stage="download", force=True,
+                retry_note=f"⚠️ Xato: {_short_error(error_text)}\n│  🔁 Qayta urinilmoqda...",
             )
-
-            await painter.update(current_item=item, stage="prepare")
-            prepared_path, _changed = await _run_in_executor(prepare_for_telegram, dl_path)
-
-            await painter.update(current_item=item, stage="upload")
-            if kind == "m":
-                filename = f"{title}.mp4"
-                public_url = await _presign_and_put(studio, prepared_path, "movies", filename)
-                if not public_url or public_url == "cancelled":
-                    painter.mark_error(label)
-                    await painter.update(current_item=None, stage=None)
-                    continue
-
-                await painter.update(current_item=item, stage="register")
-                async with httpx.AsyncClient(timeout=60) as client:
-                    resp = await client.patch(
-                        f"{STUDIO_API_BASE}/studios/{slug}/content/movies/{content_id}",
-                        headers=_auth_headers(studio),
-                        json={"r2Url": public_url},
-                    )
-                caption_label = f"🎬 {title}"
+            await asyncio.sleep(3)
+            error_text_2 = await _process_one_item(
+                context=context, painter=painter, studio=studio, slug=slug, chat_id=chat_id,
+                kind=kind, content_id=content_id, title=title, item=item,
+            )
+            if error_text_2:
+                painter.mark_error(label, error_text_2)
             else:
-                filename = f"{title}_S{item['season']}E{item['episode']}.mp4"
-                public_url = await _presign_and_put(studio, prepared_path, "series", filename)
-                if not public_url or public_url == "cancelled":
-                    painter.mark_error(label)
-                    await painter.update(current_item=None, stage=None)
-                    continue
-
-                await painter.update(current_item=item, stage="register")
-                async with httpx.AsyncClient(timeout=60) as client:
-                    resp = await client.post(
-                        f"{STUDIO_API_BASE}/studios/{slug}/content/series/{content_id}/episodes",
-                        headers=_auth_headers(studio),
-                        json={"season": item["season"], "episode": item["episode"], "r2Url": public_url},
-                    )
-                caption_label = f"📺 {title}\n{item['season']}-fasl {item['episode']}-qism"
-
-            if resp.status_code >= 300:
-                logger.warning("Ro'yxatga olishda xato: %s %s", resp.status_code, resp.text[:300])
-                painter.mark_error(label)
-                await painter.update(current_item=None, stage=None)
-                continue
-
-            new_caption = caption_label + f"\n\n🔗 Video: {public_url}"
-            try:
-                await context.bot.edit_message_caption(
-                    chat_id=chat_id, message_id=item["message_id"], caption=new_caption,
-                )
-            except TelegramError as e:
-                logger.warning("Caption tahrirlashda xato (message_id=%s): %s", item["message_id"], e)
-
+                painter.mark_done(label)
+        else:
             painter.mark_done(label)
-            await painter.update(current_item=None, stage=None)
-        except TelegramError as e:
-            logger.warning("Topic video qayta ishlashda xato (message_id=%s): %s", item["message_id"], e)
-            painter.mark_error(label)
-            await painter.update(current_item=None, stage=None)
-        except Exception as e:
-            logger.warning("Kutilmagan xato (message_id=%s): %s", item["message_id"], e)
-            painter.mark_error(label)
-            await painter.update(current_item=None, stage=None)
-        finally:
-            for p in (dl_path, prepared_path):
-                if p and os.path.exists(p):
-                    try:
-                        os.remove(p)
-                    except OSError:
-                        pass
+        await painter.update(current_item=None, stage=None)
 
     clear_queue(slug, topic_id)
     await painter.finish()
+
+
+async def _process_one_item(
+    *, context, painter: "_ProgressPainter", studio: dict, slug: str, chat_id: int,
+    kind: str, content_id: str, title: str, item: dict,
+) -> str | None:
+    """Bitta videoni yuklab-joylaydi. Muvaffaqiyatli bo'lsa None, aks holda
+    xato matnini qaytaradi (chaqiruvchi tomon buni ko'rsatish/qayta urinish
+    uchun ishlatadi)."""
+    dl_path = None
+    prepared_path = None
+    try:
+        await painter.update(current_item=item, stage="download")
+        tg_file = await context.bot.get_file(item["file_id"], read_timeout=120, connect_timeout=30)
+        dl_path = make_temp_path("mp4")
+        await tg_file.download_to_drive(
+            dl_path, read_timeout=1800, connect_timeout=30, write_timeout=1800,
+        )
+
+        await painter.update(current_item=item, stage="prepare")
+        prepared_path, _changed = await _run_in_executor(prepare_for_telegram, dl_path)
+
+        await painter.update(current_item=item, stage="upload")
+        if kind == "m":
+            filename = f"{title}.mp4"
+            public_url = await _presign_and_put(studio, prepared_path, "movies", filename)
+            if not public_url or public_url == "cancelled":
+                return "R2 bulutiga yuklashda xato bo'ldi"
+
+            await painter.update(current_item=item, stage="register")
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.patch(
+                    f"{STUDIO_API_BASE}/studios/{slug}/content/movies/{content_id}",
+                    headers=_auth_headers(studio),
+                    json={"r2Url": public_url},
+                )
+            caption_label = f"🎬 {title}"
+        else:
+            filename = f"{title}_S{item['season']}E{item['episode']}.mp4"
+            public_url = await _presign_and_put(studio, prepared_path, "series", filename)
+            if not public_url or public_url == "cancelled":
+                return "R2 bulutiga yuklashda xato bo'ldi"
+
+            await painter.update(current_item=item, stage="register")
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(
+                    f"{STUDIO_API_BASE}/studios/{slug}/content/series/{content_id}/episodes",
+                    headers=_auth_headers(studio),
+                    json={"season": item["season"], "episode": item["episode"], "r2Url": public_url},
+                )
+            caption_label = f"📺 {title}\n{item['season']}-fasl {item['episode']}-qism"
+
+        if resp.status_code >= 300:
+            err = f"Bazaga yozishda xato: HTTP {resp.status_code} — {resp.text[:200]}"
+            logger.warning("Ro'yxatga olishda xato: %s %s", resp.status_code, resp.text[:300])
+            return err
+
+        new_caption = caption_label + f"\n\n🔗 Video: {public_url}"
+        try:
+            await context.bot.edit_message_caption(
+                chat_id=chat_id, message_id=item["message_id"], caption=new_caption,
+            )
+        except TelegramError as e:
+            # Sarlavhani tahrirlab bo'lmasligi (masalan xabar juda eski) --
+            # video allaqachon muvaffaqiyatli joylangan, shuning uchun bu
+            # xato hisoblanmaydi, faqat log qilinadi.
+            logger.warning("Caption tahrirlashda xato (message_id=%s): %s", item["message_id"], e)
+
+        return None
+    except TelegramError as e:
+        logger.warning("Topic video qayta ishlashda xato (message_id=%s): %s", item["message_id"], e)
+        return f"Telegram xatosi: {e}"
+    except Exception as e:
+        logger.exception("Kutilmagan xato (message_id=%s)", item["message_id"])
+        return f"Kutilmagan xato: {e!r}"
+    finally:
+        for p in (dl_path, prepared_path):
+            if p and os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
