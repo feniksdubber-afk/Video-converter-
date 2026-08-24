@@ -190,6 +190,16 @@ async def _run_flow(client, bot_username, payload, button_index,
 
     # 5. Agar button_index berilgan bo'lsa — to'g'ridan o'sha tugmani bosamiz
     if button_index is not None:
+        # Bu yerda ham xuddi shu sababdan (placeholder -> edit) eng so'nggi
+        # holatni olish uchun xabarlarni qayta so'raymiz.
+        try:
+            msg_ids = [m.id for m in new_messages]
+            refreshed = await client.get_messages(bot_username, msg_ids)
+            if refreshed:
+                new_messages = refreshed if isinstance(refreshed, list) else [refreshed]
+        except Exception as e:
+            logger.warning("Xabarlarni qayta olishda xato (eski holat ishlatiladi): %s", e)
+
         btn_msg = next((m for m in new_messages if _flatten_buttons(m)), None)
         if not btn_msg:
             await status_msg.edit_text("❌ Tugmali xabar topilmadi!")
@@ -217,6 +227,21 @@ async def _run_flow(client, bot_username, payload, button_index,
         return
 
     # 6. button_index berilmagan — barcha xabarlarni mirror qilamiz
+
+    # MUHIM: ko'p kino botlari /start javobida avval bo'sh/placeholder xabar
+    # yuboradi, keyin uni EDIT qilib video/matnni qo'shadi. Bizning event
+    # handler faqat YANGI xabarlarni kuzatadi, tahrirlarni emas — shu sababli
+    # eski (bo'sh) holat ko'chirilib qolishi mumkin edi. Shuning uchun mirror
+    # qilishdan oldin har bir xabarni ID bo'yicha qayta so'rab, ENG SO'NGGI
+    # (tahrirlangan) holatini olamiz.
+    try:
+        msg_ids = [m.id for m in new_messages]
+        refreshed = await client.get_messages(bot_username, msg_ids)
+        if refreshed:
+            new_messages = refreshed if isinstance(refreshed, list) else [refreshed]
+    except Exception as e:
+        logger.warning("Xabarlarni qayta olishda xato (eski holat ishlatiladi): %s", e)
+
     await status_msg.delete()
 
     for pyro_msg in new_messages:
