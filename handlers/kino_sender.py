@@ -21,8 +21,8 @@ from handlers.save_restricted import get_user_client
 
 logger = logging.getLogger(__name__)
 
-WAIT_TIMEOUT = 45          # botdan javob kutish (soniya)
-COLLECT_DELAY = 3.0        # barcha xabarlar kelishini kutish (soniya)
+WAIT_TIMEOUT = 90          # botdan javob kutish (soniya) — katta videolar tayyorlanishi vaqt olishi mumkin
+COLLECT_DELAY = 3.0        # mazmunli xabardan keyin qo'shimcha xabarlarni kutish (soniya)
 
 _kino_lock = asyncio.Lock()
 
@@ -229,11 +229,10 @@ async def _run_flow(client, bot_username, payload, button_index,
     # 6. button_index berilmagan — barcha xabarlarni mirror qilamiz
 
     # MUHIM: ko'p kino botlari /start javobida avval bo'sh/placeholder xabar
-    # yuboradi, keyin uni EDIT qilib video/matnni qo'shadi. Bizning event
-    # handler faqat YANGI xabarlarni kuzatadi, tahrirlarni emas — shu sababli
-    # eski (bo'sh) holat ko'chirilib qolishi mumkin edi. Shuning uchun mirror
-    # qilishdan oldin har bir xabarni ID bo'yicha qayta so'rab, ENG SO'NGGI
-    # (tahrirlangan) holatini olamiz.
+    # yuboradi, keyin video tayyor bo'lgach ALOHIDA xabar bilan yuboradi.
+    # Ikkisi ham to'plangan bo'lishi mumkin — agar orasida mazmunli (matn/media
+    # bor) xabar bo'lsa, bo'sh placeholderlarni ko'rsatmaymiz (his qildirmaslik
+    # uchun), aks holda borini ko'rsatamiz.
     try:
         msg_ids = [m.id for m in new_messages]
         refreshed = await client.get_messages(bot_username, msg_ids)
@@ -241,6 +240,10 @@ async def _run_flow(client, bot_username, payload, button_index,
             new_messages = refreshed if isinstance(refreshed, list) else [refreshed]
     except Exception as e:
         logger.warning("Xabarlarni qayta olishda xato (eski holat ishlatiladi): %s", e)
+
+    meaningful = [m for m in new_messages if _is_meaningful(m)]
+    if meaningful:
+        new_messages = meaningful
 
     await status_msg.delete()
 
@@ -699,12 +702,30 @@ async def _download_and_send(client, media_msg, dest_chat, title, status_msg):
 
 # ── Event handler orqali xabar yig'ish ───────────────────────────────────────
 
+def _is_meaningful(m) -> bool:
+    """Xabarda haqiqiy mazmun (matn, caption yoki media) bor-yo'qligini tekshiradi.
+    Bo'sh/placeholder xabarlarni mazmunli xabarlardan ajratish uchun ishlatiladi."""
+    return bool(
+        (m.text and m.text.strip())
+        or (m.caption and m.caption.strip())
+        or m.video or m.document or m.audio or m.photo
+    )
+
+
 async def _collect_new_messages(client, from_username, after_id,
                                   timeout, collect_delay, status_msg,
                                   trigger_fn=None):
     """
     Botdan kelgan barcha yangi xabarlarni yig'adi.
-    Birinchi xabar kelgandan keyin collect_delay soniya kutib, qolganlarni ham oladi.
+
+    MUHIM: ba'zi kino botlari avval bo'sh/placeholder xabar yuboradi, so'ng
+    (ayniqsa katta fayllarda, video tayyorlanayotganda) 10-30+ soniyadan
+    keyin ALOHIDA yangi xabar bilan asl video/matnni yuboradi. Shu sababli:
+
+      1) faqat bo'sh/placeholder xabar(lar) kelgan bo'lsa — mazmunli xabar
+         kelguncha (yoki umumiy `timeout` tugaguncha) kutishda davom etamiz;
+      2) mazmunli xabar kelgach, yana `collect_delay` soniya kutib, ortidan
+         keladigan qo'shimcha xabarlarni (masalan alohida caption) ham olamiz.
 
     trigger_fn: agar berilsa, event handler ALLAQACHON o'rnatilgandan keyin
     chaqiriladigan async funksiya (masalan StartBot yuborish). Bu race condition'ni
@@ -715,13 +736,15 @@ async def _collect_new_messages(client, from_username, after_id,
     from pyrogram.handlers import MessageHandler
 
     collected = []
-    first_arrived = asyncio.Event()
+    last_arrival = {"t": None}
+    new_arrived = asyncio.Event()
 
     async def _on_message(c, m):
         if m.chat.username and m.chat.username.lower() == from_username.lower():
             if m.id > after_id:
                 collected.append(m)
-                first_arrived.set()
+                last_arrival["t"] = asyncio.get_event_loop().time()
+                new_arrived.set()
 
     handler = client.add_handler(MessageHandler(_on_message, filters.private))
 
@@ -730,34 +753,50 @@ async def _collect_new_messages(client, from_username, after_id,
         if trigger_fn is not None:
             await trigger_fn()
 
-        # Birinchi xabar kelishini kutamiz
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
         dots = 0
-        deadline = asyncio.get_event_loop().time() + timeout
-        while asyncio.get_event_loop().time() < deadline:
+
+        def _has_meaningful():
+            return any(_is_meaningful(m) for m in collected)
+
+        # Mazmunli xabar kelguncha (yoki umumiy timeout tugaguncha) kutamiz.
+        # Bo'sh placeholder kelishi bu bosqichni to'xtatmaydi — davom etamiz.
+        while not _has_meaningful() and loop.time() < deadline:
+            new_arrived.clear()
             try:
-                await asyncio.wait_for(first_arrived.wait(), timeout=1.5)
-                break
+                await asyncio.wait_for(new_arrived.wait(), timeout=1.5)
             except asyncio.TimeoutError:
-                dots = (dots % 3) + 1
-                waited = int(timeout - (deadline - asyncio.get_event_loop().time()))
-                try:
-                    await status_msg.edit_text(
-                        f"⏳ Javob kutilmoqda{'.' * dots}\n"
-                        f"`{waited}s` / `{timeout}s`",
-                        parse_mode="Markdown",
-                    )
-                except Exception:
-                    pass
+                pass
+            dots = (dots % 3) + 1
+            waited = int(timeout - (deadline - loop.time()))
+            try:
+                note = "⏳ Javob kutilmoqda" if not collected else "⏳ Video tayyorlanmoqda (bot javob berdi, mazmun kutilmoqda)"
+                await status_msg.edit_text(
+                    f"{note}{'.' * dots}\n"
+                    f"`{waited}s` / `{timeout}s`",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
 
         if not collected:
             return []
 
-        # Qolgan xabarlar kelishini kutamiz
-        await status_msg.edit_text(
-            f"📨 Xabar keldi, to'liq yuklanmoqda...",
-            parse_mode="Markdown",
-        )
-        await asyncio.sleep(collect_delay)
+        # Mazmunli xabar keldi (yoki umuman kelmadi va timeout tugadi) —
+        # endi qisqa collect_delay davomida qo'shimcha xabarlarni kutamiz.
+        await status_msg.edit_text("📨 Xabar keldi, to'liq yuklanmoqda...")
+        while loop.time() < deadline:
+            new_arrived.clear()
+            silence_deadline = last_arrival["t"] + collect_delay
+            remaining = min(silence_deadline - loop.time(), deadline - loop.time())
+            if remaining <= 0:
+                break
+            try:
+                await asyncio.wait_for(new_arrived.wait(), timeout=remaining)
+                continue  # yangi xabar keldi — timer qayta boshlanadi
+            except asyncio.TimeoutError:
+                break  # bot jim qoldi
 
         # Yana polling bilan tekshiramiz (event handler o'tkazib yuborgan bo'lishi mumkin)
         try:
