@@ -48,6 +48,20 @@ def _fmt_dur(seconds: int) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
+def _md_escape(text) -> str:
+    """Telegram Markdown (legacy) uchun maxsus belgilarni escape qiladi.
+
+    Foydalanuvchi/bot tomonidan keladigan har qanday matnni (xato matni,
+    bot_username, tugma matni, fayl nomi, sarlavha va h.k.) parse_mode='Markdown'
+    bo'lgan xabar ichiga qo'yishdan oldin shu funksiyadan o'tkazish kerak,
+    aks holda `_`, `*`, `` ` ``, `[` kabi belgilar parse xatosiga olib kelishi mumkin.
+    """
+    s = str(text)
+    for ch in ("\\", "_", "*", "`", "["):
+        s = s.replace(ch, "\\" + ch)
+    return s
+
+
 # ── Asosiy handler ────────────────────────────────────────────────────────────
 
 async def kino_sender_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -78,7 +92,7 @@ async def kino_sender_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     status_msg = await msg.reply_text(
-        f"🔍 *@{bot_username}* ga so'rov yuborilmoqda...\n`{payload}`",
+        f"🔍 *@{_md_escape(bot_username)}* ga so'rov yuborilmoqda...\n`{_md_escape(payload)}`",
         parse_mode="Markdown",
     )
 
@@ -101,7 +115,10 @@ async def kino_sender_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         except Exception as e:
             logger.exception("kino_sender xato: %s", e)
-            await status_msg.edit_text(f"❌ *Xato:*\n`{e}`", parse_mode="Markdown")
+            # Exception matni oldindan bilinmaydi va Markdown belgilarini o'z ichiga
+            # olishi mumkin — parse_mode=None bilan yuborib, bot o'zi yiqilib
+            # qolishining oldini olamiz.
+            await status_msg.edit_text(f"❌ Xato:\n{e}")
 
 
 # ── Asosiy flow ───────────────────────────────────────────────────────────────
@@ -114,7 +131,7 @@ async def _run_flow(client, bot_username, payload, button_index,
     try:
         bot_peer = await client.resolve_peer(bot_username)
     except Exception as e:
-        await status_msg.edit_text(f"❌ `@{bot_username}` topilmadi!\n`{e}`", parse_mode="Markdown")
+        await status_msg.edit_text(f"❌ @{bot_username} topilmadi!\n{e}")
         return
 
     # 2. Oxirgi xabar ID ni eslab qolamiz
@@ -128,21 +145,25 @@ async def _run_flow(client, bot_username, payload, button_index,
 
     # 3. /start <payload> yuboramiz
     await status_msg.edit_text(
-        f"📨 *@{bot_username}* ga `/start {payload}` yuborildi\n"
+        f"📨 *@{_md_escape(bot_username)}* ga `/start {_md_escape(payload)}` yuborildi\n"
         f"⏳ Javob kutilmoqda...",
         parse_mode="Markdown",
     )
 
-    await client.invoke(
-        functions.messages.StartBot(
-            bot=bot_peer,
-            peer=bot_peer,
-            random_id=client.rnd_id(),
-            start_param=payload,
+    # MUHIM: event handler StartBot yuborishdan OLDIN o'rnatilishi kerak.
+    # Aks holda bot juda tez javob bersa (StartBot -> javob -> handler hali yo'q),
+    # birinchi xabar(lar) o'tkazib yuborilib, keraksiz timeout yuzaga kelishi mumkin.
+    async def _send_start():
+        await client.invoke(
+            functions.messages.StartBot(
+                bot=bot_peer,
+                peer=bot_peer,
+                random_id=client.rnd_id(),
+                start_param=payload,
+            )
         )
-    )
 
-    # 4. Barcha yangi xabarlarni event handler orqali yig'amiz
+    # 4. Handlerni oldindan o'rnatib, keyin StartBot yuborib, javoblarni yig'amiz
     new_messages = await _collect_new_messages(
         client=client,
         from_username=bot_username,
@@ -150,18 +171,19 @@ async def _run_flow(client, bot_username, payload, button_index,
         timeout=WAIT_TIMEOUT,
         collect_delay=COLLECT_DELAY,
         status_msg=status_msg,
+        trigger_fn=_send_start,
     )
 
     if not new_messages:
         await status_msg.edit_text(
-            f"❌ *@{bot_username}* javob bermadi (timeout {WAIT_TIMEOUT}s)\n\n"
+            f"❌ *@{_md_escape(bot_username)}* javob bermadi (timeout {WAIT_TIMEOUT}s)\n\n"
             f"Qaytadan urinib ko'ring.",
             parse_mode="Markdown",
         )
         return
 
     await status_msg.edit_text(
-        f"✅ *@{bot_username}* dan {len(new_messages)} ta xabar keldi\n"
+        f"✅ *@{_md_escape(bot_username)}* dan {len(new_messages)} ta xabar keldi\n"
         f"⏳ Qayta ishlanmoqda...",
         parse_mode="Markdown",
     )
@@ -175,18 +197,17 @@ async def _run_flow(client, bot_username, payload, button_index,
 
         buttons = _flatten_buttons(btn_msg)
         if button_index >= len(buttons):
-            btn_list = "\n".join(f"  `{i+1}.` {b.text}" for i, b in enumerate(buttons))
+            btn_list = "\n".join(f"  {i+1}. {b.text}" for i, b in enumerate(buttons))
             await status_msg.edit_text(
-                f"❌ *{button_index+1}-tugma mavjud emas*\n\n"
-                f"📋 *Tugmalar ({len(buttons)} ta):*\n{btn_list}\n\n"
-                f"Masalan: `/kino @{bot_username} {payload} 1`",
-                parse_mode="Markdown",
+                f"❌ {button_index+1}-tugma mavjud emas\n\n"
+                f"📋 Tugmalar ({len(buttons)} ta):\n{btn_list}\n\n"
+                f"Masalan: /kino @{bot_username} {payload} 1"
             )
             return
 
         chosen = buttons[button_index]
         await status_msg.edit_text(
-            f"🔘 `{chosen.text}` tanlandi\n⏳ Video kutilmoqda...",
+            f"🔘 `{_md_escape(chosen.text)}` tanlandi\n⏳ Video kutilmoqda...",
             parse_mode="Markdown",
         )
         await _press_button_and_download(
@@ -235,7 +256,9 @@ async def _mirror_message(client, pyro_msg, bot_username, bot_peer,
                         # callback_data ni encode qilib saqlaymiz
                         # format: "kino|bot_username|msg_id|cb_data"
                         safe_cb = f"kino|{bot_username}|{pyro_msg.id}|{cb}"
-                        if len(safe_cb) <= 64:
+                        # Telegram callback_data limiti BYTE bo'yicha (UTF-8), character emas —
+                        # emoji/kirill kabi belgilar bir nechta baytga teng bo'lishi mumkin.
+                        if len(safe_cb.encode("utf-8")) <= 64:
                             kb_row.append(InlineKeyboardButton(btn.text, callback_data=safe_cb))
                         else:
                             # Juda uzun bo'lsa index ishlatamiz
@@ -252,7 +275,13 @@ async def _mirror_message(client, pyro_msg, bot_username, bot_peer,
     has_media = bool(pyro_msg.video or pyro_msg.document or pyro_msg.audio)
     if has_media:
         dl_cb = f"kinodl|{bot_username}|{pyro_msg.id}"
-        dl_btn = [InlineKeyboardButton("📥 Videoni yuborish", callback_data=dl_cb)]
+        if pyro_msg.video:
+            dl_label = "📥 Videoni yuborish"
+        elif pyro_msg.audio:
+            dl_label = "📥 Audioni yuborish"
+        else:
+            dl_label = "📥 Faylni yuborish"
+        dl_btn = [InlineKeyboardButton(dl_label, callback_data=dl_cb)]
         if tg_keyboard:
             tg_keyboard = InlineKeyboardMarkup(tg_keyboard.inline_keyboard + [dl_btn])
         else:
@@ -270,17 +299,21 @@ async def _mirror_message(client, pyro_msg, bot_username, bot_peer,
         info_text = (
             f"{text}\n\n" if text else ""
         ) + (
-            f"📎 `{fname}`\n" if fname else ""
+            f"📎 `{_md_escape(fname)}`\n" if fname else ""
         ) + (
             f"📦 Hajmi: `{size_str}`\n"
-            f"🎞 MIME: `{mime}`"
+            f"🎞 MIME: `{_md_escape(mime)}`"
         )
 
-        await user_msg.reply_text(
-            info_text.strip(),
-            parse_mode="Markdown",
-            reply_markup=tg_keyboard,
-        )
+        try:
+            await user_msg.reply_text(
+                info_text.strip(),
+                parse_mode="Markdown",
+                reply_markup=tg_keyboard,
+            )
+        except Exception:
+            # Markdown parse xatosi bo'lsa ham xabar borsin
+            await user_msg.reply_text(info_text.strip(), reply_markup=tg_keyboard)
     else:
         # Matnli yoki boshqa xabar
         if text:
@@ -312,8 +345,12 @@ async def kino_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         _, bot_username, msg_id_str = parts
         msg_id = int(msg_id_str)
 
+        if _kino_lock.locked():
+            await query.message.reply_text("⏳ Oldingi so'rov bajarilmoqda, birozdan so'ng qayta urinib ko'ring.")
+            return
+
         status = await query.message.reply_text(
-            f"⏳ *@{bot_username}* dan video yuklab olinmoqda...",
+            f"⏳ *@{_md_escape(bot_username)}* dan video yuklab olinmoqda...",
             parse_mode="Markdown",
         )
         client = await get_user_client()
@@ -321,19 +358,22 @@ async def kino_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             await status.edit_text("❌ Userbot ulangmagan!")
             return
 
-        try:
-            # Xabarni Pyrogram orqali olamiz
-            pyro_msg = await client.get_messages(bot_username, msg_id)
-            await _download_and_send(
-                client=client,
-                media_msg=pyro_msg,
-                dest_chat=ARCHIVE_GROUP_ID,
-                title=bot_username,
-                status_msg=status,
-            )
-        except Exception as e:
-            logger.exception("kinodl xato: %s", e)
-            await status.edit_text(f"❌ Xato:\n`{e}`", parse_mode="Markdown")
+        # Userbot bitta Telegram sessiyasi orqali ishlaydi — /kino komandasi bilan
+        # bir vaqtda ishlab ketmasligi uchun xuddi shu lock ishlatiladi.
+        async with _kino_lock:
+            try:
+                # Xabarni Pyrogram orqali olamiz
+                pyro_msg = await client.get_messages(bot_username, msg_id)
+                await _download_and_send(
+                    client=client,
+                    media_msg=pyro_msg,
+                    dest_chat=ARCHIVE_GROUP_ID,
+                    title=bot_username,
+                    status_msg=status,
+                )
+            except Exception as e:
+                logger.exception("kinodl xato: %s", e)
+                await status.edit_text(f"❌ Xato:\n{e}")
         return
 
     # kino| — inline tugmani userbot orqali bosish
@@ -357,48 +397,52 @@ async def kino_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             msg_id = int(msg_id_str)
             btn_index = None
 
-        status = await query.message.reply_text(
-            f"⏳ Tugma bosilmoqda...",
-            parse_mode="Markdown",
-        )
+        if _kino_lock.locked():
+            await query.message.reply_text("⏳ Oldingi so'rov bajarilmoqda, birozdan so'ng qayta urinib ko'ring.")
+            return
+
+        status = await query.message.reply_text("⏳ Tugma bosilmoqda...")
         client = await get_user_client()
         if not client:
             await status.edit_text("❌ Userbot ulangmagan!")
             return
 
-        try:
-            from pyrogram.raw import functions
+        # Userbot bitta Telegram sessiyasi orqali ishlaydi — /kino komandasi bilan
+        # bir vaqtda ishlab ketmasligi uchun xuddi shu lock ishlatiladi.
+        async with _kino_lock:
+            try:
+                from pyrogram.raw import functions
 
-            bot_peer = await client.resolve_peer(bot_username)
-            pyro_msg = await client.get_messages(bot_username, msg_id)
+                bot_peer = await client.resolve_peer(bot_username)
+                pyro_msg = await client.get_messages(bot_username, msg_id)
 
-            if cb_data_str is None:
-                # index orqali topamiz
-                buttons = _flatten_buttons(pyro_msg)
-                if btn_index >= len(buttons):
-                    await status.edit_text("❌ Tugma topilmadi!")
-                    return
-                chosen = buttons[btn_index]
-            else:
-                # to'g'ridan callback_data
-                class _FakeBtn:
-                    def __init__(self, text, cb):
-                        self.text = text
-                        self.callback_data = cb
-                chosen = _FakeBtn(cb_data_str, cb_data_str)
+                if cb_data_str is None:
+                    # index orqali topamiz
+                    buttons = _flatten_buttons(pyro_msg)
+                    if btn_index >= len(buttons):
+                        await status.edit_text("❌ Tugma topilmadi!")
+                        return
+                    chosen = buttons[btn_index]
+                else:
+                    # to'g'ridan callback_data
+                    class _FakeBtn:
+                        def __init__(self, text, cb):
+                            self.text = text
+                            self.callback_data = cb
+                    chosen = _FakeBtn(cb_data_str, cb_data_str)
 
-            await status.edit_text(
-                f"🔘 `{chosen.text}` tanlandi\n⏳ Javob kutilmoqda...",
-                parse_mode="Markdown",
-            )
+                await status.edit_text(
+                    f"🔘 `{_md_escape(chosen.text)}` tanlandi\n⏳ Javob kutilmoqda...",
+                    parse_mode="Markdown",
+                )
 
-            await _press_button_and_download(
-                client, bot_username, bot_peer, pyro_msg, chosen,
-                ARCHIVE_GROUP_ID, status, context
-            )
-        except Exception as e:
-            logger.exception("kino callback xato: %s", e)
-            await status.edit_text(f"❌ Xato:\n`{e}`", parse_mode="Markdown")
+                await _press_button_and_download(
+                    client, bot_username, bot_peer, pyro_msg, chosen,
+                    ARCHIVE_GROUP_ID, status, context
+                )
+            except Exception as e:
+                logger.exception("kino callback xato: %s", e)
+                await status.edit_text(f"❌ Xato:\n{e}")
 
 
 # ── Tugmani bosib video kutish ────────────────────────────────────────────────
@@ -415,31 +459,34 @@ async def _press_button_and_download(client, bot_username, bot_peer,
     # Oxirgi xabar ID
     last_id = btn_msg.id
 
-    try:
-        await asyncio.wait_for(
-            client.invoke(
-                functions.messages.GetBotCallbackAnswer(
-                    peer=bot_peer,
-                    msg_id=btn_msg.id,
-                    data=cb_data,
-                )
-            ),
-            timeout=10,
-        )
-    except (asyncio.TimeoutError, Exception) as e:
-        logger.info("GetBotCallbackAnswer xato (normal): %s", e)
+    async def _press():
+        try:
+            await asyncio.wait_for(
+                client.invoke(
+                    functions.messages.GetBotCallbackAnswer(
+                        peer=bot_peer,
+                        msg_id=btn_msg.id,
+                        data=cb_data,
+                    )
+                ),
+                timeout=10,
+            )
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.info("GetBotCallbackAnswer xato (normal): %s", e)
 
     # Media xabarini event handler orqali kutamiz
     await status_msg.edit_text(
-        f"🔘 `{chosen_btn.text}` tanlandi\n⏳ Video yuborilishini kutilmoqda...",
+        f"🔘 `{_md_escape(chosen_btn.text)}` tanlandi\n⏳ Video yuborilishini kutilmoqda...",
         parse_mode="Markdown",
     )
 
+    # Listener tugma bosishdan OLDIN o'rnatiladi (race condition oldini olish)
     media_msg = await _wait_for_media_event(
         client=client,
         from_username=bot_username,
         after_id=last_id,
         timeout=WAIT_TIMEOUT,
+        trigger_fn=_press,
     )
 
     if media_msg is None:
@@ -465,6 +512,8 @@ async def _download_and_send(client, media_msg, dest_chat, title, status_msg):
     media_obj = media_msg.video or media_msg.document or media_msg.audio
     file_size = getattr(media_obj, "file_size", 0) or 0
     size_str = _fmt_size(file_size) if file_size else "?"
+    # title bot/tugma matnidan keladi — Markdown ichida ishlatilishidan oldin escape qilamiz
+    title = _md_escape(title)
 
     await status_msg.edit_text(
         f"🎬 *{title}*\n\n"
@@ -624,10 +673,16 @@ async def _download_and_send(client, media_msg, dest_chat, title, status_msg):
 # ── Event handler orqali xabar yig'ish ───────────────────────────────────────
 
 async def _collect_new_messages(client, from_username, after_id,
-                                  timeout, collect_delay, status_msg):
+                                  timeout, collect_delay, status_msg,
+                                  trigger_fn=None):
     """
     Botdan kelgan barcha yangi xabarlarni yig'adi.
     Birinchi xabar kelgandan keyin collect_delay soniya kutib, qolganlarni ham oladi.
+
+    trigger_fn: agar berilsa, event handler ALLAQACHON o'rnatilgandan keyin
+    chaqiriladigan async funksiya (masalan StartBot yuborish). Bu race condition'ni
+    oldini oladi — chunki botning javobi handler yo'qligi sababli o'tkazib
+    yuborilishi mumkin emas.
     """
     from pyrogram import filters
     from pyrogram.handlers import MessageHandler
@@ -644,6 +699,10 @@ async def _collect_new_messages(client, from_username, after_id,
     handler = client.add_handler(MessageHandler(_on_message, filters.private))
 
     try:
+        # Handler o'rnatilgach, so'rovni (masalan StartBot) yuboramiz
+        if trigger_fn is not None:
+            await trigger_fn()
+
         # Birinchi xabar kelishini kutamiz
         dots = 0
         deadline = asyncio.get_event_loop().time() + timeout
@@ -696,8 +755,9 @@ async def _collect_new_messages(client, from_username, after_id,
             pass
 
 
-async def _wait_for_media_event(client, from_username, after_id, timeout):
-    """Tugma bosilgandan keyin media xabarini kutadi."""
+async def _wait_for_media_event(client, from_username, after_id, timeout, trigger_fn=None):
+    """Media xabarini kutadi. trigger_fn berilsa, handler o'rnatilgandan KEYIN
+    chaqiriladi (masalan tugmani bosish so'rovi) — race condition oldini olish uchun."""
     from pyrogram import filters
     from pyrogram.handlers import MessageHandler
 
@@ -713,6 +773,9 @@ async def _wait_for_media_event(client, from_username, after_id, timeout):
     handler = client.add_handler(MessageHandler(_on_media, filters.private))
 
     try:
+        if trigger_fn is not None:
+            await trigger_fn()
+
         try:
             await asyncio.wait_for(arrived.wait(), timeout=timeout)
         except asyncio.TimeoutError:
