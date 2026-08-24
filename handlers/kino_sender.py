@@ -283,7 +283,9 @@ async def _mirror_message(client, pyro_msg, bot_username, bot_peer,
             dl_label = "📥 Faylni yuborish"
         dl_btn = [InlineKeyboardButton(dl_label, callback_data=dl_cb)]
         if tg_keyboard:
-            tg_keyboard = InlineKeyboardMarkup(tg_keyboard.inline_keyboard + [dl_btn])
+            # inline_keyboard Pyrogram/PTB obyektlarida tuple bo'lishi mumkin —
+            # list() bilan tuple+list TypeError'idan qochamiz
+            tg_keyboard = InlineKeyboardMarkup(list(tg_keyboard.inline_keyboard) + [dl_btn])
         else:
             tg_keyboard = InlineKeyboardMarkup([dl_btn])
 
