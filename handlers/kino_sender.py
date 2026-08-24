@@ -150,20 +150,33 @@ async def _run_flow(client, bot_username, payload, button_index,
         parse_mode="Markdown",
     )
 
-    # MUHIM: event handler StartBot yuborishdan OLDIN o'rnatilishi kerak.
-    # Aks holda bot juda tez javob bersa (StartBot -> javob -> handler hali yo'q),
-    # birinchi xabar(lar) o'tkazib yuborilib, keraksiz timeout yuzaga kelishi mumkin.
+    # MUHIM: `messages.StartBot` (raw API) faqat botni HALI HECH QACHON
+    # ishga tushirmagan foydalanuvchi uchun ishlaydi. Agar userbot sessiyasi
+    # bu botni ilgari (masalan avvalgi test/urinishda) allaqachon boshlagan
+    # bo'lsa, StartBot "muvaffaqiyatli" qaytadi-yu, lekin botga hech narsa
+    # yubormaydi — bot esa hech qanday javob bermaydi (jim timeout).
+    #
+    # Shuning uchun StartBot o'rniga ODDIY MATNLI XABAR yuboramiz — xuddi
+    # foydalanuvchi qo'lda "/start payload" deb yozgandek. Bu ham birinchi,
+    # ham keyingi urinishlarda bir xilda ishonchli ishlaydi.
     async def _send_start():
-        await client.invoke(
-            functions.messages.StartBot(
-                bot=bot_peer,
-                peer=bot_peer,
-                random_id=client.rnd_id(),
-                start_param=payload,
+        try:
+            await client.send_message(bot_username, f"/start {payload}")
+        except Exception as e:
+            logger.warning("send_message /start xato, StartBot bilan urinib ko'ramiz: %s", e)
+            # Zaxira variant: ba'zi hollarda oddiy xabar yuborib bo'lmasligi
+            # mumkin (masalan bot hali "Start" bosilmagan holatda bloklagan
+            # bo'lsa) — bunday holatda StartBot'ga qaytamiz.
+            await client.invoke(
+                functions.messages.StartBot(
+                    bot=bot_peer,
+                    peer=bot_peer,
+                    random_id=client.rnd_id(),
+                    start_param=payload,
+                )
             )
-        )
 
-    # 4. Handlerni oldindan o'rnatib, keyin StartBot yuborib, javoblarni yig'amiz
+    # 4. Handlerni oldindan o'rnatib, keyin /start yuborib, javoblarni yig'amiz
     new_messages = await _collect_new_messages(
         client=client,
         from_username=bot_username,
