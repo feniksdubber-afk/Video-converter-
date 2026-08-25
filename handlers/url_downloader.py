@@ -25,6 +25,7 @@ from typing import Optional
 from urllib.parse import urlparse
 
 import httpx
+from pyrogram.enums import ParseMode
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 
@@ -520,8 +521,9 @@ async def _send_to_archive(
     title: str,
     extra_caption: str,
     status_msg,
+    target_chat_id: Optional[int] = None,
 ) -> bool:
-    """Faylni arxiv guruhiga yuboradi."""
+    """Faylni belgilangan chatga (standart: arxiv guruhi) yuboradi."""
     ext = os.path.splitext(tmp_path)[1].lower()
     size = os.path.getsize(tmp_path)
     size_str = _fmt_size(size)
@@ -530,6 +532,8 @@ async def _send_to_archive(
     caption = f"📥 *{title}*\n📦 {size_str}"
     if extra_caption:
         caption += f"\n{extra_caption}"
+
+    chat_id = target_chat_id if target_chat_id is not None else ARCHIVE_GROUP_ID
 
     client = await get_user_client()
     if not client:
@@ -540,7 +544,7 @@ async def _send_to_archive(
         return False
 
     try:
-        await client.get_chat(ARCHIVE_GROUP_ID)
+        await client.get_chat(chat_id)
     except Exception:
         pass
 
@@ -555,7 +559,7 @@ async def _send_to_archive(
                 thumb = await _make_thumb(tmp_path, meta["duration"])
             try:
                 await client.send_video(
-                    chat_id=ARCHIVE_GROUP_ID,
+                    chat_id=chat_id,
                     video=tmp_path,
                     caption=caption,
                     supports_streaming=True,
@@ -563,7 +567,7 @@ async def _send_to_archive(
                     width=meta.get("width") or None,
                     height=meta.get("height") or None,
                     thumb=thumb or None,
-                    parse_mode="Markdown",
+                    parse_mode=ParseMode.MARKDOWN,
                 )
             finally:
                 if thumb and os.path.exists(thumb):
@@ -573,19 +577,19 @@ async def _send_to_archive(
                         pass
         elif ext in AUDIO_EXTS:
             await client.send_audio(
-                chat_id=ARCHIVE_GROUP_ID,
+                chat_id=chat_id,
                 audio=tmp_path,
                 caption=caption,
                 title=title,
-                parse_mode="Markdown",
+                parse_mode=ParseMode.MARKDOWN,
             )
         else:
             await client.send_document(
-                chat_id=ARCHIVE_GROUP_ID,
+                chat_id=chat_id,
                 document=tmp_path,
                 caption=caption,
                 file_name=filename,
-                parse_mode="Markdown",
+                parse_mode=ParseMode.MARKDOWN,
             )
         return True
     except Exception as e:
@@ -830,11 +834,14 @@ async def _finish_download(
 
     await status_msg.edit_text(
         f"✅ Yuklab olindi: `{size_str}`\n"
-        f"📤 Guruhga yuborilmoqda...",
+        f"📤 Yuborilmoqda...",
         parse_mode="Markdown",
     )
 
-    ok = await _send_to_archive(tmp_path, title, extra, status_msg)
+    ok = await _send_to_archive(
+        tmp_path, title, extra, status_msg,
+        target_chat_id=status_msg.chat_id,
+    )
 
     if ok:
         ext = os.path.splitext(tmp_path)[1].lower()
