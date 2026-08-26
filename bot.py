@@ -40,6 +40,9 @@ from handlers.subtitle_extractor import (
     show_subtitle_extractor_menu,
     handle_subext_pick, handle_subext_format, handle_subext_all,
 )
+from handlers.whisper_subtitle import (
+    show_whisper_subtitle_menu, handle_whisper_lang,
+)
 from handlers.streams import (
     show_stream_remover_menu, show_stream_extractor_menu, handle_extract_stream,
     handle_toggle_remove_stream, handle_select_all_audio_remove,
@@ -388,6 +391,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("subext_fmt_"):
         parts = data.split("_")
         await handle_subext_format(update, context, int(parts[-2]), parts[-1])
+    elif data == "whisper_subtitle":   await show_whisper_subtitle_menu(update, context)
+    elif data.startswith("wsub_lang_"):
+        await handle_whisper_lang(update, context, data[len("wsub_lang_"):])
 
     # ── Stream ───────────────────────────────────────────────
     elif data == "stream_remover":     await show_stream_remover_menu(update, context)

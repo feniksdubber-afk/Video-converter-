@@ -7,3 +7,4 @@ deep-translator==1.11.4
 boto3==1.35.0
 yt-dlp
 httpx
+faster-whisper==1.0.3
