@@ -110,11 +110,12 @@ async def advance_pipeline(episode_id: int) -> None:
         )
     existing = {r["stage"]: r["status"] for r in rows}
 
-    # Hozircha yozilgan yagona zanjir: ingestion -> segmentation.
-    # Keyingi Steplar (transcription, diarization, ...) shu ro'yxatga
+    # Hozircha yozilgan zanjir: ingestion -> segmentation -> transcription.
+    # Keyingi Steplar (diarization, translation, ...) shu ro'yxatga
     # qo'shiladi.
     CHAIN = [
         (JobStage.INGESTION.value, JobStage.SEGMENTATION.value),
+        (JobStage.SEGMENTATION.value, JobStage.TRANSCRIPTION.value),
     ]
 
     for prev_stage, next_stage in CHAIN:
@@ -131,8 +132,8 @@ async def advance_pipeline(episode_id: int) -> None:
             )
 
 
-LAST_IMPLEMENTED_STAGE = JobStage.SEGMENTATION.value
-"""Hozircha yozilgan pipeline shu bosqichda tugaydi (Step 6+ qo'shilguncha).
+LAST_IMPLEMENTED_STAGE = JobStage.TRANSCRIPTION.value
+"""Hozircha yozilgan pipeline shu bosqichda tugaydi (Step 7+ qo'shilguncha).
 Poll funksiyasi shu bosqich 'completed' bo'lguncha 'Tugallandi' demaydi."""
 
 
