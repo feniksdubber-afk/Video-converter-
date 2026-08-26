@@ -1,5 +1,7 @@
 import logging
 import os
+import asyncio
+import uuid
 from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -20,6 +22,9 @@ from handlers.start import (
     show_cat_stream, show_cat_tools, show_help_cb,
 )
 from handlers.video_handler import video_received
+from dubbing_bridge import start_dubbing_job, get_episode_progress, build_dub_r2_key, DubbingDisabledError
+from utils.r2_manager import upload_file as r2_upload
+from utils.auth import is_admin
 from handlers.converter import (
     show_convert_menu, show_resolution_menu, handle_format_choice, handle_resolution_choice,
     handle_convert_as_video, handle_convert_as_file,
@@ -614,11 +619,103 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📤 Video yuboring yoki /start bosing.")
 
 
+async def dub_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("❌ Bu buyruq faqat adminlar uchun.")
+        return
+    context.user_data["state"] = "awaiting_dub_video"
+    await update.message.reply_text(
+        "🎬 Dublyaj uchun video yuboring (fayl sifatida yoki video sifatida)."
+    )
+
+
+async def _poll_dub_progress(context, status_msg, episode_id: int, interval_sec: int = 5, max_polls: int = 720):
+    """Real-time progress: har `interval_sec`da holatni tekshirib, xabarni yangilaydi.
+    max_polls — cheksiz loop bo'lib qolmasligi uchun xavfsizlik chegarasi (~1 soat)."""
+    last_text = None
+    for _ in range(max_polls):
+        await asyncio.sleep(interval_sec)
+        try:
+            jobs = await get_episode_progress(episode_id)
+        except Exception:
+            logger.exception("Progress tekshirishda xato (episode_id=%s)", episode_id)
+            return
+
+        lines = [f"{j['stage']}: {j['status']}" for j in jobs]
+        text = f"🎬 Episode #{episode_id}\n" + "\n".join(lines)
+
+        if text != last_text:
+            try:
+                await status_msg.edit_text(text)
+            except Exception:
+                pass
+            last_text = text
+
+        statuses = {j["status"] for j in jobs}
+        if statuses and statuses <= {"completed"}:
+            await status_msg.edit_text(text + "\n\n✅ Tugallandi!")
+            return
+        if "failed" in statuses or "cancelled" in statuses:
+            await status_msg.edit_text(text + "\n\n❌ Xatolik yuz berdi.")
+            return
+
+
+async def _handle_dub_video_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """state == 'awaiting_dub_video' bo'lganda document_handler'dan chaqiriladi."""
+    user_id = update.message.from_user.id
+    context.user_data["state"] = None
+
+    video = update.message.video or update.message.document
+    if not video:
+        await update.message.reply_text("❗ Video fayl topilmadi, qaytadan urinib ko'ring.")
+        return
+
+    status_msg = await update.message.reply_text("⬇️ Video yuklab olinmoqda...")
+
+    file_name = getattr(video, "file_name", None) or f"{video.file_id}.mp4"
+    from config import TEMP_DIR
+    local_path = os.path.join(TEMP_DIR, f"dub_{uuid.uuid4().hex}_{file_name}")
+
+    try:
+        tg_file = await video.get_file()
+        await tg_file.download_to_drive(local_path)
+
+        await status_msg.edit_text("☁️ R2 ga yuklanmoqda...")
+        object_key = build_dub_r2_key(user_id, file_name)
+        await r2_upload(local_path, object_key)
+
+        await status_msg.edit_text("🎯 Navbatga qo'yilmoqda...")
+        episode_id, job_id = await start_dubbing_job(
+            project_name=file_name,
+            original_r2_key=object_key,
+            created_by=user_id,
+        )
+
+        await status_msg.edit_text(
+            f"✅ Navbatga qo'yildi (episode #{episode_id}).\n⏳ Progress kuzatilmoqda..."
+        )
+        asyncio.create_task(_poll_dub_progress(context, status_msg, episode_id))
+
+    except DubbingDisabledError:
+        await status_msg.edit_text("❌ Dublyaj hozircha o'chirilgan (DUBBING_ENABLED=false).")
+    except Exception as e:
+        logger.exception("Dubbing job yaratishda xato")
+        await status_msg.edit_text(f"❌ Xato: {e}")
+    finally:
+        if os.path.exists(local_path):
+            os.remove(local_path)
+
+
 async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     await ensure_loaded(user_id, context)
 
     state = context.user_data.get("state")
+
+    if state == "awaiting_dub_video":
+        await _handle_dub_video_received(update, context)
+        return
 
     if state == "save_new_topic_name":
         await update.message.reply_text("❗ Iltimos, topic uchun matn ko'rinishida nom yuboring (fayl emas).")
@@ -826,6 +923,7 @@ def main():
     app.add_handler(CommandHandler("r2", r2_command))
     app.add_handler(CommandHandler("batch", batch_command))
     app.add_handler(CommandHandler("save", save_topic_handler))
+    app.add_handler(CommandHandler("dub", dub_command))
     app.add_handler(CommandHandler("fasl_import", save_series_handler))
     app.add_handler(CommandHandler("savea", save_audio_topic_handler))
     app.add_handler(CommandHandler("a", audio_link_handler))
