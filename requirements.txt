@@ -9,3 +9,4 @@ yt-dlp
 httpx
 faster-whisper==1.0.3
 asyncpg==0.29.0
+alembic==1.13.2
