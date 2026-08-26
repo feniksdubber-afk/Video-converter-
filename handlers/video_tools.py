@@ -143,7 +143,7 @@ async def show_media_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]])
         )
     except Exception as e:
-        await query.edit_message_text(f"❌ Ma'lumot olishda xato:\n`{e}`", parse_mode="Markdown")
+        await query.edit_message_text(f"❌ Ma'lumot olishda xato:\n{e}")
 
 
 # ═══════════════════════════════════════════════════════════

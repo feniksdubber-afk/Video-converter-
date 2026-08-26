@@ -1,3 +1,5 @@
+
+
 import asyncio
 import os
 import subprocess
@@ -8,6 +10,14 @@ from utils.ffmpeg_utils import make_temp_path
 from utils.sender import send_file
 
 
+
+
+def _md_escape(text) -> str:
+    """Telegram Markdown (legacy) uchun maxsus belgilarni escape qiladi."""
+    s = str(text)
+    for ch in ("\\", "_", "*", "`", "["):
+        s = s.replace(ch, "\\" + ch)
+    return s
 # ── format helpers ────────────────────────────────────────────────────────────
 
 SUBTITLE_FORMATS = {
@@ -186,7 +196,7 @@ async def handle_subext_format(
     except Exception as e:
         if os.path.exists(output_path):
             os.remove(output_path)
-        await status_msg.edit_text(f"❌ Xato:\n`{e}`", parse_mode="Markdown")
+        await status_msg.edit_text(f"❌ Xato:\n{e}")
         await query.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
 
 
@@ -270,7 +280,7 @@ async def handle_subext_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     summary = f"✅ *{sent} ta subtitr yuborildi!*"
     if errors:
-        summary += f"\n⚠️ {len(errors)} ta xato:\n" + "\n".join(f"`{e}`" for e in errors[:3])
+        summary += f"\n⚠️ {len(errors)} ta xato:\n" + "\n".join(f"`{_md_escape(e)}`" for e in errors[:3])
 
     try:
         await status_msg.edit_text(summary, parse_mode="Markdown")

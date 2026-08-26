@@ -476,6 +476,21 @@ def _resolve_filename(msg) -> str:
     return f"media_{msg.id}{ext}"
 
 
+def _md_escape(text) -> str:
+    """Telegram Markdown (legacy) uchun maxsus belgilarni escape qiladi.
+
+    Fayl nomi, topic nomi kabi tashqi manbadan (Telegram xabari metadata'si,
+    foydalanuvchi kiritgan matn) keladigan har qanday matnni Markdown
+    formatlangan xabar ichiga qo'yishdan oldin shundan o'tkazish kerak —
+    aks holda `_`, `*`, `` ` ``, `[` kabi belgilar parse xatosiga olib
+    kelishi mumkin (masalan "Invalid parse mode" yoki "can't parse entities").
+    """
+    s = str(text)
+    for ch in ("\\", "_", "*", "`", "["):
+        s = s.replace(ch, "\\" + ch)
+    return s
+
+
 def _guess_ext(msg) -> str:
     if msg.document and msg.document.file_name:
         e = os.path.splitext(msg.document.file_name)[1]
@@ -620,7 +635,7 @@ async def _download_and_send(
                         await bot.send_message(
                             chat_id=status_msg.chat_id,
                             text=(
-                                f"⚠️ *{filename}*\n"
+                                f"⚠️ *{_md_escape(filename)}*\n"
                                 f"Hajmi: `{gb:.2f} GB` — userbot limiti (`{limit_gb:.0f} GB`) dan katta, "
                                 f"Telegram orqali yuklab bo'lmaydi.\n\n"
                                 f"☁️ R2'ga yuklashni istaysizmi?"
@@ -638,7 +653,7 @@ async def _download_and_send(
                         await bot.send_message(
                             chat_id=status_msg.chat_id,
                             text=(
-                                f"❌ *{filename}* hajmi (`{gb:.2f} GB`) userbot limitidan "
+                                f"❌ *{_md_escape(filename)}* hajmi (`{gb:.2f} GB`) userbot limitidan "
                                 f"(`{limit_gb:.0f} GB`) katta — o'tkazib yuborildi."
                             ),
                             parse_mode="Markdown",
@@ -701,7 +716,7 @@ async def _download_and_send(
             if not silent:
                 try:
                     await status_msg.edit_text(
-                        f"❌ *{filename}* to'liq yuklanmadi "
+                        f"❌ *{_md_escape(filename)}* to'liq yuklanmadi "
                         f"({downloaded_size/1024/1024:.1f} / {file_size/1024/1024:.1f} MB) — qayta urinib ko'ring.",
                         parse_mode="Markdown",
                         reply_markup=_refresh_kb(status_msg.message_id),
@@ -727,7 +742,7 @@ async def _download_and_send(
         if not silent:
             try:
                 await status_msg.edit_text(
-                    f"📤 *Yuborilmoqda:* `{filename}`",
+                    f"📤 *Yuborilmoqda:* `{_md_escape(filename)}`",
                     parse_mode="Markdown",
                     reply_markup=_refresh_kb(status_msg.message_id),
                 )
@@ -814,9 +829,10 @@ async def _download_and_send(
         logger.error("_download_and_send xato: %s", e, exc_info=True)
         if not silent:
             try:
+                # Exception matni escape qilinmagan bo'lishi mumkin — parse_mode'siz
+                # yuborib, ikkinchi Markdown xatosining oldini olamiz.
                 await status_msg.edit_text(
-                    f"⚠️ *{filename}* yuborilmadi:\n`{e}`",
-                    parse_mode="Markdown",
+                    f"⚠️ {_md_escape(filename)} yuborilmadi:\n{e}",
                     reply_markup=_refresh_kb(status_msg.message_id),
                 )
                 await asyncio.sleep(2)
@@ -1197,7 +1213,7 @@ async def _prepare_destination(update: Update, context: ContextTypes.DEFAULT_TYP
         if dest_chat:
             try:
                 await update.message.reply_text(
-                    f"📁 Arxiv: topic *{label[:60]}* ga saqlanmoqda...",
+                    f"📁 Arxiv: topic *{_md_escape(label[:60])}* ga saqlanmoqda...",
                     parse_mode="Markdown",
                 )
             except Exception:
@@ -1281,7 +1297,7 @@ async def save_link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "status_message_id": status.message_id,
         }
         await status.edit_text(
-            f"📁 *{_resolve_filename(msg)}*\n\n📌 Qaysi topicga saqlaymiz?",
+            f"📁 *{_md_escape(_resolve_filename(msg))}*\n\n📌 Qaysi topicga saqlaymiz?",
             parse_mode="Markdown",
             reply_markup=_dest_choice_kb(key),
         )
@@ -1887,7 +1903,7 @@ async def handle_save_new_topic_name(update: Update, context: ContextTypes.DEFAU
 
     status_ref = _MsgRef(context.bot, pending["status_chat_id"], pending["status_message_id"])
     try:
-        await status_ref.edit_text(f"✅ Topic yaratildi: *{name[:60]}*", parse_mode="Markdown")
+        await status_ref.edit_text(f"✅ Topic yaratildi: *{_md_escape(name[:60])}*", parse_mode="Markdown")
     except Exception:
         pass
 
@@ -1960,7 +1976,7 @@ async def save_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TY
         from utils.sender import _fmt_size
         try:
             await query.edit_message_text(
-                f"⬇️ *{filename}* (`{_fmt_size(file_size)}`) yuklab olinmoqda...",
+                f"⬇️ *{_md_escape(filename)}* (`{_fmt_size(file_size)}`) yuklab olinmoqda...",
                 parse_mode="Markdown",
             )
         except Exception:
@@ -1989,7 +2005,7 @@ async def save_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TY
             if os.path.splitext(filename)[1].lower() in video_ext:
                 try:
                     await query.edit_message_text(
-                        f"🎬 *{filename}*\nmp4/faststart tekshirilmoqda...",
+                        f"🎬 *{_md_escape(filename)}*\nmp4/faststart tekshirilmoqda...",
                         parse_mode="Markdown",
                     )
                 except Exception:
@@ -2013,7 +2029,7 @@ async def save_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception as e:
             logger.error("sr_r2big xato: %s", e, exc_info=True)
             try:
-                await query.edit_message_text(f"❌ Xato:\n`{e}`", parse_mode="Markdown")
+                await query.edit_message_text(f"❌ Xato:\n{e}")
             except Exception:
                 pass
         finally:
@@ -2398,7 +2414,7 @@ async def _extract_and_send_audio_for_one(
                 report("⚠️ audio strim topilmadi")
             if not silent:
                 try:
-                    await status_msg.edit_text(f"⚠️ *{filename}* ichida audio strim topilmadi.", parse_mode="Markdown")
+                    await status_msg.edit_text(f"⚠️ *{_md_escape(filename)}* ichida audio strim topilmadi.", parse_mode="Markdown")
                 except Exception:
                     pass
             return False

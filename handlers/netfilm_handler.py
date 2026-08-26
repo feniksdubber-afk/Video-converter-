@@ -14,6 +14,7 @@ import time
 import uuid
 
 import httpx
+from pyrogram.enums import ParseMode
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 
@@ -21,6 +22,15 @@ from config import ARCHIVE_GROUP_ID, TEMP_DIR
 from handlers.save_restricted import get_user_client
 
 logger = logging.getLogger(__name__)
+
+
+def _md_escape(text) -> str:
+    """Telegram Markdown (legacy) uchun maxsus belgilarni escape qiladi."""
+    s = str(text)
+    for ch in ("\\", "_", "*", "`", "["):
+        s = s.replace(ch, "\\" + ch)
+    return s
+
 
 # ── Konstantlar ───────────────────────────────────────────────────────────────
 
@@ -332,7 +342,7 @@ async def netfilm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts.append(f"💬 {sub_count} subtitr")
 
     await status.edit_text(
-        f"✅ *{title}* — {ep_label}\n\n"
+        f"✅ *{_md_escape(title)}* — {_md_escape(ep_label)}\n\n"
         f"{'  •  '.join(parts)}\n\n"
         f"Yuklab olmoqchi bo'lgan streamni tanlang:",
         parse_mode="Markdown",
@@ -416,7 +426,7 @@ async def netfilm_callback_handler(update: Update, context: ContextTypes.DEFAULT
     ep_label = pending["ep_label"]
 
     status = await query.message.reply_text(
-        f"⏳ *{title}* — {ep_label}\n"
+        f"⏳ *{_md_escape(title)}* — {_md_escape(ep_label)}\n"
         f"`{stream['label']}` yuklab olinmoqda...",
         parse_mode="Markdown",
     )
@@ -468,7 +478,7 @@ async def _download_stream(stream: dict, title: str, ep_label: str, status_msg):
         total_str = _fmt_size(total) if total else "?"
 
         await status_msg.edit_text(
-            f"⬇️ *{title}* — {ep_label}\n"
+            f"⬇️ *{_md_escape(title)}* — {_md_escape(ep_label)}\n"
             f"`{label}`\n\n"
             f"`{'▱' * 14}` `0%`\n"
             f"`0.0 MB` / `{total_str}`",
@@ -498,7 +508,7 @@ async def _download_stream(stream: dict, title: str, ep_label: str, status_msg):
                             cur = _fmt_size(downloaded[0])
                             try:
                                 await status_msg.edit_text(
-                                    f"⬇️ *{title}* — {ep_label}\n"
+                                    f"⬇️ *{_md_escape(title)}* — {_md_escape(ep_label)}\n"
                                     f"`{label}`\n\n"
                                     f"`{bar}` `{pct}%`\n"
                                     f"`{cur}` / `{total_str}`",
@@ -526,7 +536,7 @@ async def _download_stream(stream: dict, title: str, ep_label: str, status_msg):
             await status_msg.edit_text("❌ Userbot ulangmagan!")
             return
 
-        caption = f"🎬 *{title}* — {ep_label}\n`{label}`\n📦 {size_str}"
+        caption = f"🎬 *{_md_escape(title)}* — {_md_escape(ep_label)}\n`{_md_escape(label)}`\n📦 {size_str}"
 
         try:
             await client.get_chat(ARCHIVE_GROUP_ID)
@@ -549,7 +559,7 @@ async def _download_stream(stream: dict, title: str, ep_label: str, status_msg):
                     width=meta.get("width") or None,
                     height=meta.get("height") or None,
                     thumb=thumb_path or None,
-                    parse_mode="Markdown",
+                    parse_mode=ParseMode.MARKDOWN,
                 )
             finally:
                 if thumb_path and os.path.exists(thumb_path):
@@ -564,7 +574,7 @@ async def _download_stream(stream: dict, title: str, ep_label: str, status_msg):
                 audio=tmp_path,
                 caption=caption,
                 title=f"{title} — {ep_label}",
-                parse_mode="Markdown",
+                parse_mode=ParseMode.MARKDOWN,
             )
 
         else:  # subtitle
@@ -573,7 +583,7 @@ async def _download_stream(stream: dict, title: str, ep_label: str, status_msg):
                 document=tmp_path,
                 caption=caption,
                 file_name=filename,
-                parse_mode="Markdown",
+                parse_mode=ParseMode.MARKDOWN,
             )
 
         dur_str = ""
@@ -586,7 +596,7 @@ async def _download_stream(stream: dict, title: str, ep_label: str, status_msg):
                 dur_str += f"\n📐 `{meta['width']}×{meta['height']}`"
 
         await status_msg.edit_text(
-            f"✅ *{title}* — {ep_label}\n"
+            f"✅ *{_md_escape(title)}* — {_md_escape(ep_label)}\n"
             f"`{label}`\n\n"
             f"📦 `{size_str}`{dur_str}\n\n"
             f"🗂 Guruhga yuborildi!",

@@ -90,7 +90,7 @@ async def handle_convert_as_video(update: Update, context: ContextTypes.DEFAULT_
         settings["upload_mode"] = "video"
         await send_file(query.message, video_path, video_name, "✅ Video sifatida yuborildi!", context=context)
     except Exception as e:
-        await query.message.reply_text(f"❌ Xato:\n`{e}`", parse_mode="Markdown")
+        await query.message.reply_text(f"❌ Xato:\n{e}")
         return
     finally:
         settings["upload_mode"] = original_mode
@@ -117,7 +117,7 @@ async def handle_convert_as_file(update: Update, context: ContextTypes.DEFAULT_T
         settings["upload_mode"] = "document"
         await send_file(query.message, video_path, video_name, "✅ Fayl sifatida yuborildi!", context=context)
     except Exception as e:
-        await query.message.reply_text(f"❌ Xato:\n`{e}`", parse_mode="Markdown")
+        await query.message.reply_text(f"❌ Xato:\n{e}")
         return
     finally:
         settings["upload_mode"] = original_mode

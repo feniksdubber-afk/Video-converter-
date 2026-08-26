@@ -22,6 +22,7 @@ from typing import Optional
 from urllib.parse import quote_plus, urlparse
 
 import httpx
+from pyrogram.enums import ParseMode
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 
@@ -89,6 +90,20 @@ def _fmt_dur(seconds: int) -> str:
     m, s = divmod(seconds, 60)
     h, m = divmod(m, 60)
     return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+def _md_escape(text) -> str:
+    """Telegram Markdown (legacy) uchun maxsus belgilarni escape qiladi.
+
+    Torrent nomlari, fayl nomlari kabi tashqi manbadan keladigan matnlarni
+    Markdown formatlangan caption/xabar ichiga qo'yishdan oldin shundan
+    o'tkazish kerak — aks holda `_`, `*`, `` ` ``, `[` kabi belgilar parse
+    xatosiga olib kelishi mumkin.
+    """
+    s = str(text)
+    for ch in ("\\", "_", "*", "`", "["):
+        s = s.replace(ch, "\\" + ch)
+    return s
 
 def _fmt_bytes(b: int) -> str:
     if not b:
@@ -403,7 +418,7 @@ async def _download_torrent(
                     elapsed = int(now - start_time)
                     try:
                         await status_msg.edit_text(
-                            f"🧲 *{title[:50]}*\n\n"
+                            f"🧲 *{_md_escape(title)[:50]}*\n\n"
                             f"`{bar}` `{pct}%`\n"
                             f"🚀 `{speed_str[0]}`  👥 `{peers[0]} peer`\n"
                             f"⏱ ETA: `{eta_str[0]}`  ⏳ `{_fmt_dur(elapsed)}`",
@@ -573,7 +588,7 @@ async def torrent_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, r in enumerate(results, 1):
         seed_icon = "🟢" if r.seeds > 50 else "🟡" if r.seeds > 10 else "🔴"
         lines.append(
-            f"{i}. `{r.title[:45]}`\n"
+            f"{i}. `{_md_escape(r.title[:45])}`\n"
             f"   📦 {r.size}  {seed_icon} {_fmt_seeds(r.seeds)} seed  [{r.source}]"
         )
 
@@ -631,7 +646,7 @@ async def torrent_callback_handler(update: Update, context: ContextTypes.DEFAULT
             except Exception:
                 pass
             status = await query.message.reply_text(
-                f"🧲 *{result.title[:60]}*\n"
+                f"🧲 *{_md_escape(result.title)[:60]}*\n"
                 f"📦 {result.size}  🔴 0 seed (majburiy)\n\n"
                 f"Yuklab olinmoqda... (seeder kutilmoqda)",
                 parse_mode="Markdown",
@@ -686,7 +701,7 @@ async def torrent_callback_handler(update: Update, context: ContextTypes.DEFAULT
             ]
         ])
         await query.edit_message_text(
-            f"⚠️ *{result.title[:60]}*\n\n"
+            f"⚠️ *{_md_escape(result.title)[:60]}*\n\n"
             f"🔴 Seeder: 0 — fayl yuklab olinmasligi mumkin!\n"
             f"Torrent 5 daqiqagacha kutadi, muvaffaqiyatsiz tugashi ehtimoli yuqori.\n\n"
             f"Baribir urinib ko'rasizmi?",
@@ -703,7 +718,7 @@ async def torrent_callback_handler(update: Update, context: ContextTypes.DEFAULT
 
     seed_icon = "🟢" if result.seeds > 50 else "🟡" if result.seeds > 10 else "🔴"
     status = await query.message.reply_text(
-        f"🧲 *{result.title[:60]}*\n"
+        f"🧲 *{_md_escape(result.title)[:60]}*\n"
         f"📦 {result.size}  {seed_icon} {result.seeds} seed\n\n"
         f"Yuklab olinmoqda...",
         parse_mode="Markdown",
@@ -748,7 +763,7 @@ async def _run_download(magnet: str, title: str, status_msg, original_msg) -> No
         _cleanup_dir(tmp_path)
         return
 
-    caption = f"🧲 *{title[:60]}*\n📦 `{size_str}`\n📄 `{fname}`"
+    caption = f"🧲 *{_md_escape(title[:60])}*\n📦 `{size_str}`\n📄 `{_md_escape(fname)}`"
 
     VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts"}
     AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".flac", ".wav"}
@@ -774,7 +789,7 @@ async def _run_download(magnet: str, title: str, status_msg, original_msg) -> No
                     width=meta.get("width") or None,
                     height=meta.get("height") or None,
                     thumb=thumb or None,
-                    parse_mode="Markdown",
+                    parse_mode=ParseMode.MARKDOWN,
                 )
             finally:
                 if thumb and os.path.exists(thumb):
@@ -788,7 +803,7 @@ async def _run_download(magnet: str, title: str, status_msg, original_msg) -> No
                 audio=tmp_path,
                 caption=caption,
                 title=title,
-                parse_mode="Markdown",
+                parse_mode=ParseMode.MARKDOWN,
             )
         else:
             await client.send_document(
@@ -796,11 +811,11 @@ async def _run_download(magnet: str, title: str, status_msg, original_msg) -> No
                 document=tmp_path,
                 caption=caption,
                 file_name=fname,
-                parse_mode="Markdown",
+                parse_mode=ParseMode.MARKDOWN,
             )
 
         await status_msg.edit_text(
-            f"✅ *{title[:60]}*\n\n"
+            f"✅ *{_md_escape(title)[:60]}*\n\n"
             f"📦 `{size_str}`\n"
             f"🗂 Guruhga yuborildi!",
             parse_mode="Markdown",
@@ -808,9 +823,10 @@ async def _run_download(magnet: str, title: str, status_msg, original_msg) -> No
 
     except Exception as e:
         logger.exception("Guruhga yuborish xato: %s", e)
+        # Exception matni noma'lum belgilarni o'z ichiga olishi mumkin —
+        # parse_mode'siz yuborib, ikkinchi Markdown xatosining oldini olamiz.
         await status_msg.edit_text(
-            f"✅ Yuklab olindi, lekin yuborishda xato:\n`{e}`",
-            parse_mode="Markdown",
+            f"✅ Yuklab olindi, lekin yuborishda xato:\n{e}",
         )
     finally:
         _cleanup_dir(tmp_path)

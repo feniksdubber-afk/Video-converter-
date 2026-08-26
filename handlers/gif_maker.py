@@ -194,5 +194,5 @@ async def handle_gif_duration(
         for p in [palette_path, output_path]:
             if os.path.exists(p):
                 os.remove(p)
-        await status_msg.edit_text(f"❌ GIF yaratishda xato:\n`{e}`", parse_mode="Markdown")
+        await status_msg.edit_text(f"❌ GIF yaratishda xato:\n{e}")
         await query.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())

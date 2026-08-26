@@ -125,6 +125,20 @@ def _safe_filename(name: str, max_len: int = 60) -> str:
     return name[:max_len] or f"file_{uuid.uuid4().hex[:8]}"
 
 
+def _md_escape(text) -> str:
+    """Telegram Markdown (legacy) uchun maxsus belgilarni escape qiladi.
+
+    Tashqi manbadan (URL, sarlavha, fayl nomi) keladigan matnlarni Markdown
+    formatlangan caption/xabar ichiga qo'yishdan oldin shundan o'tkazish
+    kerak — aks holda `_`, `*`, `` ` ``, `[` kabi belgilar parse xatosiga
+    olib kelishi mumkin.
+    """
+    s = str(text)
+    for ch in ("\\", "_", "*", "`", "["):
+        s = s.replace(ch, "\\" + ch)
+    return s
+
+
 def _detect_mode(url: str) -> str:
     """URL turi asosida yuklab olish rejimini aniqlaydi."""
     parsed = urlparse(url)
@@ -299,7 +313,7 @@ async def _ytdlp_download(
             i = (i + 1) % 4
             try:
                 await status_msg.edit_text(
-                    f"⬇️ *{title}*\n"
+                    f"⬇️ *{_md_escape(title)}*\n"
                     f"yt-dlp yuklab olinmoqda{dots[i]}",
                     parse_mode="Markdown",
                 )
@@ -410,7 +424,7 @@ async def _direct_download(url: str, status_msg, title: str) -> Optional[str]:
                                 eta_str = f"\n⏱ Qoldi: `{_fmt_dur(eta)}`"
                             try:
                                 await status_msg.edit_text(
-                                    f"⬇️ *{title}*\n\n"
+                                    f"⬇️ *{_md_escape(title)}*\n\n"
                                     f"`{bar}` `{pct}%`\n"
                                     f"`{cur}` / `{total_str}`  🚀 `{speed_str}`{eta_str}",
                                     parse_mode="Markdown",
@@ -420,7 +434,7 @@ async def _direct_download(url: str, status_msg, title: str) -> Optional[str]:
                         else:
                             try:
                                 await status_msg.edit_text(
-                                    f"⬇️ *{title}*\n\n"
+                                    f"⬇️ *{_md_escape(title)}*\n\n"
                                     f"Yuklab olinmoqda: `{_fmt_size(downloaded[0])}`  🚀 `{speed_str}`",
                                     parse_mode="Markdown",
                                 )
@@ -486,7 +500,7 @@ async def _hls_download(url: str, status_msg, title: str) -> Optional[str]:
             elapsed = int(time.monotonic() - start_time)
             try:
                 await status_msg.edit_text(
-                    f"📡 *{title}*\n"
+                    f"📡 *{_md_escape(title)}*\n"
                     f"HLS stream yuklab olinmoqda...\n"
                     f"⏱ Ketgan vaqt: `{_fmt_dur(elapsed)}`",
                     parse_mode="Markdown",
@@ -529,9 +543,9 @@ async def _send_to_archive(
     size_str = _fmt_size(size)
     filename = _safe_filename(title) + ext
 
-    caption = f"📥 *{title}*\n📦 {size_str}"
+    caption = f"📥 *{_md_escape(title)}*\n📦 {size_str}"
     if extra_caption:
-        caption += f"\n{extra_caption}"
+        caption += f"\n{_md_escape(extra_caption)}"
 
     chat_id = target_chat_id if target_chat_id is not None else ARCHIVE_GROUP_ID
 
@@ -594,9 +608,10 @@ async def _send_to_archive(
         return True
     except Exception as e:
         logger.exception("Guruhga yuborish xato: %s", e)
+        # Exception matni noma'lum belgilarni o'z ichiga olishi mumkin —
+        # parse_mode'siz yuborib, ikkinchi Markdown xatosining oldini olamiz.
         await status_msg.edit_text(
-            f"✅ Yuklab olindi, lekin guruhga yuborishda xato:\n`{e}`",
-            parse_mode="Markdown",
+            f"✅ Yuklab olindi, lekin guruhga yuborishda xato:\n{e}",
         )
         return False
 
@@ -782,7 +797,7 @@ async def dl_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         pass
 
     status = await query.message.reply_text(
-        f"⬇️ *{title}*\n"
+        f"⬇️ *{_md_escape(title)}*\n"
         f"`{fmt['label']}` yuklab olinmoqda...",
         parse_mode="Markdown",
     )
@@ -854,7 +869,7 @@ async def _finish_download(
                 meta_str += f"\n📐 `{meta['width']}×{meta['height']}`"
 
         await status_msg.edit_text(
-            f"✅ *{title}*\n\n"
+            f"✅ *{_md_escape(title)}*\n\n"
             f"📦 `{size_str}`{meta_str}\n"
             f"🗂 Guruhga yuborildi!",
             parse_mode="Markdown",

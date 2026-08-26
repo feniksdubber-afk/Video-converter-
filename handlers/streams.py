@@ -1,3 +1,5 @@
+
+
 import asyncio
 import os
 import subprocess
@@ -9,6 +11,14 @@ from utils.ffmpeg_utils import make_temp_path
 from utils.sender import send_file
 
 
+
+
+def _md_escape(text) -> str:
+    """Telegram Markdown (legacy) uchun maxsus belgilarni escape qiladi."""
+    s = str(text)
+    for ch in ("\\", "_", "*", "`", "["):
+        s = s.replace(ch, "\\" + ch)
+    return s
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 def _get_streams(video_path: str) -> list[dict]:
@@ -227,7 +237,7 @@ async def handle_remove_confirm(update: Update, context: ContextTypes.DEFAULT_TY
         from utils.post_action import ask_post_action
         await ask_post_action(status_msg, context, f"{len(selected)} ta stream o'chirildi")
     except Exception as e:
-        await status_msg.edit_text(f"❌ Xato:\n`{e}`", parse_mode="Markdown")
+        await status_msg.edit_text(f"❌ Xato:\n{e}")
         from utils.keyboards import main_menu_keyboard
         await query.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
 
@@ -318,7 +328,7 @@ async def handle_extract_stream(update: Update, context: ContextTypes.DEFAULT_TY
         os.remove(output_path)
         await query.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
     except Exception as e:
-        await status_msg.edit_text(f"❌ Xato:\n`{e}`", parse_mode="Markdown")
+        await status_msg.edit_text(f"❌ Xato:\n{e}")
         await query.message.reply_text("Boshqa amal?", reply_markup=main_menu_keyboard())
 
 
@@ -429,7 +439,7 @@ async def _extract_by_type(query, context, stype_filter: str):
 
     summary = f"✅ *{sent} ta stream yuborildi!*"
     if errors:
-        summary += f"\n⚠️ {len(errors)} ta xato:\n" + "\n".join(f"`{e}`" for e in errors[:3])
+        summary += f"\n⚠️ {len(errors)} ta xato:\n" + "\n".join(f"`{_md_escape(e)}`" for e in errors[:3])
 
     try:
         await status_msg.edit_text(summary, parse_mode="Markdown")
