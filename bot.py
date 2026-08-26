@@ -88,6 +88,7 @@ from handlers.kino_sender import kino_sender_handler, kino_callback_handler
 from handlers.netfilm_handler import netfilm_handler, netfilm_callback_handler
 from handlers.url_downloader import dl_handler, dl_callback_handler
 from handlers.torrent_handler import torrent_handler, torrent_callback_handler
+from handlers.status import status_handler
 from utils.auth_handlers import (
     auth_gate, allow_handler, deny_handler, users_handler,
     studios_list_handler, studio_unbind_handler, studio_token_handler, handle_studio_pick,
@@ -710,8 +711,10 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
-def _cleanup_temp_dir():
-    """24 soatdan eski vaqtinchalik fayllarni o'chiradi (bot restart da)."""
+def _cleanup_temp_dir(max_age_seconds: int = 86400):
+    """TEMP_DIR dagi `max_age_seconds` dan eski vaqtinchalik fayllarni o'chiradi.
+    Standart: 24 soat (bot ishga tushganda). Fon-tsikl uchun qisqaroq qiymat
+    bilan chaqiriladi (masalan 6 soat)."""
     from config import TEMP_DIR
     import time
     now = time.time()
@@ -720,7 +723,7 @@ def _cleanup_temp_dir():
         for fname in os.listdir(TEMP_DIR):
             fpath = os.path.join(TEMP_DIR, fname)
             try:
-                if os.path.isfile(fpath) and now - os.path.getmtime(fpath) > 86400:
+                if os.path.isfile(fpath) and now - os.path.getmtime(fpath) > max_age_seconds:
                     os.remove(fpath)
                     removed += 1
             except Exception:
@@ -768,6 +771,21 @@ async def _post_init(app):
 
     asyncio.create_task(_autotopic_loop())
 
+    async def _cleanup_loop():
+        # Bot uzoq vaqt (kunlar/haftalab) qayta ishga tushmasdan ishlashi
+        # mumkin — shuning uchun faqat restart paytidagi tozalash yetarli
+        # emas. Har 1 soatda TEMP_DIR dagi 6 soatdan eski vaqtinchalik
+        # fayllarni o'chiramiz, disk to'lib qolmasligi uchun.
+        await asyncio.sleep(60)
+        while True:
+            try:
+                _cleanup_temp_dir(max_age_seconds=6 * 3600)
+            except Exception as e:
+                logger.warning("TEMP_DIR tozalash tsiklida xato: %s", e)
+            await asyncio.sleep(3600)
+
+    asyncio.create_task(_cleanup_loop())
+
 
 def main():
     if not BOT_TOKEN:
@@ -812,6 +830,7 @@ def main():
     app.add_handler(CommandHandler("allow", allow_handler))
     app.add_handler(CommandHandler("deny", deny_handler))
     app.add_handler(CommandHandler("users", users_handler))
+    app.add_handler(CommandHandler("status", status_handler))
     app.add_handler(CommandHandler("studiyalar", studios_list_handler))
     app.add_handler(CommandHandler("studiya_chiqar", studio_unbind_handler))
     app.add_handler(CommandHandler("studiya_token", studio_token_handler))
