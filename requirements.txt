@@ -8,3 +8,4 @@ boto3==1.35.0
 yt-dlp
 httpx
 faster-whisper==1.0.3
+asyncpg==0.29.0
