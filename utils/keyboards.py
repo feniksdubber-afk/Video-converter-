@@ -121,6 +121,7 @@ def cat_subtitle_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🌐 Sub Tarjimon",       callback_data="sub_translate"),
+            InlineKeyboardButton("🗣 Auto-Subtitr (AI)",  callback_data="whisper_subtitle"),
         ],
         [InlineKeyboardButton("🔙 Asosiy Menyu",          callback_data="back")],
     ])
