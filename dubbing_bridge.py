@@ -72,6 +72,70 @@ async def start_dubbing_job(
     return episode_id, job.id
 
 
+async def _get_latest_artifact_hash(episode_id: int, stage: str) -> str | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT content_hash FROM artifacts
+            WHERE episode_id = $1 AND stage = $2
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            episode_id, stage,
+        )
+    return row["content_hash"] if row else None
+
+
+async def advance_pipeline(episode_id: int) -> None:
+    """
+    Bosqichlar orasidagi zanjirlash (chaining).
+
+    Hozirgi `dubbing/*` kodida (Step 1-4) bosqichlar orasida avtomatik
+    o'tish yozilmagan — har bir bosqich tugagach KEYINGI job'ni kim
+    navbatga qo'yishi ataylab bu ko'prikka (Step 5) qoldirilgan.
+
+    Chaqirilganda: episode'ning joriy job holatlarini tekshiradi, agar
+    bir bosqich 'completed' bo'lsa va keyingi bosqich uchun job hali
+    yaratilmagan bo'lsa — uni yaratadi (input_hash = oldingi bosqich
+    artifact'ining content_hash'i, xuddi segmenter.py docstringida
+    ko'rsatilganidek).
+    """
+    pool = await get_pool()
+    job_manager = JobManager(pool)
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT stage, status FROM jobs WHERE episode_id = $1", episode_id,
+        )
+    existing = {r["stage"]: r["status"] for r in rows}
+
+    # Hozircha yozilgan yagona zanjir: ingestion -> segmentation.
+    # Keyingi Steplar (transcription, diarization, ...) shu ro'yxatga
+    # qo'shiladi.
+    CHAIN = [
+        (JobStage.INGESTION.value, JobStage.SEGMENTATION.value),
+    ]
+
+    for prev_stage, next_stage in CHAIN:
+        if existing.get(prev_stage) == "completed" and next_stage not in existing:
+            content_hash = await _get_latest_artifact_hash(episode_id, prev_stage)
+            await job_manager.create_job(
+                episode_id=episode_id,
+                stage=next_stage,
+                input_hash=content_hash,
+            )
+            logger.info(
+                "Zanjirlandi: episode_id=%s %s -> %s (input_hash=%s)",
+                episode_id, prev_stage, next_stage, content_hash,
+            )
+
+
+LAST_IMPLEMENTED_STAGE = JobStage.SEGMENTATION.value
+"""Hozircha yozilgan pipeline shu bosqichda tugaydi (Step 6+ qo'shilguncha).
+Poll funksiyasi shu bosqich 'completed' bo'lguncha 'Tugallandi' demaydi."""
+
+
 async def get_episode_progress(episode_id: int) -> list[dict]:
     """
     Berilgan episode uchun barcha job'larning joriy holatini qaytaradi

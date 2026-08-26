@@ -22,7 +22,7 @@ from handlers.start import (
     show_cat_stream, show_cat_tools, show_help_cb,
 )
 from handlers.video_handler import video_received
-from dubbing_bridge import start_dubbing_job, get_episode_progress, build_dub_r2_key, DubbingDisabledError
+from dubbing_bridge import start_dubbing_job, get_episode_progress, build_dub_r2_key, DubbingDisabledError, advance_pipeline, LAST_IMPLEMENTED_STAGE
 from utils.r2_manager import upload_file as r2_upload
 from utils.auth import is_admin
 from handlers.converter import (
@@ -637,6 +637,7 @@ async def _poll_dub_progress(context, status_msg, episode_id: int, interval_sec:
     for _ in range(max_polls):
         await asyncio.sleep(interval_sec)
         try:
+            await advance_pipeline(episode_id)
             jobs = await get_episode_progress(episode_id)
         except Exception:
             logger.exception("Progress tekshirishda xato (episode_id=%s)", episode_id)
@@ -652,8 +653,10 @@ async def _poll_dub_progress(context, status_msg, episode_id: int, interval_sec:
                 pass
             last_text = text
 
-        statuses = {j["status"] for j in jobs}
-        if statuses and statuses <= {"completed"}:
+        jobs_by_stage = {j["stage"]: j["status"] for j in jobs}
+        statuses = set(jobs_by_stage.values())
+
+        if jobs_by_stage.get(LAST_IMPLEMENTED_STAGE) == "completed":
             await status_msg.edit_text(text + "\n\n✅ Tugallandi!")
             return
         if "failed" in statuses or "cancelled" in statuses:
