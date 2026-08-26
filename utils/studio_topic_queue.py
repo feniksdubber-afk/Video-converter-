@@ -11,12 +11,12 @@ item: {message_id, season, episode, file_id, added_at}
 Film uchun (kind="m") season=episode=0 (bitta yagona item).
 """
 
-import json
 import logging
 import os
 import time
 
 from config import DATA_DIR
+from utils.atomic_json import load_json, save_json
 
 logger = logging.getLogger(__name__)
 
@@ -28,12 +28,7 @@ _loaded = False
 
 def _load() -> None:
     global _queue, _loaded
-    if os.path.isfile(_FILE):
-        try:
-            with open(_FILE, encoding="utf-8") as f:
-                _queue = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            _queue = {}
+    _queue = load_json(_FILE, default={})
     _loaded = True
 
 
@@ -43,11 +38,7 @@ def _ensure_loaded() -> None:
 
 
 def _save() -> None:
-    try:
-        with open(_FILE, "w", encoding="utf-8") as f:
-            json.dump(_queue, f, ensure_ascii=False, indent=2)
-    except OSError as e:
-        logger.warning("studio_topic_queue saqlash xato: %s", e)
+    save_json(_FILE, _queue)
 
 
 def add_item(

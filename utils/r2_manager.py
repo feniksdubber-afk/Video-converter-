@@ -201,12 +201,17 @@ async def generate_presigned_url(object_key: str, expires: int = 3600) -> str | 
 # ── Papka tizimi (prefix-based) ─────────────────────────────────────────────
 
 def join_key(*parts: str) -> str:
-    """S3/R2 kaliti — har doim `/` bilan (Windows muammosiz)."""
+    """S3/R2 kaliti — har doim `/` bilan (Windows muammosiz).
+    `.` va `..` segmentlarini olib tashlaydi — path traversal himoyasi
+    (kalitlar odatda avtomatik generatsiya qilinsa ham, qo'shimcha
+    ehtiyot chorasi sifatida)."""
     cleaned = []
     for p in parts:
         if not p:
             continue
-        cleaned.extend(x for x in p.replace("\\", "/").split("/") if x)
+        for x in p.replace("\\", "/").split("/"):
+            if x and x not in (".", ".."):
+                cleaned.append(x)
     return "/".join(cleaned)
 
 

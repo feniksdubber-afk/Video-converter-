@@ -11,7 +11,6 @@ import os
 import asyncio
 import subprocess
 import hashlib
-import json
 import logging
 import time
 import aiohttp
@@ -37,23 +36,13 @@ _R2_PENDING_TTL = 3600  # 1 soat
 
 
 def _load_r2_pending() -> dict[str, dict]:
-    if os.path.isfile(_R2_PENDING_FILE):
-        try:
-            with open(_R2_PENDING_FILE, encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                return data
-        except (OSError, json.JSONDecodeError) as e:
-            logger.warning("r2_pending o'qish xato: %s", e)
-    return {}
+    from utils.atomic_json import load_json
+    return load_json(_R2_PENDING_FILE, default={})
 
 
 def _persist_r2_pending() -> None:
-    try:
-        with open(_R2_PENDING_FILE, "w", encoding="utf-8") as f:
-            json.dump(_r2_pending, f, ensure_ascii=False)
-    except OSError as e:
-        logger.warning("r2_pending saqlash xato: %s", e)
+    from utils.atomic_json import save_json
+    save_json(_R2_PENDING_FILE, _r2_pending)
 
 
 _r2_pending: dict[str, dict] = _load_r2_pending()

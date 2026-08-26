@@ -19,18 +19,39 @@ Ishlatilishi:
 import asyncio
 import itertools
 import logging
+import os
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 logger = logging.getLogger(__name__)
 
-MAX_CONCURRENT = 1  # bir vaqtda nechta og'ir amal parallel ishlashi mumkin
+
+def _default_max_concurrent() -> int:
+    """
+    Bir vaqtda nechta og'ir amal (FFmpeg/yuklash) parallel ishlashi mumkinligini
+    aniqlaydi. `.env` dagi MAX_CONCURRENT_TASKS ustunlik qiladi; bo'lmasa,
+    server CPU yadrolari soniga qarab avtomatik hisoblanadi (yarmi, min 1,
+    max 4 — FFmpeg CPU-talab bo'lgani uchun ko'p parallel vazifa foydali emas).
+    """
+    env_val = os.environ.get("MAX_CONCURRENT_TASKS", "").strip()
+    if env_val.isdigit() and int(env_val) > 0:
+        return int(env_val)
+    try:
+        cpu_count = os.cpu_count() or 1
+    except Exception:
+        cpu_count = 1
+    return max(1, min(4, cpu_count // 2 or 1))
+
+
+MAX_CONCURRENT = _default_max_concurrent()
 _POLL_TIMEOUT = 3    # navbat holatini necha soniyada bir yangilab turish (fallback)
 
 _waiting: list[dict] = []   # FIFO: [{"id", "user_id", "cancelled"}, ...]
 _running = 0
 _wake = asyncio.Event()
 _counter = itertools.count(1)
+
+logger.info("Navbat tizimi: MAX_CONCURRENT=%d", MAX_CONCURRENT)
 
 
 def new_ticket() -> int:
@@ -53,9 +74,9 @@ def cancel_ticket(ticket_id: int) -> bool:
     return False
 
 
-def queue_snapshot() -> tuple[int, int]:
-    """(band joylar, navbatdagilar soni) -- diagnostika/log uchun."""
-    return _running, len(_waiting)
+def queue_snapshot() -> tuple[int, int, int]:
+    """(band joylar, navbatdagilar soni, umumiy sig'im) -- diagnostika/status uchun."""
+    return _running, len(_waiting), MAX_CONCURRENT
 
 
 async def acquire_slot(ticket_id: int, user_id: int, status_msg, label: str = "Vazifa") -> bool:
@@ -80,8 +101,13 @@ async def acquire_slot(ticket_id: int, user_id: int, status_msg, label: str = "V
             if entry["cancelled"]:
                 return False
 
+            # Navbat boshida turgan va bo'sh slot bo'lsa — joy olamiz.
+            # Joy olgan zahoti _waiting ro'yxatidan chiqaramiz, aks holda
+            # MAX_CONCURRENT > 1 bo'lganda ham faqat bitta kishi ilgarilab,
+            # qolgan bo'sh slotlar band qilinmay qoladi.
             if _waiting and _waiting[0] is entry and _running < MAX_CONCURRENT:
                 _running += 1
+                _waiting.remove(entry)
                 return True
 
             position = (_waiting.index(entry) + 1) if entry in _waiting else 0

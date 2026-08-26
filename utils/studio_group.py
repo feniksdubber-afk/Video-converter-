@@ -9,12 +9,12 @@ Saqlanadigan fayllar:
   studio_posted.json  -> slug -> {content_key: {sub_key: message_id}}
 """
 
-import json
 import logging
 import os
 import time
 
 from config import DATA_DIR
+from utils.atomic_json import load_json, save_json
 
 logger = logging.getLogger(__name__)
 
@@ -28,18 +28,8 @@ _loaded = False
 
 def _load() -> None:
     global _groups, _topics, _loaded
-    if os.path.isfile(_GROUPS_FILE):
-        try:
-            with open(_GROUPS_FILE, encoding="utf-8") as f:
-                _groups = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            _groups = {}
-    if os.path.isfile(_TOPICS_FILE):
-        try:
-            with open(_TOPICS_FILE, encoding="utf-8") as f:
-                _topics = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            _topics = {}
+    _groups = load_json(_GROUPS_FILE, default={})
+    _topics = load_json(_TOPICS_FILE, default={})
     _loaded = True
 
 
@@ -49,19 +39,11 @@ def _ensure_loaded() -> None:
 
 
 def _save_groups() -> None:
-    try:
-        with open(_GROUPS_FILE, "w", encoding="utf-8") as f:
-            json.dump(_groups, f, ensure_ascii=False, indent=2)
-    except OSError as e:
-        logger.warning("studio_groups saqlash xato: %s", e)
+    save_json(_GROUPS_FILE, _groups)
 
 
 def _save_topics() -> None:
-    try:
-        with open(_TOPICS_FILE, "w", encoding="utf-8") as f:
-            json.dump(_topics, f, ensure_ascii=False, indent=2)
-    except OSError as e:
-        logger.warning("studio_topics saqlash xato: %s", e)
+    save_json(_TOPICS_FILE, _topics)
 
 
 def get_group(slug: str) -> dict | None:
@@ -145,31 +127,22 @@ _posted_loaded = False
 
 def _load_posted() -> None:
     global _posted, _posted_loaded
-    if os.path.isfile(_POSTED_FILE):
-        try:
-            with open(_POSTED_FILE, encoding="utf-8") as f:
-                raw = json.load(f)
-            migrated = {}
-            for slug, content_map in raw.items():
-                migrated[slug] = {}
-                for content_key, subs in content_map.items():
-                    if isinstance(subs, list):
-                        # eski format -- message_id noma'lum
-                        migrated[slug][content_key] = {sub_key: None for sub_key in subs}
-                    elif isinstance(subs, dict):
-                        migrated[slug][content_key] = subs
-            _posted = migrated
-        except (OSError, json.JSONDecodeError):
-            _posted = {}
+    raw = load_json(_POSTED_FILE, default={})
+    migrated = {}
+    for slug, content_map in raw.items():
+        migrated[slug] = {}
+        for content_key, subs in content_map.items():
+            if isinstance(subs, list):
+                # eski format -- message_id noma'lum
+                migrated[slug][content_key] = {sub_key: None for sub_key in subs}
+            elif isinstance(subs, dict):
+                migrated[slug][content_key] = subs
+    _posted = migrated
     _posted_loaded = True
 
 
 def _save_posted() -> None:
-    try:
-        with open(_POSTED_FILE, "w", encoding="utf-8") as f:
-            json.dump(_posted, f, ensure_ascii=False, indent=2)
-    except OSError as e:
-        logger.warning("studio_posted saqlash xato: %s", e)
+    save_json(_POSTED_FILE, _posted)
 
 
 def is_episode_posted(slug: str, content_key: str, sub_key: str) -> bool:

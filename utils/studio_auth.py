@@ -13,12 +13,12 @@ saqlanadi -- shu yerda faqat ikkita narsa saqlanadi:
      DATA_DIR/studio_tokens.json.
 """
 
-import json
 import logging
 import os
 
 from config import DATA_DIR
 from utils.shared_db import get_manager_studios
+from utils.atomic_json import load_json, save_json
 
 logger = logging.getLogger(__name__)
 
@@ -32,18 +32,8 @@ _loaded = False
 
 def _load() -> None:
     global _bindings, _tokens, _loaded
-    if os.path.isfile(_BINDINGS_FILE):
-        try:
-            with open(_BINDINGS_FILE, encoding="utf-8") as f:
-                _bindings = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            _bindings = {}
-    if os.path.isfile(_TOKENS_FILE):
-        try:
-            with open(_TOKENS_FILE, encoding="utf-8") as f:
-                _tokens = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            _tokens = {}
+    _bindings = load_json(_BINDINGS_FILE, default={})
+    _tokens = load_json(_TOKENS_FILE, default={})
     _loaded = True
 
 
@@ -53,19 +43,11 @@ def _ensure_loaded() -> None:
 
 
 def _save_bindings() -> None:
-    try:
-        with open(_BINDINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump(_bindings, f, ensure_ascii=False, indent=2)
-    except OSError as e:
-        logger.warning("studio_bindings saqlash xato: %s", e)
+    save_json(_BINDINGS_FILE, _bindings)
 
 
 def _save_tokens() -> None:
-    try:
-        with open(_TOKENS_FILE, "w", encoding="utf-8") as f:
-            json.dump(_tokens, f, ensure_ascii=False, indent=2)
-    except OSError as e:
-        logger.warning("studio_tokens saqlash xato: %s", e)
+    save_json(_TOKENS_FILE, _tokens)
 
 
 # ── Bog'lash (binding) ────────────────────────────────────────────────────

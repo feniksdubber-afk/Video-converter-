@@ -5,10 +5,10 @@ ALLOWED_USER_IDS / ADMIN_USER_IDS env dan boshlang'ich ro'yxat olinadi.
 /allow va /deny orqali DATA_DIR/allowed_users.json yangilanadi.
 """
 
-import json
 import logging
 import os
 from config import DATA_DIR, ALLOWED_USER_IDS_ENV, ADMIN_USER_IDS_ENV
+from utils.atomic_json import load_json, save_json
 
 logger = logging.getLogger(__name__)
 
@@ -30,11 +30,7 @@ def _parse_ids(raw: str) -> set[int]:
 
 
 def _save_allowed() -> None:
-    try:
-        with open(_ALLOWED_FILE, "w", encoding="utf-8") as f:
-            json.dump(sorted(_allowed), f)
-    except OSError as e:
-        logger.warning("allowed_users saqlash xato: %s", e)
+    save_json(_ALLOWED_FILE, sorted(_allowed))
 
 
 def _load_allowed() -> None:
@@ -42,14 +38,12 @@ def _load_allowed() -> None:
     _admins = _parse_ids(ADMIN_USER_IDS_ENV)
     _allowed = _parse_ids(ALLOWED_USER_IDS_ENV)
 
-    if os.path.isfile(_ALLOWED_FILE):
+    data = load_json(_ALLOWED_FILE, default=[])
+    if isinstance(data, list):
         try:
-            with open(_ALLOWED_FILE, encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, list):
-                _allowed.update(int(x) for x in data)
-        except (OSError, json.JSONDecodeError, ValueError) as e:
-            logger.warning("allowed_users o'qish xato: %s", e)
+            _allowed.update(int(x) for x in data)
+        except (TypeError, ValueError) as e:
+            logger.warning("allowed_users formatida xato: %s", e)
 
     # Adminlar har doim ruxsatli
     _allowed.update(_admins)
