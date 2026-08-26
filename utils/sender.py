@@ -78,6 +78,20 @@ def _fmt_size(b: int) -> str:
     return f"{b:.1f} GB"
 
 
+def _md_escape(text) -> str:
+    """Telegram Markdown (legacy) uchun maxsus belgilarni escape qiladi.
+
+    Fayl nomi, URL kabi tashqi manbadan keladigan matnlarni Markdown
+    formatlangan xabar ichiga qo'yishdan oldin shundan o'tkazish kerak —
+    aks holda `_`, `*`, `` ` ``, `[` kabi belgilar parse xatosiga olib
+    kelishi mumkin.
+    """
+    s = str(text)
+    for ch in ("\\", "_", "*", "`", "["):
+        s = s.replace(ch, "\\" + ch)
+    return s
+
+
 def _get_video_meta_sync(file_path: str) -> dict:
     """Sinxron versiya — faqat executor ichida ishlatiladi."""
     meta = {"duration": 0, "width": 0, "height": 0}
@@ -228,17 +242,18 @@ async def _upload_to_r2(
 
         await status_msg.edit_text(
             f"✅ *R2 ga yuklandi!*\n\n"
-            f"📁 Fayl: `{filename}`\n"
+            f"📁 Fayl: `{_md_escape(filename)}`\n"
             f"📦 Hajmi: `{_fmt_size(file_size)}`\n\n"
-            f"🔗 Havola:\n`{url}`",
+            f"🔗 Havola:\n`{_md_escape(url)}`",
             reply_markup=keyboard,
             parse_mode="Markdown",
         )
         return url
     except Exception as e:
+        # Exception matni noma'lum belgilarni o'z ichiga olishi mumkin —
+        # parse_mode'siz yuborib, ikkinchi Markdown xatosining oldini olamiz.
         await status_msg.edit_text(
-            f"❌ R2 ga yuklashda xato:\n`{e}`",
-            parse_mode="Markdown",
+            f"❌ R2 ga yuklashda xato:\n{e}",
         )
         return None
 
@@ -353,14 +368,15 @@ async def send_file(
                 await status_msg.edit_text(
                     f"✅ *Fayl tayyor!*\n\n"
                     f"📦 Hajmi: `{_fmt_size(file_size)}`\n"
-                    f"📁 Nom: `{filename}`\n\n"
-                    f"🔗 {link}\n\n_(Link 10 kun faol)_",
+                    f"📁 Nom: `{_md_escape(filename)}`\n\n"
+                    f"🔗 {_md_escape(link)}\n\n_(Link 10 kun faol)_",
                     parse_mode="Markdown",
                 )
             except Exception as e:
+                # Exception matni noma'lum belgilarni o'z ichiga olishi mumkin —
+                # parse_mode'siz yuborib, ikkinchi Markdown xatosining oldini olamiz.
                 await status_msg.edit_text(
-                    f"❌ Gofile.io ga yuklashda xato:\n`{e}`",
-                    parse_mode="Markdown",
+                    f"❌ Gofile.io ga yuklashda xato:\n{e}",
                 )
         elif r2_ok():
             note = ""
@@ -383,14 +399,15 @@ async def send_file(
                 await status_msg.edit_text(
                     f"✅ *Fayl tayyor!*\n\n"
                     f"📦 Hajmi: `{_fmt_size(file_size)}`\n"
-                    f"📁 Nom: `{filename}`\n\n"
-                    f"🔗 {link}\n\n_(Link 10 kun faol)_",
+                    f"📁 Nom: `{_md_escape(filename)}`\n\n"
+                    f"🔗 {_md_escape(link)}\n\n_(Link 10 kun faol)_",
                     parse_mode="Markdown",
                 )
             except Exception as e:
+                # Exception matni noma'lum belgilarni o'z ichiga olishi mumkin —
+                # parse_mode'siz yuborib, ikkinchi Markdown xatosining oldini olamiz.
                 await status_msg.edit_text(
-                    f"❌ Gofile.io ga yuklashda xato:\n`{e}`",
-                    parse_mode="Markdown",
+                    f"❌ Gofile.io ga yuklashda xato:\n{e}",
                 )
         if custom_thumb_tmp and os.path.exists(custom_thumb_tmp):
             os.remove(custom_thumb_tmp)
