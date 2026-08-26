@@ -86,4 +86,23 @@ DUBBING_SILENCE_MIN_DURATION_SEC = float(
     os.environ.get("DUBBING_SILENCE_MIN_DURATION_SEC", "0.5")
 )
 
+# ── Transcription (Step 6) ────────────────────────────────────────────────────
+# faster-whisper model o'lchami. Server GPU'siz (CPU-only) ishlaydi, shuning
+# uchun standart "small" tanlangan — tezlik/aniqlik/RAM orasidagi muvozanat.
+DUBBING_WHISPER_MODEL_SIZE = os.environ.get("DUBBING_WHISPER_MODEL_SIZE", "small")
+
+# CPU'da ishlash uchun compute_type. "int8" CPU'da eng tez va kam xotira
+# talab qiladi (GPU float16'ga teng emas, lekin CPU uchun eng maqbul).
+DUBBING_WHISPER_COMPUTE_TYPE = os.environ.get("DUBBING_WHISPER_COMPUTE_TYPE", "int8")
+
+# Transkripsiya bosqichi uchun umumiy timeout (soniyalarda). CPU'da sekin
+# ishlashi mumkinligi uchun boshqa bosqichlarga qaraganda ancha katta.
+DUBBING_TRANSCRIPTION_TIMEOUT_SECONDS = int(
+    os.environ.get("DUBBING_TRANSCRIPTION_TIMEOUT_SECONDS", "3600")
+)
+
+# Manba tili oldindan ma'lum bo'lsa shu yerga qo'yiladi (masalan "en").
+# Bo'sh qoldirilsa, Whisper tilni avtomatik aniqlaydi.
+DUBBING_WHISPER_LANGUAGE = os.environ.get("DUBBING_WHISPER_LANGUAGE", "").strip() or None
+
 os.makedirs(DUBBING_TEMP_DIR, exist_ok=True)
