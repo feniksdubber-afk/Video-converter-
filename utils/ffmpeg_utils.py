@@ -503,14 +503,18 @@ def get_stream_info(input_path: str) -> dict:
 
 
 async def run_ffmpeg_progress(
-    args: list[str], *, duration_sec: float = 0.0, on_progress=None, timeout: int = 7200,
+    args: list[str], *, duration_sec: float = 0.0, on_progress=None, check_cancelled=None,
+    timeout: int = 7200,
 ) -> tuple[bool, str]:
     """FFmpeg'ni asinxron ishga tushiradi va `-progress pipe:1` orqali olingan
     foizni har o'zgarganda `on_progress(percent)` (async yoki sync) ga
-    yuboradi. `run_ffmpeg_async`dan farqli o'laroq bu funksiya task_manager/
-    task_queue/status_msg bilan bog'liq emas -- istalgan chaqiruvchi context
-    (masalan studiya /joylash oqimi) uchun mos, chaqiruvchining o'zi progress
-    xabarini qanday ko'rsatishni hal qiladi."""
+    yuboradi. `check_cancelled()` berilsa, har progress qatorida tekshiriladi
+    -- True qaytarsa ffmpeg jarayoni DARHOL o'ldiriladi (bekor qilingandan
+    keyin daqiqalab kutib o'tirilmasin deb). `run_ffmpeg_async`dan farqli
+    o'laroq bu funksiya task_manager/task_queue/status_msg bilan bog'liq
+    emas -- istalgan chaqiruvchi context (masalan studiya /joylash oqimi)
+    uchun mos, chaqiruvchining o'zi progress xabarini qanday ko'rsatishni
+    hal qiladi."""
     cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-nostats"] + args
     proc = None
     try:
@@ -534,9 +538,15 @@ async def run_ffmpeg_progress(
             if asyncio.iscoroutine(result):
                 await result
 
+        cancelled = False
+
         async def _read_stdout():
-            nonlocal current_time, last_percent
+            nonlocal current_time, last_percent, cancelled
             async for raw_line in proc.stdout:
+                if check_cancelled is not None and check_cancelled():
+                    cancelled = True
+                    proc.kill()
+                    break
                 line = raw_line.decode(errors="replace").strip()
                 m = re.search(r"out_time_ms=(\d+)", line)
                 if m:
@@ -564,8 +574,11 @@ async def run_ffmpeg_progress(
 
         await asyncio.wait_for(proc.wait(), timeout=30)
         await stderr_task
-        stderr_text = "".join(stderr_chunks)
 
+        if cancelled:
+            return False, "Bekor qilindi"
+
+        stderr_text = "".join(stderr_chunks)
         if proc.returncode != 0:
             return False, stderr_text[-2000:] if stderr_text else "Noma'lum xato"
 
@@ -586,11 +599,12 @@ async def run_ffmpeg_progress(
         return False, str(e)
 
 
-async def prepare_for_telegram_async(input_path: str, on_progress=None) -> tuple[str, bool]:
+async def prepare_for_telegram_async(input_path: str, on_progress=None, check_cancelled=None) -> tuple[str, bool]:
     """`prepare_for_telegram`ning asinxron, jonli progress bilan ishlaydigan
-    varianti -- event loop bloklanmaydi va `on_progress(percent)` orqali
-    chaqiruvchiga real ffmpeg foizini yetkazadi (masalan progress-bar
-    xabarini yangilash uchun)."""
+    varianti -- event loop bloklanmaydi, `on_progress(percent)` orqali
+    chaqiruvchiga real ffmpeg foizini yetkazadi, `check_cancelled()` True
+    bo'lsa esa ffmpeg jarayonini darhol to'xtatadi (masalan progress-bar
+    xabarini yangilash va bekor qilish tugmasi uchun)."""
     ext = os.path.splitext(input_path)[1].lower().lstrip(".")
     info = await _run_in_executor(get_stream_info, input_path)
     duration_sec = await _run_in_executor(get_video_duration, input_path)
@@ -599,7 +613,7 @@ async def prepare_for_telegram_async(input_path: str, on_progress=None) -> tuple
         out_path = make_temp_path("mp4")
         ok, err = await run_ffmpeg_progress(
             ["-i", input_path, "-c", "copy", "-movflags", "+faststart", out_path],
-            duration_sec=duration_sec, on_progress=on_progress, timeout=600,
+            duration_sec=duration_sec, on_progress=on_progress, check_cancelled=check_cancelled, timeout=600,
         )
         if ok:
             return out_path, True
@@ -620,7 +634,9 @@ async def prepare_for_telegram_async(input_path: str, on_progress=None) -> tuple
         "-movflags", "+faststart",
         out_path,
     ]
-    ok, err = await run_ffmpeg_progress(args, duration_sec=duration_sec, on_progress=on_progress, timeout=7200)
+    ok, err = await run_ffmpeg_progress(
+        args, duration_sec=duration_sec, on_progress=on_progress, check_cancelled=check_cancelled, timeout=7200,
+    )
     if ok:
         return out_path, True
     try:
