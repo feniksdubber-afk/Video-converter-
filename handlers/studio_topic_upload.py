@@ -21,7 +21,7 @@ import re
 import time
 
 import httpx
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import NetworkError, RetryAfter, TelegramError, TimedOut
 from telegram.ext import ContextTypes
 
@@ -214,6 +214,25 @@ def _render_progress(
     return "\n".join(lines)
 
 
+def _render_cancelled(
+    *, title: str, kind: str, total: int, done: int, errors: int, skipped: int = 0, elapsed: float,
+) -> str:
+    icon = "🎬" if kind == "m" else "📺"
+    processed = done + errors + skipped
+    lines = [
+        "🛑 <b>JOYLASH BEKOR QILINDI</b>",
+        f"{icon} {_e(title)}",
+        "",
+        f"✔️ Ulgurib joylandi: <b>{done}</b>",
+        f"⏳ Bekor qilinganda navbatda qoldi: <b>{total - processed}</b>",
+        f"🕓 O'tgan vaqt: {_fmt_duration(elapsed)}",
+        "",
+        "ℹ️ Hali joylanmagan videolar navbatda saqlanib qoldi -- qachon xohlasangiz "
+        "/joylash ni qayta yuborib davom ettirishingiz mumkin.",
+    ]
+    return "\n".join(lines)
+
+
 def _render_finished(
     *, title: str, kind: str, total: int, done: int, errors: int, skipped: int = 0, elapsed: float,
     error_details: list[tuple[str, str]] | None = None,
@@ -277,6 +296,7 @@ class _ProgressPainter:
         self._error_details: list[tuple[str, str]] = []
         self._last_edit = 0.0
         self._last_text = ""
+        self._last_markup = "__unset__"
         self._started = time.monotonic()
 
     async def update(
@@ -289,16 +309,25 @@ class _ProgressPainter:
             current_item=current_item, stage=stage, recent=self._recent,
             elapsed=time.monotonic() - self._started, retry_note=retry_note,
         )
-        await self._send(text, force=force)
+        await self._send(text, force=force, reply_markup=_cancel_keyboard(self._message_id))
 
-    async def finish(self) -> None:
-        text = _render_finished(
-            title=self._title, kind=self._kind, total=self._total,
-            done=self._done, errors=self._errors, skipped=self._skipped,
-            elapsed=time.monotonic() - self._started,
-            error_details=self._error_details,
-        )
-        await self._send(text, force=True)
+    async def finish(self, *, cancelled: bool = False) -> None:
+        if cancelled:
+            text = _render_cancelled(
+                title=self._title, kind=self._kind, total=self._total,
+                done=self._done, errors=self._errors, skipped=self._skipped,
+                elapsed=time.monotonic() - self._started,
+            )
+        else:
+            text = _render_finished(
+                title=self._title, kind=self._kind, total=self._total,
+                done=self._done, errors=self._errors, skipped=self._skipped,
+                elapsed=time.monotonic() - self._started,
+                error_details=self._error_details,
+            )
+        # Tugash bilan "❌ Bekor qilish" tugmasi olib tashlanadi -- endi bekor
+        # qilinadigan hech narsa qolmadi.
+        await self._send(text, force=True, reply_markup=None)
         if self._error_details:
             await self._notify_admins()
 
@@ -334,38 +363,42 @@ class _ProgressPainter:
                 except TelegramError:
                     logger.warning("Adminga xato hisobotini yuborib bo'lmadi (admin_id=%s)", admin_id)
 
-    async def _send(self, text: str, *, force: bool) -> None:
-        if text == self._last_text:
+    async def _send(self, text: str, *, force: bool, reply_markup=None) -> None:
+        if text == self._last_text and reply_markup == self._last_markup:
             return
         now = time.monotonic()
         if not force and (now - self._last_edit) < self._MIN_INTERVAL:
             return
         self._last_edit = now
         self._last_text = text
+        self._last_markup = reply_markup
         try:
             await self._context.bot.edit_message_text(
-                chat_id=self._chat_id, message_id=self._message_id, text=text, parse_mode="HTML",
+                chat_id=self._chat_id, message_id=self._message_id, text=text,
+                parse_mode="HTML", reply_markup=reply_markup,
             )
         except RetryAfter as e:
             wait = min(e.retry_after, 20) + 1
             await asyncio.sleep(wait)
             try:
                 await self._context.bot.edit_message_text(
-                    chat_id=self._chat_id, message_id=self._message_id, text=text, parse_mode="HTML",
+                    chat_id=self._chat_id, message_id=self._message_id, text=text,
+                    parse_mode="HTML", reply_markup=reply_markup,
                 )
             except TelegramError:
-                await self._send_plain_fallback(text)
+                await self._send_plain_fallback(text, reply_markup)
         except TelegramError:
             # Format (HTML) sabab xabar rad etilsa ham -- masalan noma'lum
             # tag/entity xatosi -- xabar HECH QACHON jimgina yo'qolib
             # ketmasligi kerak: formatsiz (plain text) qilib qayta yuboramiz.
-            await self._send_plain_fallback(text)
+            await self._send_plain_fallback(text, reply_markup)
 
-    async def _send_plain_fallback(self, text: str) -> None:
+    async def _send_plain_fallback(self, text: str, reply_markup=None) -> None:
         plain = re.sub(r"<[^>]+>", "", text)
         try:
             await self._context.bot.edit_message_text(
                 chat_id=self._chat_id, message_id=self._message_id, text=plain,
+                reply_markup=reply_markup,
             )
         except TelegramError:
             logger.warning("Progress xabarini formatsiz ham yangilab bo'lmadi (message_id=%s)", self._message_id)
@@ -592,6 +625,83 @@ _joylash_locks = KeyedLockMap()
 # tegmasdan qolib ketardi (bot qayta ishga tushirilmaguncha).
 _JOYLASH_TIMEOUT_SECONDS = 2 * 60 * 60  # 2 soat
 
+# _process_one_item bekor qilinganda oddiy xato matni o'rniga shu belgi
+# qaytariladi -- chaqiruvchi (_do_joylash) buni ko'rib qayta urinishga
+# harakat qilmaydi va itemni xato deb belgilamaydi (navbatda qoldiradi).
+_CANCELLED_SENTINEL = "__cancelled__"
+
+# ── Bekor qilish (❌ tugma) ──────────────────────────────────────────────────
+# status message_id -> True/False. Progress xabari ostidagi "❌ Bekor qilish"
+# tugmasi bosilganda shu yerga belgi qo'yiladi, ishlov beruvchi loop esa har
+# bosqichda (item orasida VA item ICHIDA -- yuklab olish/kodlash/R2 orasida)
+# buni tekshirib, iloji boricha tezroq to'xtaydi.
+_cancel_flags: dict[int, bool] = {}
+
+
+def request_cancel(status_message_id: int) -> None:
+    _cancel_flags[status_message_id] = True
+
+
+def _is_cancelled(status_message_id: int) -> bool:
+    return _cancel_flags.get(status_message_id, False)
+
+
+def _clear_cancel(status_message_id: int) -> None:
+    _cancel_flags.pop(status_message_id, None)
+
+
+def _cancel_keyboard(status_message_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("❌ Bekor qilish", callback_data=f"studio_joylash_cancel_{status_message_id}"),
+    ]])
+
+
+async def handle_joylash_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """`studio_joylash_cancel_<message_id>` callback tugmasi bosilganda
+    chaqiriladi -- darhol belgi qo'yadi, haqiqiy to'xtash ishlov beruvchi
+    loop navbatdagi tekshiruv nuqtasiga yetganda amalga oshadi (odatda bir
+    necha soniya ichida, ffmpeg ishlayotgan bo'lsa ham jarayon o'ldiriladi)."""
+    query = update.callback_query
+    data = query.data
+    try:
+        message_id = int(data.rsplit("_", 1)[1])
+    except (ValueError, IndexError):
+        await query.answer()
+        return
+    request_cancel(message_id)
+    await query.answer("❌ Bekor qilinmoqda...")
+
+
+async def _try_delete_uploaded(studio: dict, public_url: str) -> bool:
+    """Bekor qilingan itemning R2'ga allaqachon yuklangan, lekin bazaga hali
+    YOZILMAGAN fayli -- serverda "yetim" (orphan) bo'lib qolmasligi uchun
+    studiya API orqali o'chirishga urinadi.
+
+    DIQQAT: bu studiya backend'ida mos DELETE endpoint borligiga bog'liq.
+    Agar backend bunday endpointni qo'llab-quvvatlamasa (404/405 qaytarsa),
+    funksiya False qaytaradi va chaqiruvchi buni loglab/adminga xabar berib,
+    qo'lda tozalash zarurligini bildiradi -- hech qachon xato haqida
+    jim turmaydi."""
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.request(
+                "DELETE",
+                f"{STUDIO_API_BASE}/studios/{studio['slug']}/uploads",
+                headers=_auth_headers(studio),
+                json={"url": public_url},
+            )
+        if resp.status_code < 300:
+            logger.info("Bekor qilingan R2 fayl o'chirildi: %s", public_url)
+            return True
+        logger.warning(
+            "Bekor qilingan R2 faylni o'chirib bo'lmadi (HTTP %s): %s -- %s",
+            resp.status_code, public_url, resp.text[:300],
+        )
+        return False
+    except Exception as e:
+        logger.warning("Bekor qilingan R2 faylni o'chirishda xato: %s -- %s", public_url, e)
+        return False
+
 
 async def joylash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Navbatdagi barcha videolarni ketma-ket qayta ishlaydi va joylaydi."""
@@ -686,60 +796,84 @@ async def _do_joylash(
         # boshlang'ich xabar hech qachon jimgina yo'qolib ketmasin.
         status = await update.effective_message.reply_text(re.sub(r"<[^>]+>", "", initial_text))
     painter = _ProgressPainter(context, chat_id, status.message_id, title=title, kind=kind, total=len(queue))
+    is_cancelled = lambda: _is_cancelled(status.message_id)
+    cancelled_final = False
 
-    for item in queue:
-        label = _item_label(kind, title, item)
+    try:
+        for item in queue:
+            if is_cancelled():
+                cancelled_final = True
+                break
 
-        already_exists = (
-            movie_already_has_video if kind == "m"
-            else (item.get("season"), item.get("episode")) in existing_episodes
-        )
-        if already_exists:
-            painter.mark_skip(label, "Bazada allaqachon mavjud")
-            await painter.update(current_item=None, stage=None)
-            await remove_item(slug, topic_id, item["message_id"])
-            continue
+            label = _item_label(kind, title, item)
 
-        error_text = await _process_one_item(
-            context=context, painter=painter, studio=studio, slug=slug, chat_id=chat_id,
-            kind=kind, content_id=content_id, title=title, item=item,
-        )
-        if error_text:
-            # Bitta xatodan keyin darhol 1 marta avtomatik qayta urinamiz --
-            # ko'p xatolar vaqtinchalik tarmoq/flood muammolaridan bo'ladi.
-            await painter.update(
-                current_item=item, stage="download", force=True,
-                retry_note=f"⚠️ Xato: {_short_error(error_text)}\n🔁 Qayta urinilmoqda...",
+            already_exists = (
+                movie_already_has_video if kind == "m"
+                else (item.get("season"), item.get("episode")) in existing_episodes
             )
-            await asyncio.sleep(3)
-            error_text_2 = await _process_one_item(
+            if already_exists:
+                painter.mark_skip(label, "Bazada allaqachon mavjud")
+                await painter.update(current_item=None, stage=None)
+                await remove_item(slug, topic_id, item["message_id"])
+                continue
+
+            error_text = await _process_one_item(
                 context=context, painter=painter, studio=studio, slug=slug, chat_id=chat_id,
-                kind=kind, content_id=content_id, title=title, item=item,
+                kind=kind, content_id=content_id, title=title, item=item, is_cancelled=is_cancelled,
             )
-            if error_text_2:
-                painter.mark_error(label, error_text_2)
+            if error_text == _CANCELLED_SENTINEL:
+                # Bekor qilindi -- bu itemni na "muvaffaqiyatli", na "xato"
+                # deb belgilamaymiz, navbatda qoldiramiz (o'chirmaymiz),
+                # keyingi /joylash'da qaytadan urinib ko'riladi.
+                cancelled_final = True
+                break
+            if error_text:
+                # Bitta xatodan keyin darhol 1 marta avtomatik qayta urinamiz --
+                # ko'p xatolar vaqtinchalik tarmoq/flood muammolaridan bo'ladi.
+                await painter.update(
+                    current_item=item, stage="download", force=True,
+                    retry_note=f"⚠️ Xato: {_short_error(error_text)}\n🔁 Qayta urinilmoqda...",
+                )
+                await asyncio.sleep(3)
+                if is_cancelled():
+                    cancelled_final = True
+                    break
+                error_text_2 = await _process_one_item(
+                    context=context, painter=painter, studio=studio, slug=slug, chat_id=chat_id,
+                    kind=kind, content_id=content_id, title=title, item=item, is_cancelled=is_cancelled,
+                )
+                if error_text_2 == _CANCELLED_SENTINEL:
+                    cancelled_final = True
+                    break
+                if error_text_2:
+                    painter.mark_error(label, error_text_2)
+                else:
+                    painter.mark_done(label)
             else:
                 painter.mark_done(label)
-        else:
-            painter.mark_done(label)
-        await painter.update(current_item=None, stage=None)
+            await painter.update(current_item=None, stage=None)
 
-        # Faqat hozir qayta ishlangan itemni navbatdan olib tashlaymiz --
-        # butun navbatni tozalamaymiz. Aks holda, /joylash ishlab turgan
-        # paytda boshqa menejer topic'ga yangi video tashlasa, u navbatga
-        # ulgurib qo'shilgan bo'lsa ham oxirida bekitdan yo'qolib ketadi.
-        await remove_item(slug, topic_id, item["message_id"])
+            # Faqat hozir qayta ishlangan itemni navbatdan olib tashlaymiz --
+            # butun navbatni tozalamaymiz. Aks holda, /joylash ishlab turgan
+            # paytda boshqa menejer topic'ga yangi video tashlasa, u navbatga
+            # ulgurib qo'shilgan bo'lsa ham oxirida bekitdan yo'qolib ketadi.
+            await remove_item(slug, topic_id, item["message_id"])
 
-    await painter.finish()
+        await painter.finish(cancelled=cancelled_final)
+    finally:
+        _clear_cancel(status.message_id)
 
 
 async def _process_one_item(
     *, context, painter: "_ProgressPainter", studio: dict, slug: str, chat_id: int,
-    kind: str, content_id: str, title: str, item: dict,
+    kind: str, content_id: str, title: str, item: dict, is_cancelled=None,
 ) -> str | None:
     """Bitta videoni yuklab-joylaydi. Muvaffaqiyatli bo'lsa None, aks holda
     xato matnini qaytaradi (chaqiruvchi tomon buni ko'rsatish/qayta urinish
-    uchun ishlatadi)."""
+    uchun ishlatadi). Agar `is_cancelled()` True qaytarsa -- iloji boricha
+    tezroq to'xtaydi va `_CANCELLED_SENTINEL` qaytaradi (chaqiruvchi buni
+    oddiy xatodan farqlab, qayta urinishga urinmaydi)."""
+    is_cancelled = is_cancelled or (lambda: False)
     dl_path = None
     prepared_path = None
     # Har bir yuklab olish URINISHIDA yaratilgan vaqtinchalik fayl shu yerga
@@ -777,6 +911,9 @@ async def _process_one_item(
 
         dl_path = await _run_with_retry("download", _download, on_retry=_note_retry)
 
+        if is_cancelled():
+            return _CANCELLED_SENTINEL
+
         # ── 2. Formatga tayyorlash (ffmpeg) -- lokal amal, tarmoqqa bog'liq emas ──
         stage_now[0] = "prepare"
         await painter.update(current_item=item, stage="prepare")
@@ -788,7 +925,12 @@ async def _process_one_item(
                 retry_note=f"{bar} {percent}%",
             )
 
-        prepared_path, _changed = await prepare_for_telegram_async(dl_path, on_progress=_on_prepare_progress)
+        prepared_path, _changed = await prepare_for_telegram_async(
+            dl_path, on_progress=_on_prepare_progress, check_cancelled=is_cancelled,
+        )
+
+        if is_cancelled():
+            return _CANCELLED_SENTINEL
 
         # ── 3. R2 bulutiga yuklash ────────────────────────────────────────
         stage_now[0] = "upload"
@@ -807,6 +949,18 @@ async def _process_one_item(
         public_url = await _run_with_retry("upload", _upload, on_retry=_note_retry)
         if not public_url or public_url == "cancelled":
             return "R2 bulutiga yuklashda xato bo'ldi"
+
+        # ── R2'ga muvaffaqiyatli yuklandi, lekin bazaga hali yozilmagan ──
+        # holat -- aynan shu oynada bekor qilingan bo'lsa, "yetim" fayl
+        # serverda (R2'da) qolib ketmasligi uchun uni o'chirishga urinamiz.
+        if is_cancelled():
+            deleted = await _try_delete_uploaded(studio, public_url)
+            if not deleted:
+                logger.warning(
+                    "Bekor qilingandan keyin R2'da qolib ketishi mumkin bo'lgan fayl: %s (item=%s)",
+                    public_url, item.get("message_id"),
+                )
+            return _CANCELLED_SENTINEL
 
         # ── 4. Studiya bazasiga ro'yxatga olish ──────────────────────────
         #
