@@ -17,7 +17,7 @@ import logging
 import os
 
 from config import DATA_DIR
-from utils.shared_db import get_manager_studios
+from utils.shared_db import get_manager_studios, invalidate_manager_cache
 from utils.atomic_json import load_json, save_json
 
 logger = logging.getLogger(__name__)
@@ -59,6 +59,10 @@ def bind_user(telegram_id: int, studio: dict) -> None:
         "id": studio["id"], "slug": studio["slug"], "name": studio["name"],
     }
     _save_bindings()
+    # Bog'lanish o'zgardi -- shu foydalanuvchi uchun "qaysi studiyaga
+    # menejer" keshini darhol yangilash kerak, aks holda eski (15s gacha)
+    # keshlangan ro'yxat ko'rsatilib, chalkashlik keltirib chiqarishi mumkin.
+    invalidate_manager_cache(telegram_id)
 
 
 def get_bound_studio(telegram_id: int) -> dict | None:
@@ -83,6 +87,7 @@ def clear_binding(telegram_id: int) -> bool:
     if str(telegram_id) in _bindings:
         del _bindings[str(telegram_id)]
         _save_bindings()
+        invalidate_manager_cache(telegram_id)
         return True
     return False
 
