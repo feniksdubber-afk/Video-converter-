@@ -30,7 +30,7 @@ from utils.shared_db import get_manager_studios
 from utils.studio_auth import get_bound_studio, bind_user
 from utils.studio_group import get_slug_by_chat_id, get_content_key_by_topic, set_topic_id
 from utils.studio_topic_queue import add_item, get_queue, remove_item
-from utils.ffmpeg_utils import prepare_for_telegram, _run_in_executor, make_temp_path
+from utils.ffmpeg_utils import prepare_for_telegram_async, make_temp_path
 from utils.keyed_lock import KeyedLockMap
 from handlers.studio_group import quality_label
 from handlers.studio_upload import _presign_and_put, _auth_headers
@@ -778,8 +778,17 @@ async def _process_one_item(
         dl_path = await _run_with_retry("download", _download, on_retry=_note_retry)
 
         # ── 2. Formatga tayyorlash (ffmpeg) -- lokal amal, tarmoqqa bog'liq emas ──
+        stage_now[0] = "prepare"
         await painter.update(current_item=item, stage="prepare")
-        prepared_path, _changed = await _run_in_executor(prepare_for_telegram, dl_path)
+
+        async def _on_prepare_progress(percent: int) -> None:
+            bar = _progress_bar(percent / 100)
+            await painter.update(
+                current_item=item, stage="prepare",
+                retry_note=f"{bar} {percent}%",
+            )
+
+        prepared_path, _changed = await prepare_for_telegram_async(dl_path, on_progress=_on_prepare_progress)
 
         # ── 3. R2 bulutiga yuklash ────────────────────────────────────────
         stage_now[0] = "upload"
