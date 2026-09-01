@@ -599,6 +599,15 @@ async def run_ffmpeg_progress(
         return False, str(e)
 
 
+class FaststartError(Exception):
+    """`prepare_for_telegram_async` faststart/format tayyorlash bosqichida
+    ffmpeg muvaffaqiyatsiz tugaganda ko'tariladi. Ilgari bu holatda jimgina
+    original (faststart QILINMAGAN) fayl qaytarilib, xato yashirinardi --
+    natijada R2'ga noto'g'ri fayl yuklanib qolishi mumkin edi. Endi
+    chaqiruvchi bu xatoni aniq ko'radi va (kerak bo'lsa) qayta urinadi yoki
+    foydalanuvchiga ochiq xabar beradi."""
+
+
 async def prepare_for_telegram_async(input_path: str, on_progress=None, check_cancelled=None) -> tuple[str, bool]:
     """`prepare_for_telegram`ning asinxron, jonli progress bilan ishlaydigan
     varianti -- event loop bloklanmaydi, `on_progress(percent)` orqali
@@ -621,7 +630,12 @@ async def prepare_for_telegram_async(input_path: str, on_progress=None, check_ca
             os.remove(out_path)
         except OSError:
             pass
-        return input_path, False
+        if err == "Bekor qilindi":
+            # Foydalanuvchi o'zi bekor qilgan -- bu xato emas, chaqiruvchi
+            # `is_cancelled()` orqali buni allaqachon aniqlab, oqimni
+            # to'xtatadi. Faststart "xatosi" sifatida ko'rsatmaymiz.
+            return input_path, False
+        raise FaststartError(f"faststart (copy) muvaffaqiyatsiz: {err or 'nomaʼlum xato'}")
 
     out_path = make_temp_path("mp4")
     threads = _thread_count()
@@ -643,7 +657,9 @@ async def prepare_for_telegram_async(input_path: str, on_progress=None, check_ca
         os.remove(out_path)
     except OSError:
         pass
-    return input_path, False
+    if err == "Bekor qilindi":
+        return input_path, False
+    raise FaststartError(f"formatga qayta kodlash (faststart) muvaffaqiyatsiz: {err or 'nomaʼlum xato'}")
 
 
 def prepare_for_telegram(input_path: str) -> tuple[str, bool]:
