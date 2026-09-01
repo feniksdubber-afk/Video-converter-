@@ -27,6 +27,7 @@ R2 konsolidan yoki alohida skript orqali qo'lda tozalashi mumkin.
 import logging
 import os
 import time
+import uuid
 
 from config import DATA_DIR
 from utils.atomic_json import load_json, save_json
@@ -47,6 +48,7 @@ def record_orphan_upload(*, studio_slug: str, public_url: str, label: str = "") 
         if not isinstance(data, list):
             data = []
         data.append({
+            "id": uuid.uuid4().hex[:8],
             "studio_slug": studio_slug,
             "public_url": public_url,
             "label": label,
@@ -69,6 +71,19 @@ def list_orphan_uploads() -> list[dict]:
     (masalan admin buyrug'i orqali ko'rsatish uchun)."""
     data = load_json(_FILE, default=[])
     return data if isinstance(data, list) else []
+
+
+def remove_orphan_upload(entry_id: str) -> dict | None:
+    """Bitta yozuvni `id` bo'yicha ro'yxatdan olib tashlaydi (masalan R2'dan
+    muvaffaqiyatli o'chirilgandan keyin). Topilgan (va olib tashlangan)
+    yozuvni qaytaradi, topilmasa `None`."""
+    data = list_orphan_uploads()
+    for i, entry in enumerate(data):
+        if entry.get("id") == entry_id:
+            removed = data.pop(i)
+            save_json(_FILE, data)
+            return removed
+    return None
 
 
 def clear_orphan_uploads() -> None:
