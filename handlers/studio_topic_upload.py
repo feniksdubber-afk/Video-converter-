@@ -831,6 +831,67 @@ def _record_orphan_upload(studio: dict, public_url: str, kind: str, title: str, 
     record_orphan_upload(studio_slug=studio.get("slug", ""), public_url=public_url, label=label)
 
 
+async def navbatdan_ochir_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Navbatdan bitta itemni xabar raqami bo'yicha olib tashlaydi (masalan
+    eski/xato tashlangan video).
+    Foydalanish: /navbatdan_ochir 152"""
+    ctx = _resolve_topic_context(update)
+    if not ctx:
+        hint = _explain_unresolved(update) or (
+            "⚠️ Bu buyruq faqat studiyangizga bog'langan guruhning kontent topic'ida ishlaydi."
+        )
+        await update.effective_message.reply_text(hint, parse_mode="Markdown")
+        return
+    _studio, slug, _chat_id, topic_id, _kind, _content_id = ctx
+
+    message = update.effective_message
+    parts = (message.text or "").split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.reply_text(
+            "Foydalanish: `/navbatdan_ochir 152`\n"
+            "(152 -- /navbat buyrug'i ko'rsatgan \"xabar #\" raqami)",
+            parse_mode="Markdown",
+        )
+        return
+    message_id = int(parts[1])
+
+    removed = await remove_item(slug, topic_id, message_id)
+    if removed:
+        await message.reply_text(f"✅ Xabar #{message_id} navbatdan olib tashlandi.")
+    else:
+        await message.reply_text(
+            f"❌ Xabar #{message_id} navbatda topilmadi. /navbat orqali joriy navbatni tekshiring."
+        )
+
+
+async def navbat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shu kontent topic'idagi navbatni ro'yxat qilib ko'rsatadi -- xato
+    xabarlarida ("...avval o'shani /navbat orqali tekshiring...") tilga
+    olingan, lekin avval hech qayerga ulanmagan buyruq."""
+    ctx = _resolve_topic_context(update)
+    if not ctx:
+        hint = _explain_unresolved(update) or (
+            "⚠️ Bu buyruq faqat studiyangizga bog'langan guruhning kontent topic'ida ishlaydi."
+        )
+        await update.effective_message.reply_text(hint, parse_mode="Markdown")
+        return
+    _studio, slug, _chat_id, topic_id, kind, _content_id = ctx
+
+    queue = get_queue(slug, topic_id)
+    if not queue:
+        await update.effective_message.reply_text("ℹ️ Navbatda video yo'q.")
+        return
+
+    lines = [f"📋 Navbatda: <b>{len(queue)}</b> ta video\n"]
+    for it in queue:
+        if kind == "m":
+            label = "🎬 Film"
+        else:
+            label = f"{it['season']}-fasl {it['episode']}-qism"
+        lines.append(f"• {label} — xabar #{it['message_id']}")
+    await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
 async def joylash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Navbatdagi barcha videolarni ketma-ket qayta ishlaydi va joylaydi."""
     ctx = _resolve_topic_context(update)
