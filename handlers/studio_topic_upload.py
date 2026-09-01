@@ -261,11 +261,14 @@ async def _download_file_with_progress(url: str, dest_path: str, *, on_progress=
                             last_percent = percent
                             result = on_progress(percent)
                             if asyncio.iscoroutine(result):
-                                await result
+                                # Fire-and-forget: Telegram progress-xabarini
+                                # kutish oqimni to'xtatib qo'ymasligi kerak
+                                # (aks holda R2'dagi kabi ReadError xavfi bor).
+                                asyncio.ensure_future(result)
     if on_progress is not None:
         result = on_progress(100)
         if asyncio.iscoroutine(result):
-            await result
+            asyncio.ensure_future(result)
 
 
 def _as_int(value) -> int | None:

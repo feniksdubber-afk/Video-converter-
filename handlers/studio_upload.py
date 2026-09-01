@@ -81,7 +81,17 @@ async def _aiter_file_with_progress(path: str, chunk_size: int, on_progress=None
     uchun async iterator. Har chunkdan keyin (foiz o'zgargan bo'lsa)
     `on_progress(percent)` chaqiriladi -- shu orqali yuklash progress-bari
     aniq (real bayt hisobiga asoslangan) foizni ko'rsata oladi, taxminiy
-    vaqt asosidagi emas."""
+    vaqt asosidagi emas.
+
+    DIQQAT: `on_progress` (masalan Telegram'da progress-xabarini
+    yangilaydigan callback) atayin `await` QILINMAYDI -- fon vazifasi
+    (`asyncio.ensure_future`) sifatida ishga tushiriladi. Aks holda, har bir
+    chunkdan keyin Telegram API javobini kutish R2'ga ketayotgan HTTP PUT
+    oqimini vaqtincha to'xtatib qo'yadi; agar bu kutish (tarmoq kechikishi,
+    flood-control va h.k. tufayli) uzoq cho'zilsa, R2 tomoni ulanishni
+    "jim qoldi" deb hisoblab uzib yuboradi -- aynan shundan `httpx.ReadError`
+    kelib chiqadi. Progress-xabar sal kechikib yetib borsa ham (UI uchun
+    muhim emas), yuklash oqimi hech qachon bloklanmasligi kerak."""
     loop = asyncio.get_event_loop()
     total = os.path.getsize(path)
     sent = 0
@@ -98,12 +108,12 @@ async def _aiter_file_with_progress(path: str, chunk_size: int, on_progress=None
                     last_percent = percent
                     result = on_progress(percent)
                     if asyncio.iscoroutine(result):
-                        await result
+                        asyncio.ensure_future(result)
             yield chunk
     if on_progress is not None:
         result = on_progress(100)
         if asyncio.iscoroutine(result):
-            await result
+            asyncio.ensure_future(result)
 
 
 async def _presign_and_put(
