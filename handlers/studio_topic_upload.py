@@ -30,7 +30,8 @@ from utils.shared_db import get_manager_studios
 from utils.studio_auth import get_bound_studio, bind_user
 from utils.studio_group import get_slug_by_chat_id, get_content_key_by_topic, set_topic_id
 from utils.studio_topic_queue import add_item, get_queue, remove_item
-from utils.ffmpeg_utils import prepare_for_telegram_async, make_temp_path
+from utils.orphan_uploads import record_orphan_upload
+from utils.ffmpeg_utils import prepare_for_telegram_async, make_temp_path, FaststartError
 from utils.keyed_lock import KeyedLockMap
 from handlers.studio_group import quality_label
 from handlers.studio_upload import _presign_and_put, _auth_headers
@@ -57,6 +58,15 @@ _STAGE_FRACTION = {
     "prepare":  0.35,
     "upload":   0.55,
     "register": 0.90,
+}
+# Har bir bosqichning umumiy item ichidagi "ulushi" (keyingi bosqich boshlanish
+# nuqtasigacha) -- `stage_percent` (real foiz) kelganda umumiy bar'ni ham
+# faqat bosqich boshida "sakramasdan", silliq harakatlantirish uchun.
+_STAGE_SPAN = {
+    "download": _STAGE_FRACTION["prepare"] - _STAGE_FRACTION["download"],
+    "prepare":  _STAGE_FRACTION["upload"] - _STAGE_FRACTION["prepare"],
+    "upload":   _STAGE_FRACTION["register"] - _STAGE_FRACTION["upload"],
+    "register": 1.0 - _STAGE_FRACTION["register"],
 }
 
 
@@ -110,15 +120,17 @@ _RETRYABLE_EXC = (
 # masalan 3 urinish, 4s boshlang'ich -> 4s, 8s, 16s.
 _STAGE_RETRY_POLICY = {
     "download": (4, 4.0),
+    "prepare":  (2, 3.0),
     "upload":   (4, 4.0),
     "register": (3, 3.0),
 }
 
 
-async def _run_with_retry(stage: str, coro_factory, *, on_retry=None):
+async def _run_with_retry(stage: str, coro_factory, *, on_retry=None, retryable=_RETRYABLE_EXC):
     """`coro_factory()` har chaqirilganda yangi coroutine yaratadi va uni
-    ishga tushiradi. Faqat RETRYABLE tarmoq xatolarida qayta urinadi,
-    boshqa (mantiqiy) xatolarni darhol yuqoriga uzatadi.
+    ishga tushiradi. Faqat RETRYABLE (tarmoq yoki `retryable` orqali
+    uzatilgan qo'shimcha) xatolarida qayta urinadi, boshqa (mantiqiy)
+    xatolarni darhol yuqoriga uzatadi.
 
     `on_retry(attempt, max_attempts, exc, wait)` -- har muvaffaqiyatsiz
     urinishdan keyin (oxirgisidan tashqari) chaqiriladi, foydalanuvchiga
@@ -129,7 +141,7 @@ async def _run_with_retry(stage: str, coro_factory, *, on_retry=None):
     for attempt in range(1, max_attempts + 1):
         try:
             return await coro_factory()
-        except _RETRYABLE_EXC as e:
+        except retryable as e:
             last_exc = e
             if attempt >= max_attempts:
                 break
@@ -146,6 +158,36 @@ async def _run_with_retry(stage: str, coro_factory, *, on_retry=None):
             await asyncio.sleep(wait)
     assert last_exc is not None
     raise last_exc
+
+
+async def _download_file_with_progress(url: str, dest_path: str, *, on_progress=None) -> None:
+    """Telegram fayl URL'ini (`tg_file.file_path`) diskka strim qilib
+    yuklaydi va `Content-Length` mavjud bo'lsa, real bayt-asosidagi foizni
+    `on_progress(percent)`ga yuboradi. PTB'ning `download_to_drive`idan
+    farqli o'laroq, bu yerda progress kuzatib boriladi -- shu bilan birga
+    o'qish/yozish uchun uzoq timeout beriladi (katta video fayllar uchun)."""
+    timeout = httpx.Timeout(1800.0, connect=30.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream("GET", url) as resp:
+            resp.raise_for_status()
+            total = int(resp.headers.get("Content-Length") or 0)
+            downloaded = 0
+            last_percent = -1
+            with open(dest_path, "wb") as f:
+                async for chunk in resp.aiter_bytes(chunk_size=1024 * 256):
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if on_progress is not None and total > 0:
+                        percent = min(int(downloaded / total * 100), 99)
+                        if percent != last_percent:
+                            last_percent = percent
+                            result = on_progress(percent)
+                            if asyncio.iscoroutine(result):
+                                await result
+    if on_progress is not None:
+        result = on_progress(100)
+        if asyncio.iscoroutine(result):
+            await result
 
 
 def _as_int(value) -> int | None:
@@ -165,16 +207,32 @@ def _short_error(text: str, limit: int = 150) -> str:
     return text or "noma'lum xato"
 
 
+_SUB_BAR_LEN = 10
+
+
+def _sub_progress_bar(percent: int) -> str:
+    filled = round(_SUB_BAR_LEN * max(0, min(100, percent)) / 100)
+    return "▰" * filled + "▱" * (_SUB_BAR_LEN - filled)
+
+
 def _render_progress(
     *, title: str, kind: str, total: int, done: int, errors: int, skipped: int = 0,
     current_item: dict | None, stage: str | None,
     recent: list[tuple[str, bool | None, str | None]], elapsed: float,
-    retry_note: str | None = None,
+    retry_note: str | None = None, stage_percent: int | None = None,
 ) -> str:
     icon = "🎬" if kind == "m" else "📺"
     processed = done + errors + skipped
-    # "Silliq" progress: to'liq tugagan itemlar + joriy item ichidagi bosqich ulushi
-    fractional = processed + (_STAGE_FRACTION.get(stage, 0.0) if current_item is not None else 0.0)
+    # "Silliq" progress: to'liq tugagan itemlar + joriy item ichidagi bosqich ulushi.
+    # `stage_percent` (real, bayt/vaqt asosidagi foiz) mavjud bo'lsa, umumiy
+    # bar ham bosqich ICHIDA silliq harakatlanadi (faqat bosqich almashganda
+    # sakramaydi) -- aks holda bosqichning belgilangan (taxminiy) ulushi bilan.
+    stage_base = _STAGE_FRACTION.get(stage, 0.0)
+    if current_item is not None and stage_percent is not None and stage in _STAGE_SPAN:
+        stage_contrib = stage_base + _STAGE_SPAN[stage] * (stage_percent / 100)
+    else:
+        stage_contrib = stage_base
+    fractional = processed + (stage_contrib if current_item is not None else 0.0)
     fraction = (fractional / total) if total else 0.0
     pct = int(round(100 * fraction))
 
@@ -182,7 +240,7 @@ def _render_progress(
         "🚀 <b>STUDIYAGA JOYLASH</b>",
         f"{icon} {_e(title)}",
         "",
-        f"<code>{_progress_bar(fraction)}</code>  <b>{pct}%</b>",
+        f"<code>{_progress_bar(fraction)}</code>  <b>{pct}%</b>  <i>(umumiy)</i>",
         f"{processed}/{total} video ishlandi",
         "",
     ]
@@ -190,6 +248,8 @@ def _render_progress(
     if current_item is not None and stage:
         lines.append(f"🎯 <b>Joriy:</b> {_e(_item_label(kind, title, current_item))}")
         lines.append(f"   {_e(_STAGE_LABEL.get(stage, stage))}…")
+        if stage_percent is not None:
+            lines.append(f"   <code>{_sub_progress_bar(stage_percent)}</code>  {stage_percent}%  <i>(bosqich)</i>")
         if retry_note:
             lines.append(f"   {_e(retry_note)}")
         lines.append("")
@@ -301,13 +361,14 @@ class _ProgressPainter:
 
     async def update(
         self, *, current_item: dict | None, stage: str | None, force: bool = False,
-        retry_note: str | None = None,
+        retry_note: str | None = None, stage_percent: int | None = None,
     ) -> None:
         text = _render_progress(
             title=self._title, kind=self._kind, total=self._total,
             done=self._done, errors=self._errors, skipped=self._skipped,
             current_item=current_item, stage=stage, recent=self._recent,
             elapsed=time.monotonic() - self._started, retry_note=retry_note,
+            stage_percent=stage_percent,
         )
         await self._send(text, force=force, reply_markup=_cancel_keyboard(self._message_id))
 
@@ -672,35 +733,21 @@ async def handle_joylash_cancel_callback(update: Update, context: ContextTypes.D
     await query.answer("❌ Bekor qilinmoqda...")
 
 
-async def _try_delete_uploaded(studio: dict, public_url: str) -> bool:
+def _record_orphan_upload(studio: dict, public_url: str, kind: str, title: str, item: dict) -> None:
     """Bekor qilingan itemning R2'ga allaqachon yuklangan, lekin bazaga hali
-    YOZILMAGAN fayli -- serverda "yetim" (orphan) bo'lib qolmasligi uchun
-    studiya API orqali o'chirishga urinadi.
+    YOZILMAGAN faylini ro'yxatga oladi.
 
-    DIQQAT: bu studiya backend'ida mos DELETE endpoint borligiga bog'liq.
-    Agar backend bunday endpointni qo'llab-quvvatlamasa (404/405 qaytarsa),
-    funksiya False qaytaradi va chaqiruvchi buni loglab/adminga xabar berib,
-    qo'lda tozalash zarurligini bildiradi -- hech qachon xato haqida
-    jim turmaydi."""
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.request(
-                "DELETE",
-                f"{STUDIO_API_BASE}/studios/{studio['slug']}/uploads",
-                headers=_auth_headers(studio),
-                json={"url": public_url},
-            )
-        if resp.status_code < 300:
-            logger.info("Bekor qilingan R2 fayl o'chirildi: %s", public_url)
-            return True
-        logger.warning(
-            "Bekor qilingan R2 faylni o'chirib bo'lmadi (HTTP %s): %s -- %s",
-            resp.status_code, public_url, resp.text[:300],
-        )
-        return False
-    except Exception as e:
-        logger.warning("Bekor qilingan R2 faylni o'chirishda xato: %s -- %s", public_url, e)
-        return False
+    ESLATMA: ilgari bu yerda faylni studiya backend API orqali avtomatik
+    o'CHIRISHGA urinilgan edi (`DELETE /studios/:slug/uploads`). Backend
+    kodini tekshirib chiqqach, bu yo'l HECH QACHON ishlamasligi aniqlandi:
+    (1) bunday DELETE endpoint backendda umuman yo'q, (2) backenddagi
+    `deleteFromR2()` ataylab faqat `social/` prefiksli kalitlarni o'chiradi,
+    studiya film/serial fayllari esa tasodifan o'chib ketmasligi uchun bu
+    yo'l bilan ataylab bloklangan. Shuning uchun endi o'chirishga
+    urinmaymiz -- buning o'rniga faylni mahalliy ro'yxatga yozamiz, admin
+    xohlasa R2 konsolidan qo'lda tozalaydi."""
+    label = _item_label(kind, title, item)
+    record_orphan_upload(studio_slug=studio.get("slug", ""), public_url=public_url, label=label)
 
 
 async def joylash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -898,14 +945,17 @@ async def _process_one_item(
     try:
         # ── 1. Telegramdan yuklab olish ──────────────────────────────────
         stage_now[0] = "download"
-        await painter.update(current_item=item, stage="download")
+        await painter.update(current_item=item, stage="download", stage_percent=0)
+
+        async def _on_download_progress(percent: int) -> None:
+            await painter.update(current_item=item, stage="download", stage_percent=percent)
 
         async def _download():
             tg_file = await context.bot.get_file(item["file_id"], read_timeout=120, connect_timeout=30)
             path = make_temp_path("mp4")
             attempted_dl_paths.append(path)
-            await tg_file.download_to_drive(
-                path, read_timeout=1800, connect_timeout=30, write_timeout=1800,
+            await _download_file_with_progress(
+                tg_file.file_path, path, on_progress=_on_download_progress,
             )
             return path
 
@@ -914,19 +964,30 @@ async def _process_one_item(
         if is_cancelled():
             return _CANCELLED_SENTINEL
 
-        # ── 2. Formatga tayyorlash (ffmpeg) -- lokal amal, tarmoqqa bog'liq emas ──
+        # ── 2. Formatga tayyorlash (ffmpeg, faststart) -- lokal amal ──────
+        #
+        # DIQQAT: `prepare_for_telegram_async` faststart/format tayyorlash
+        # muvaffaqiyatsiz bo'lsa endi `FaststartError` ko'taradi (ilgari
+        # jimgina faststart QILINMAGAN original faylni qaytarib, xatoni
+        # yashirardi). Bu yerda uni ham RETRYABLE deb hisoblaymiz --
+        # transient disk/ffmpeg xatolari kamdan-kam qayta urinishda tuzalishi
+        # mumkin -- lekin agar barcha urinishlar tugasa, aniq xato sifatida
+        # (❌ "tarmoq xatosi" emas, balki faststart xatosi deb) chaqiruvchiga
+        # (pastdagi `except FaststartError`) uzatiladi.
         stage_now[0] = "prepare"
-        await painter.update(current_item=item, stage="prepare")
+        await painter.update(current_item=item, stage="prepare", stage_percent=0)
 
         async def _on_prepare_progress(percent: int) -> None:
-            bar = _progress_bar(percent / 100)
-            await painter.update(
-                current_item=item, stage="prepare",
-                retry_note=f"{bar} {percent}%",
+            await painter.update(current_item=item, stage="prepare", stage_percent=percent)
+
+        async def _prepare():
+            return await prepare_for_telegram_async(
+                dl_path, on_progress=_on_prepare_progress, check_cancelled=is_cancelled,
             )
 
-        prepared_path, _changed = await prepare_for_telegram_async(
-            dl_path, on_progress=_on_prepare_progress, check_cancelled=is_cancelled,
+        prepared_path, _changed = await _run_with_retry(
+            "prepare", _prepare, on_retry=_note_retry,
+            retryable=_RETRYABLE_EXC + (FaststartError,),
         )
 
         if is_cancelled():
@@ -934,7 +995,7 @@ async def _process_one_item(
 
         # ── 3. R2 bulutiga yuklash ────────────────────────────────────────
         stage_now[0] = "upload"
-        await painter.update(current_item=item, stage="upload")
+        await painter.update(current_item=item, stage="upload", stage_percent=0)
         if kind == "m":
             filename = f"{title}.mp4"
             kind_path, caption_label = "movies", f"🎬 {title}"
@@ -943,23 +1004,30 @@ async def _process_one_item(
             kind_path = "series"
             caption_label = f"📺 {title}\n{item['season']}-fasl {item['episode']}-qism"
 
+        async def _on_upload_progress(percent: int) -> None:
+            await painter.update(current_item=item, stage="upload", stage_percent=percent)
+
         async def _upload():
-            return await _presign_and_put(studio, prepared_path, kind_path, filename)
+            return await _presign_and_put(
+                studio, prepared_path, kind_path, filename, on_progress=_on_upload_progress,
+            )
 
         public_url = await _run_with_retry("upload", _upload, on_retry=_note_retry)
         if not public_url or public_url == "cancelled":
             return "R2 bulutiga yuklashda xato bo'ldi"
 
         # ── R2'ga muvaffaqiyatli yuklandi, lekin bazaga hali yozilmagan ──
-        # holat -- aynan shu oynada bekor qilingan bo'lsa, "yetim" fayl
-        # serverda (R2'da) qolib ketmasligi uchun uni o'chirishga urinamiz.
+        # holat -- aynan shu oynada bekor qilingan bo'lsa, fayl serverda
+        # (R2'da) "yetim" bo'lib qoladi. Buni AVTOMATIK o'CHIRISHGA
+        # urinmaymiz (backendda mos endpoint yo'q va bo'lsa ham u ataylab
+        # faqat social/ fayllarni o'chiradi) -- shunchaki ro'yxatga olamiz,
+        # admin xohlasa qo'lda tozalaydi.
         if is_cancelled():
-            deleted = await _try_delete_uploaded(studio, public_url)
-            if not deleted:
-                logger.warning(
-                    "Bekor qilingandan keyin R2'da qolib ketishi mumkin bo'lgan fayl: %s (item=%s)",
-                    public_url, item.get("message_id"),
-                )
+            _record_orphan_upload(studio, public_url, kind, title, item)
+            logger.warning(
+                "Bekor qilingandan keyin R2'da qolib ketgan (yetim) fayl ro'yxatga olindi: %s (item=%s)",
+                public_url, item.get("message_id"),
+            )
             return _CANCELLED_SENTINEL
 
         # ── 4. Studiya bazasiga ro'yxatga olish ──────────────────────────
@@ -1073,6 +1141,18 @@ async def _process_one_item(
             logger.warning("Caption tahrirlashda xato (message_id=%s): %s", item["message_id"], e)
 
         return None
+    except FaststartError as e:
+        # Faststart/format tayyorlash bosqichi (retry'lardan keyin ham)
+        # muvaffaqiyatsiz tugadi -- bu TARMOQ xatosi emas (ffmpeg/disk
+        # muammosi), shuning uchun "Tarmoq xatosi" deb emas, aniq sabab
+        # bilan ko'rsatamiz. Eski xatti-harakat (faststart'siz original
+        # faylni jimgina R2'ga yuklab yuborish) butunlay olib tashlandi --
+        # endi bu xato ochiq ko'rinadi va item xato sifatida qayd etiladi.
+        logger.warning(
+            "Faststart/prepare xatosi barcha urinishlardan keyin ham davom etdi (message_id=%s): %s",
+            item["message_id"], e,
+        )
+        return f"Faststart/formatga tayyorlashda xato: {_short_error(str(e))}"
     except _RETRYABLE_EXC as e:
         # Barcha qayta urinishlar ham tugagan -- vaqtinchalik tarmoq xatosi
         # sifatida aniq belgilaymiz, shunda tashqi (joylash_command) darajadagi

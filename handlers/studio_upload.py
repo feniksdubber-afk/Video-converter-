@@ -9,6 +9,7 @@ Oqim:
   4. Video R2'ga presign orqali yuklanadi, keyin API'ga biriktiriladi
 """
 
+import asyncio
 import logging
 import os
 
@@ -75,9 +76,39 @@ def _auth_headers(studio: dict) -> dict:
     return {"Authorization": f"Bearer {studio['api_token']}"}
 
 
+async def _aiter_file_with_progress(path: str, chunk_size: int, on_progress=None):
+    """Faylni diskdan qism-qism (chunk) o'qib, R2'ga stream qilib yuborish
+    uchun async iterator. Har chunkdan keyin (foiz o'zgargan bo'lsa)
+    `on_progress(percent)` chaqiriladi -- shu orqali yuklash progress-bari
+    aniq (real bayt hisobiga asoslangan) foizni ko'rsata oladi, taxminiy
+    vaqt asosidagi emas."""
+    loop = asyncio.get_event_loop()
+    total = os.path.getsize(path)
+    sent = 0
+    last_percent = -1
+    with open(path, "rb") as f:
+        while True:
+            chunk = await loop.run_in_executor(None, f.read, chunk_size)
+            if not chunk:
+                break
+            sent += len(chunk)
+            if on_progress is not None and total > 0:
+                percent = min(int(sent / total * 100), 99)
+                if percent != last_percent:
+                    last_percent = percent
+                    result = on_progress(percent)
+                    if asyncio.iscoroutine(result):
+                        await result
+            yield chunk
+    if on_progress is not None:
+        result = on_progress(100)
+        if asyncio.iscoroutine(result):
+            await result
+
+
 async def _presign_and_put(
     studio: dict, file_path: str, kind: str, filename: str,
-    user_id: int = 0, status_msg=None,
+    user_id: int = 0, status_msg=None, on_progress=None,
 ) -> str | None:
     from utils.task_queue import new_ticket, acquire_slot, release_slot
 
@@ -124,11 +155,21 @@ async def _presign_and_put(
                 logger.warning("Presign xato: %s", data)
                 return None
 
-            with open(file_path, "rb") as f:
-                put_resp = await client.put(
+            # DIQQAT: PUT so'rovi presign so'roviga qaraganda ancha uzoq
+            # davom etishi mumkin (katta video fayllar) -- shuning uchun
+            # alohida, uzoqroq timeout'li client bilan, faylni xotiraga
+            # to'liq o'qimasdan, chunk-chunk stream qilib yuboramiz (shu
+            # bilan birga real bayt-asosidagi progress foizini ham olamiz).
+            put_timeout = httpx.Timeout(600.0, connect=30.0)
+            file_size = os.path.getsize(file_path)
+            async with httpx.AsyncClient(timeout=put_timeout) as put_client:
+                put_resp = await put_client.put(
                     upload_url,
-                    headers={"Content-Type": content_type},
-                    content=f.read(),
+                    headers={
+                        "Content-Type": content_type,
+                        "Content-Length": str(file_size),
+                    },
+                    content=_aiter_file_with_progress(file_path, 1024 * 1024, on_progress),
                 )
             if put_resp.status_code >= 300:
                 logger.warning("R2 upload xato: %s %s", put_resp.status_code, put_resp.text[:300])
