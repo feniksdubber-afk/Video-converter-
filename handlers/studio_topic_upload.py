@@ -21,14 +21,14 @@ import time
 
 import httpx
 from telegram import Update
-from telegram.error import RetryAfter, TelegramError
+from telegram.error import NetworkError, RetryAfter, TelegramError, TimedOut
 from telegram.ext import ContextTypes
 
 from config import STUDIO_API_BASE
 from utils.shared_db import get_manager_studios
 from utils.studio_auth import get_bound_studio, bind_user
 from utils.studio_group import get_slug_by_chat_id, get_content_key_by_topic, set_topic_id
-from utils.studio_topic_queue import add_item, get_queue, clear_queue
+from utils.studio_topic_queue import add_item, get_queue, remove_item
 from utils.ffmpeg_utils import prepare_for_telegram, _run_in_executor, make_temp_path
 from handlers.studio_group import quality_label
 from handlers.studio_upload import _presign_and_put, _auth_headers
@@ -77,6 +77,67 @@ def _fmt_duration(seconds: float) -> str:
     if h:
         return f"{h}:{m:02d}:{s:02d}"
     return f"{m}:{s:02d}"
+
+
+# ── Tarmoq xatolariga chidamli qayta urinish (retry) infratuzilmasi ────────
+#
+# ConnectionResetError / OSError [Errno 0] kabi xatolar deyarli har doim
+# VAQTINCHALIK tarmoq uzilishidan kelib chiqadi (Telegram/R2/API bilan TCP
+# ulanish uzilishi). Bunday xatolarni "kutilmagan xato" deb bir marta log
+# qilib qo'yib yubormasdan, avtomatik va qat'iyat bilan qayta urinamiz --
+# lekin faqat RETRYABLE (vaqtinchalik) xato turlari uchun. Mantiqiy xatolar
+# (masalan noto'g'ri caption format, 4xx javoblar) qayta urinilmaydi --
+# ular takrorlansa ham natija o'zgarmaydi va foydalanuvchi vaqtini yeydi.
+
+_RETRYABLE_EXC = (
+    OSError,                # ConnectionResetError, [Errno 0] va shu kabi TCP xatolar
+    httpx.TransportError,   # ulanish, o'qish/yozish, timeout xatolari (httpx)
+    TimedOut,
+    NetworkError,
+    asyncio.TimeoutError,
+)
+
+# Bosqich nomi -> (urinishlar soni, boshlang'ich kutish soniyasi).
+# Kutish har urinishda ikki baravar oshadi (exponential backoff):
+# masalan 3 urinish, 4s boshlang'ich -> 4s, 8s, 16s.
+_STAGE_RETRY_POLICY = {
+    "download": (4, 4.0),
+    "upload":   (4, 4.0),
+    "register": (3, 3.0),
+}
+
+
+async def _run_with_retry(stage: str, coro_factory, *, on_retry=None):
+    """`coro_factory()` har chaqirilganda yangi coroutine yaratadi va uni
+    ishga tushiradi. Faqat RETRYABLE tarmoq xatolarida qayta urinadi,
+    boshqa (mantiqiy) xatolarni darhol yuqoriga uzatadi.
+
+    `on_retry(attempt, max_attempts, exc, wait)` -- har muvaffaqiyatsiz
+    urinishdan keyin (oxirgisidan tashqari) chaqiriladi, foydalanuvchiga
+    progress xabarida "qayta urinilmoqda" ko'rsatish uchun.
+    """
+    max_attempts, base_wait = _STAGE_RETRY_POLICY.get(stage, (1, 0.0))
+    last_exc: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return await coro_factory()
+        except _RETRYABLE_EXC as e:
+            last_exc = e
+            if attempt >= max_attempts:
+                break
+            wait = base_wait * (2 ** (attempt - 1))
+            logger.warning(
+                "[%s] tarmoq xatosi (urinish %s/%s): %r -- %.0fs dan keyin qayta urinamiz",
+                stage, attempt, max_attempts, e, wait,
+            )
+            if on_retry:
+                try:
+                    await on_retry(attempt, max_attempts, e, wait)
+                except Exception:
+                    pass
+            await asyncio.sleep(wait)
+    assert last_exc is not None
+    raise last_exc
 
 
 def _short_error(text: str, limit: int = 150) -> str:
@@ -465,6 +526,41 @@ async def joylash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     studio, slug, chat_id, topic_id, kind, content_id = ctx
 
+    # ── Bir vaqtda faqat bitta /joylash: bir xil topic uchun ikkinchi
+    # menejer (yoki qo'shaloq bosilgan tugma) navbatni parallel qayta
+    # ishlab qo'ymasligi uchun. Aks holda bitta video ikki marta R2'ga
+    # yuklanishi va bazaga IKKI MARTA yozilishi (dublikat epizod) mumkin. ──
+    lock_key = (slug, topic_id)
+    lock = _joylash_locks.setdefault(lock_key, asyncio.Lock())
+    if lock.locked():
+        await update.effective_message.reply_text(
+            "⏳ Bu kontent uchun joylash allaqachon boshqa jarayon tomonidan "
+            "bajarilmoqda (ehtimol boshqa menejer /joylash yuborgan). "
+            "Iltimos, u tugashini kuting va keyin qayta urinib ko'ring.",
+        )
+        return
+
+    async with lock:
+        await _do_joylash(update, context, studio, slug, chat_id, topic_id, kind, content_id)
+
+
+# (slug, topic_id) -> asyncio.Lock -- har bir kontent topic'i uchun alohida
+# bloklash, turli topic/studio'lar bir-biriga xalaqit bermasdan parallel
+# ishlashi mumkin bo'lishi uchun.
+_joylash_locks: dict[tuple[str, int], asyncio.Lock] = {}
+
+
+def active_joylash_count() -> int:
+    """Hozirgi vaqtda /joylash jarayoni bajarilayotgan (slug, topic) juftlar
+    soni -- /status kabi diagnostika uchun. Bo'shab qolgan (endi hech kim
+    ishlatmayotgan) lock'lar hisoblanmaydi."""
+    return sum(1 for lock in _joylash_locks.values() if lock.locked())
+
+
+async def _do_joylash(
+    update: Update, context: ContextTypes.DEFAULT_TYPE,
+    studio: dict, slug: str, chat_id: int, topic_id: int, kind: str, content_id: str,
+):
     queue = get_queue(slug, topic_id)
     if not queue:
         await update.effective_message.reply_text("ℹ️ Navbatda video yo'q.")
@@ -511,6 +607,7 @@ async def joylash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if already_exists:
             painter.mark_skip(label, "Bazada allaqachon mavjud")
             await painter.update(current_item=None, stage=None)
+            remove_item(slug, topic_id, item["message_id"])
             continue
 
         error_text = await _process_one_item(
@@ -537,7 +634,12 @@ async def joylash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             painter.mark_done(label)
         await painter.update(current_item=None, stage=None)
 
-    clear_queue(slug, topic_id)
+        # Faqat hozir qayta ishlangan itemni navbatdan olib tashlaymiz --
+        # butun navbatni tozalamaymiz. Aks holda, /joylash ishlab turgan
+        # paytda boshqa menejer topic'ga yangi video tashlasa, u navbatga
+        # ulgurib qo'shilgan bo'lsa ham oxirida bekitdan yo'qolib ketadi.
+        remove_item(slug, topic_id, item["message_id"])
+
     await painter.finish()
 
 
@@ -550,50 +652,79 @@ async def _process_one_item(
     uchun ishlatadi)."""
     dl_path = None
     prepared_path = None
-    try:
-        await painter.update(current_item=item, stage="download")
-        tg_file = await context.bot.get_file(item["file_id"], read_timeout=120, connect_timeout=30)
-        dl_path = make_temp_path("mp4")
-        await tg_file.download_to_drive(
-            dl_path, read_timeout=1800, connect_timeout=30, write_timeout=1800,
+
+    async def _note_retry(attempt, max_attempts, exc, wait):
+        await painter.update(
+            current_item=item, stage=stage_now[0], force=True,
+            retry_note=(
+                f"⚠️ Tarmoq xatosi: {_short_error(str(exc) or repr(exc))}\n"
+                f"│  🔁 Qayta urinish {attempt}/{max_attempts - 1} — {wait:.0f}s dan keyin..."
+            ),
         )
 
+    stage_now = [None]  # yopiq (closure) o'zgaruvchi -- joriy bosqichni retry xabariga uzatish uchun
+
+    try:
+        # ── 1. Telegramdan yuklab olish ──────────────────────────────────
+        stage_now[0] = "download"
+        await painter.update(current_item=item, stage="download")
+
+        async def _download():
+            tg_file = await context.bot.get_file(item["file_id"], read_timeout=120, connect_timeout=30)
+            path = make_temp_path("mp4")
+            await tg_file.download_to_drive(
+                path, read_timeout=1800, connect_timeout=30, write_timeout=1800,
+            )
+            return path
+
+        dl_path = await _run_with_retry("download", _download, on_retry=_note_retry)
+
+        # ── 2. Formatga tayyorlash (ffmpeg) -- lokal amal, tarmoqqa bog'liq emas ──
         await painter.update(current_item=item, stage="prepare")
         prepared_path, _changed = await _run_in_executor(prepare_for_telegram, dl_path)
 
+        # ── 3. R2 bulutiga yuklash ────────────────────────────────────────
+        stage_now[0] = "upload"
         await painter.update(current_item=item, stage="upload")
         if kind == "m":
             filename = f"{title}.mp4"
-            public_url = await _presign_and_put(studio, prepared_path, "movies", filename)
-            if not public_url or public_url == "cancelled":
-                return "R2 bulutiga yuklashda xato bo'ldi"
-
-            await painter.update(current_item=item, stage="register")
-            async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.patch(
-                    f"{STUDIO_API_BASE}/studios/{slug}/content/movies/{content_id}",
-                    headers=_auth_headers(studio),
-                    json={"r2Url": public_url},
-                )
-            caption_label = f"🎬 {title}"
+            kind_path, caption_label = "movies", f"🎬 {title}"
         else:
             filename = f"{title}_S{item['season']}E{item['episode']}.mp4"
-            public_url = await _presign_and_put(studio, prepared_path, "series", filename)
-            if not public_url or public_url == "cancelled":
-                return "R2 bulutiga yuklashda xato bo'ldi"
+            kind_path = "series"
+            caption_label = f"📺 {title}\n{item['season']}-fasl {item['episode']}-qism"
 
-            await painter.update(current_item=item, stage="register")
+        async def _upload():
+            return await _presign_and_put(studio, prepared_path, kind_path, filename)
+
+        public_url = await _run_with_retry("upload", _upload, on_retry=_note_retry)
+        if not public_url or public_url == "cancelled":
+            return "R2 bulutiga yuklashda xato bo'ldi"
+
+        # ── 4. Studiya bazasiga ro'yxatga olish ──────────────────────────
+        stage_now[0] = "register"
+        await painter.update(current_item=item, stage="register")
+
+        async def _register():
             async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.post(
+                if kind == "m":
+                    return await client.patch(
+                        f"{STUDIO_API_BASE}/studios/{slug}/content/movies/{content_id}",
+                        headers=_auth_headers(studio),
+                        json={"r2Url": public_url},
+                    )
+                return await client.post(
                     f"{STUDIO_API_BASE}/studios/{slug}/content/series/{content_id}/episodes",
                     headers=_auth_headers(studio),
                     json={"season": item["season"], "episode": item["episode"], "r2Url": public_url},
                 )
-            caption_label = f"📺 {title}\n{item['season']}-fasl {item['episode']}-qism"
+
+        resp = await _run_with_retry("register", _register, on_retry=_note_retry)
 
         if resp.status_code >= 300:
-            err = f"Bazaga yozishda xato: HTTP {resp.status_code} — {resp.text[:200]}"
-            logger.warning("Ro'yxatga olishda xato: %s %s", resp.status_code, resp.text[:300])
+            body_preview = _short_error(resp.text, limit=200) if resp.text else "(bo'sh javob)"
+            err = f"Bazaga yozishda xato: HTTP {resp.status_code} — {body_preview}"
+            logger.warning("Ro'yxatga olishda xato: %s %s", resp.status_code, body_preview)
             return err
 
         new_caption = caption_label + f"\n\n🔗 Video: {public_url}"
@@ -608,6 +739,22 @@ async def _process_one_item(
             logger.warning("Caption tahrirlashda xato (message_id=%s): %s", item["message_id"], e)
 
         return None
+    except _RETRYABLE_EXC as e:
+        # Barcha qayta urinishlar ham tugagan -- vaqtinchalik tarmoq xatosi
+        # sifatida aniq belgilaymiz, shunda tashqi (joylash_command) darajadagi
+        # qo'shimcha qayta urinish ham ma'noli bo'ladi.
+        logger.warning(
+            "Tarmoq xatosi barcha urinishlardan keyin ham davom etdi (message_id=%s): %r",
+            item["message_id"], e,
+        )
+        return f"Tarmoq xatosi (barcha urinishlar tugadi): {e!r}"
+    except RetryAfter as e:
+        # Telegram flood-control: aniq ko'rsatilgan vaqtni kutib, keyin
+        # xato sifatida qaytaramiz -- tashqi qayta urinish darajasi buni yana
+        # bir bor urinib ko'radi.
+        logger.warning("Flood control (message_id=%s): %ss kutish talab qilindi", item["message_id"], e.retry_after)
+        await asyncio.sleep(e.retry_after + 1)
+        return f"Telegram flood-control: {e.retry_after}s kutish talab qilindi"
     except TelegramError as e:
         logger.warning("Topic video qayta ishlashda xato (message_id=%s): %s", item["message_id"], e)
         return f"Telegram xatosi: {e}"

@@ -42,7 +42,7 @@ def _settings_keyboard(context):
 
 
 async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = (update.message or update.callback_query).from_user.id
+    user_id = update.effective_user.id
     await ensure_loaded(user_id, context)
     text = summary(context)
     if update.message:

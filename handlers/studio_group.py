@@ -4,6 +4,7 @@ film/serial uchun shu guruhda alohida topic (mavzu) ochib, kontentni
 professional tarzda saqlash.
 """
 
+import asyncio
 import logging
 
 from telegram import Update, InputFile
@@ -101,6 +102,13 @@ def _content_key(kind: str, content_id) -> str:
     return f"{kind}_{content_id}"
 
 
+# (slug, content_key) -> asyncio.Lock -- bitta kontent uchun topic yaratish
+# hech qachon ikki marta parallel bajarilmasligi kerak, aks holda Telegram'da
+# DUBLIKAT topic yaratilib, biri "yetim" bo'lib qoladi (unga tashlangan
+# videolar bot xaritasidan chiqib ketadi).
+_ensure_topic_locks: dict[tuple[str, str], asyncio.Lock] = {}
+
+
 async def ensure_topic(
     context: ContextTypes.DEFAULT_TYPE, studio: dict, kind: str, content_id, title: str,
 ) -> tuple[int, int] | None:
@@ -116,17 +124,26 @@ async def ensure_topic(
     if topic_id:
         return chat_id, topic_id
 
-    icon = "🎬" if kind == "m" else "📺"
-    name = f"{icon} {title}"[:128]
-    try:
-        forum_topic = await context.bot.create_forum_topic(chat_id=chat_id, name=name)
-    except TelegramError as e:
-        logger.warning("Topic yaratishda xato: %s", e)
-        return None
+    lock_key = (studio["slug"], key)
+    lock = _ensure_topic_locks.setdefault(lock_key, asyncio.Lock())
+    async with lock:
+        # Lock kutish paytida boshqa coroutine allaqachon topic yaratgan
+        # bo'lishi mumkin -- shuning uchun qayta tekshiramiz (double-check).
+        topic_id = get_topic_id(studio["slug"], key)
+        if topic_id:
+            return chat_id, topic_id
 
-    topic_id = forum_topic.message_thread_id
-    set_topic_id(studio["slug"], key, topic_id)
-    return chat_id, topic_id
+        icon = "🎬" if kind == "m" else "📺"
+        name = f"{icon} {title}"[:128]
+        try:
+            forum_topic = await context.bot.create_forum_topic(chat_id=chat_id, name=name)
+        except TelegramError as e:
+            logger.warning("Topic yaratishda xato: %s", e)
+            return None
+
+        topic_id = forum_topic.message_thread_id
+        set_topic_id(studio["slug"], key, topic_id)
+        return chat_id, topic_id
 
 
 async def _send_message_safe(context, chat_id, topic_id, text):

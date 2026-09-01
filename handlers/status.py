@@ -71,6 +71,33 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     r2_status = "✅ sozlangan" if R2_BUCKET else "❌ sozlanmagan"
 
+    # ── Studiya yuklash tizimi: bir nechta studiya menejeri bir vaqtda
+    # ishlayotganda umumiy holatni ko'rish uchun (bog'langan guruhlar,
+    # tokenli studiyalar, navbatdagi videolar, hozir faol /joylash'lar). ──
+    studio_lines = ""
+    try:
+        from utils.studio_group import list_groups
+        from utils.studio_auth import list_tokens
+        from utils.studio_topic_queue import queue_totals
+        from handlers.studio_topic_upload import active_joylash_count
+
+        groups = list_groups()
+        tokens = list_tokens()
+        queued_videos, queued_topics = queue_totals()
+        active_joylash = active_joylash_count()
+
+        studio_lines = (
+            "\n\n🏢 *Studiya yuklash tizimi:*\n"
+            f"  • Bog'langan guruhlar: {len(groups)}\n"
+            f"  • Token sozlangan studiyalar: {len(tokens)}\n"
+            f"  • Navbatda: {queued_videos} video ({queued_topics} topic'da)\n"
+            f"  • Hozir faol /joylash: {active_joylash}"
+        )
+    except Exception:
+        # Studiya moduli sozlanmagan/xato bo'lsa /status umuman ishlamay
+        # qolmasligi kerak -- shu bo'lim shunchaki ko'rsatilmaydi.
+        pass
+
     text = (
         "📊 *Bot holati*\n\n"
         f"🧵 *Navbat:*\n"
@@ -82,7 +109,8 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{disk_line}\n\n"
         f"👥 *Foydalanuvchilar:*\n"
         f"  • Ruxsatli: {len(allowed)}\n"
-        f"  • Admin: {len(admins)}\n\n"
+        f"  • Admin: {len(admins)}"
+        f"{studio_lines}\n\n"
         f"☁️ *R2 saqlash:* {r2_status}"
     )
 

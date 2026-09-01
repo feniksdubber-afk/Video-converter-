@@ -110,7 +110,14 @@ async def _presign_and_put(
                 headers=_auth_headers(studio),
                 json={"contentType": content_type, "filename": filename, "kind": kind},
             )
-            data = resp.json()
+            if resp.status_code >= 300:
+                logger.warning("Presign HTTP xato: %s %s", resp.status_code, resp.text[:300])
+                return None
+            try:
+                data = resp.json()
+            except ValueError:
+                logger.warning("Presign javobi JSON emas: %s", resp.text[:300])
+                return None
             upload_url = data.get("uploadUrl")
             public_url = data.get("publicUrl")
             if not upload_url:
