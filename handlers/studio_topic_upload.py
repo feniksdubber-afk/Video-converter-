@@ -18,6 +18,7 @@ import html
 import logging
 import os
 import re
+import shutil
 import time
 
 import httpx
@@ -161,11 +162,44 @@ async def _run_with_retry(stage: str, coro_factory, *, on_retry=None, retryable=
 
 
 async def _download_file_with_progress(url: str, dest_path: str, *, on_progress=None) -> None:
-    """Telegram fayl URL'ini (`tg_file.file_path`) diskka strim qilib
-    yuklaydi va `Content-Length` mavjud bo'lsa, real bayt-asosidagi foizni
-    `on_progress(percent)`ga yuboradi. PTB'ning `download_to_drive`idan
-    farqli o'laroq, bu yerda progress kuzatib boriladi -- shu bilan birga
-    o'qish/yozish uchun uzoq timeout beriladi (katta video fayllar uchun)."""
+    """`tg_file.file_path`ni diskka strim qilib yuklaydi va `Content-Length`
+    mavjud bo'lsa, real bayt-asosidagi foizni `on_progress(percent)`ga
+    yuboradi. PTB'ning `download_to_drive`idan farqli o'laroq, bu yerda
+    progress kuzatib boriladi -- shu bilan birga o'qish/yozish uchun uzoq
+    timeout beriladi (katta video fayllar uchun).
+
+    DIQQAT: `tg_file.file_path` har doim ham HTTP URL emas. Agar bot
+    `LOCAL_BOT_API_URL`ga ulangan bo'lsa (o'z `telegram-bot-api --local`
+    serverimiz -- supervisord.conf'da bot bilan BIR XIL konteynerda, umumiy
+    fayl tizimida ishlaydi), PTB `file_path`ni URL'ga aylantirmaydi -- u
+    to'g'ridan-to'g'ri shu konteynerdagi DISK YO'LI bo'lib qoladi (masalan
+    `/data/tgbotapi/<token>/videos/file_123.mp4`). Bunday holda uni httpx
+    bilan GET qilishga urinish aynan "Request URL is missing an 'http://' or
+    'https://' protocol" xatosini beradi -- URL o'rniga oddiy fayl yo'li
+    berilgani uchun. Shuning uchun avval buni tekshiramiz va agar mahalliy
+    fayl bo'lsa, tarmoq orqali yuklab olish o'rniga diskdan diskka nusxa
+    olamiz (tezroq va ishonchli, chunki fayl allaqachon shu yerda)."""
+    if os.path.isfile(url):
+        total = os.path.getsize(url)
+        await asyncio.to_thread(shutil.copyfile, url, dest_path)
+        if on_progress is not None:
+            result = on_progress(100)
+            if asyncio.iscoroutine(result):
+                await result
+        return
+
+    if not re.match(r"^https?://", url):
+        # Na diskdagi fayl, na to'g'ri URL -- LOCAL_BOT_API_URL/telegram-bot-api
+        # konteyneri sozlamasida nomuvofiqlik bor (masalan, ikkalasi bir xil
+        # fayl tizimini ulashmayapti). Buni tarmoq xatosi sifatida
+        # yashirmasdan, aniq xabar bilan ko'taramiz.
+        raise ValueError(
+            "Telegramdan olingan fayl manzili na to'g'ri URL, na diskdagi "
+            f"mavjud fayl: {url!r}. LOCAL_BOT_API_URL va telegram-bot-api "
+            "konteyneri bot bilan bir xil fayl tizimini (masalan /data/tgbotapi) "
+            "ulashayotganini tekshiring."
+        )
+
     timeout = httpx.Timeout(1800.0, connect=30.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         async with client.stream("GET", url) as resp:
