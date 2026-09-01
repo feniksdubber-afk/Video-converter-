@@ -964,9 +964,12 @@ def main():
 
     from handlers.studio_topic_upload import (
         on_topic_video_message, joylash_command, bogla_command, handle_joylash_cancel_callback,
+        navbat_command, navbatdan_ochir_command,
     )
     app.add_handler(CommandHandler("joylash", joylash_command))
     app.add_handler(CommandHandler("bogla", bogla_command))
+    app.add_handler(CommandHandler("navbat", navbat_command))
+    app.add_handler(CommandHandler("navbatdan_ochir", navbatdan_ochir_command))
 
     from handlers.orphan_files import orphanfiles_command
     app.add_handler(CommandHandler("orphanfiles", orphanfiles_command))
