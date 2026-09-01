@@ -74,6 +74,21 @@ def get_queue(slug: str, topic_id: int) -> list[dict]:
     return sorted(items, key=lambda it: (it["season"], it["episode"]))
 
 
+def queue_totals() -> tuple[int, int]:
+    """Barcha studiyalar bo'yicha jami navbat holati.
+    Qaytaradi: (jami video, band topic'lar soni) -- /status kabi umumiy
+    diagnostika uchun, har bir studiyani alohida-alohida so'ramasdan."""
+    _ensure_loaded()
+    total_items = 0
+    active_topics = 0
+    for topics in _queue.values():
+        for items in topics.values():
+            if items:
+                active_topics += 1
+                total_items += len(items)
+    return total_items, active_topics
+
+
 def clear_queue(slug: str, topic_id: int) -> None:
     _ensure_loaded()
     _queue.get(slug, {}).pop(str(topic_id), None)

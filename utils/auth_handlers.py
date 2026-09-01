@@ -2,6 +2,8 @@
 Studiya menejerlarini avtomatik aniqlash (asosiy platforma bazasidan) +
 admin uchun studiya API token va bog'lanishni boshqarish buyruqlari."""
 
+import logging
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from config import ARCHIVE_GROUP_ID
@@ -13,6 +15,8 @@ from utils.shared_db import get_manager_studios
 from utils.studio_auth import (
     get_bound_studio, bind_user, clear_binding, set_api_token, list_tokens,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _studio_pick_keyboard(studios: list[dict]) -> InlineKeyboardMarkup:
@@ -250,6 +254,29 @@ async def users_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── Studiya menejerlari: admin buyruqlari ─────────────────────────────────
 
+def _fetch_active_studios() -> list[dict] | None:
+    """Asosiy platforma bazasidan barcha faol studiyalarni o'qiydi.
+    Qaytaradi: [{"id", "slug", "name"}, ...] yoki None (baza ulanmagan/xato --
+    chaqiruvchi buni "tekshirib bo'lmadi" deb alohida ko'rsatishi kerak)."""
+    import sqlite3
+    from config import SHARED_DB_PATH as DB_PATH
+
+    if not DB_PATH:
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=5)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT id, slug, name FROM studios WHERE is_active = 1 ORDER BY name"
+            ).fetchall()
+        finally:
+            conn.close()
+        return [dict(r) for r in rows]
+    except sqlite3.Error:
+        return None
+
+
 async def studios_list_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/studiyalar — Afsona platformasidagi barcha studiyalarni va API token
     holatini ko'rsatadi (studiyalarning o'zi shu yerda YARATILMAYDI —
@@ -259,25 +286,12 @@ async def studios_list_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("⛔ Faqat Bosh admin.")
         return
 
-    import sqlite3
-    from config import SHARED_DB_PATH as DB_PATH
-
-    if not DB_PATH:
+    rows = _fetch_active_studios()
+    if rows is None:
         await update.message.reply_text(
-            "⚠️ `SHARED_DB_PATH` sozlanmagan — asosiy platforma bazasi ulanmagan.",
+            "⚠️ `SHARED_DB_PATH` sozlanmagan yoki bazani o'qib bo'lmadi.",
             parse_mode="Markdown",
         )
-        return
-
-    try:
-        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=5)
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT id, slug, name FROM studios WHERE is_active = 1 ORDER BY name"
-        ).fetchall()
-        conn.close()
-    except sqlite3.Error as e:
-        await update.message.reply_text(f"❌ Bazani o'qishda xato: {e}")
         return
 
     if not rows:
@@ -334,6 +348,45 @@ async def studio_token_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
-    slug, token = args[0], args[1]
+    slug, token = args[0].strip().lower(), args[1].strip()
+
+    # ── Slug haqiqatan ham platformada mavjud faol studiyaga tegishlimi --
+    # tekshiramiz. Aks holda oddiy yozuv xatosi (masalan "cinemaxx") tufayli
+    # token hech kim bilmagan holda "osmonga" saqlanib qolaveradi, va
+    # studiya menejeri keyinchalik tushunarsiz "token yo'q" xatosiga duch
+    # keladi. ──
+    active = _fetch_active_studios()
+    if active is not None:
+        match = next((s for s in active if s["slug"] == slug), None)
+        if not match:
+            known = ", ".join(f"`{s['slug']}`" for s in active) or "(ro'yxat bo'sh)"
+            await update.message.reply_text(
+                f"❌ `{slug}` — bunday slug'li faol studiya topilmadi.\n\n"
+                f"Mavjud slug'lar: {known}",
+                parse_mode="Markdown",
+            )
+            return
+    else:
+        # Baza vaqtincha ulanmagan bo'lsa ham, adminning ishini to'sib
+        # qo'ymaymiz -- faqat ogohlantiramiz, chunki token to'g'ri
+        # kiritilgan bo'lishi mumkin.
+        logger.warning("Slug tekshiruvi o'tkazib yuborildi -- SHARED_DB_PATH o'qib bo'lmadi.")
+
     set_api_token(slug, token)
-    await update.message.reply_text(f"✅ `{slug}` uchun API token saqlandi.", parse_mode="Markdown")
+
+    # ── Xavfsizlik: token matni chat tarixida umrbod qolib ketmasligi
+    # uchun, saqlangach foydalanuvchining o'z xabarini (tokenni o'z ichiga
+    # olgan) o'chirishga harakat qilamiz. Muvaffaqiyatsiz bo'lsa (masalan
+    # 48 soatdan eski yoki ruxsat yo'q) jim o'tkazib yuboramiz -- bu
+    # kritik emas, faqat qo'shimcha ehtiyot chorasi. ──
+    try:
+        await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=update.message.message_id)
+    except Exception:
+        pass
+
+    await update.message.reply_text(
+        f"✅ `{slug}` uchun API token saqlandi.\n\n"
+        "🔒 Xavfsizlik uchun tokenli xabaringizni o'chirishga harakat qildim "
+        "(agar hali ham ko'rinsa, qo'lda o'chiring).",
+        parse_mode="Markdown",
+    )
