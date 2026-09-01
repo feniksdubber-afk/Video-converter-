@@ -187,6 +187,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── /joylash (studiya bulk yuklash) bekor qilish ──────────────────────────
     if data.startswith("studio_joylash_cancel_"):
+        from handlers.studio_topic_upload import handle_joylash_cancel_callback
         await handle_joylash_cancel_callback(update, context)
         return
 
