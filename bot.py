@@ -190,6 +190,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_joylash_cancel_callback(update, context)
         return
 
+    # ── Yetim R2 fayllarni tozalash (faqat bosh admin) ────────────────────────
+    if data.startswith("orphan_"):
+        from handlers.orphan_files import orphanfiles_callback
+        await orphanfiles_callback(update, context)
+        return
+
     # ── Vazifa bekor qilish (FFmpeg, yuklash) ─────────────────────────────────
     if data == "task_cancel":
         uid = query.from_user.id
@@ -960,6 +966,9 @@ def main():
     )
     app.add_handler(CommandHandler("joylash", joylash_command))
     app.add_handler(CommandHandler("bogla", bogla_command))
+
+    from handlers.orphan_files import orphanfiles_command
+    app.add_handler(CommandHandler("orphanfiles", orphanfiles_command))
     # Studiya guruhi kontent topic'larida tashlangan xom videolarni navbatga
     # yozib oladi (darhol ishlamaydi -- /joylash kutadi). filters.ChatType.GROUPS
     # bilan cheklangani uchun shaxsiy chatdagi konvertatsiya oqimiga
