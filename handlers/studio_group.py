@@ -4,7 +4,6 @@ film/serial uchun shu guruhda alohida topic (mavzu) ochib, kontentni
 professional tarzda saqlash.
 """
 
-import asyncio
 import logging
 
 from telegram import Update, InputFile
@@ -16,6 +15,7 @@ from utils.studio_auth import get_bound_studio
 from utils.studio_group import (
     bind_group, get_group, get_slug_by_chat_id, set_topic_id, get_topic_id,
 )
+from utils.keyed_lock import KeyedLockMap
 
 
 def quality_label(height: int) -> str | None:
@@ -102,11 +102,12 @@ def _content_key(kind: str, content_id) -> str:
     return f"{kind}_{content_id}"
 
 
-# (slug, content_key) -> asyncio.Lock -- bitta kontent uchun topic yaratish
-# hech qachon ikki marta parallel bajarilmasligi kerak, aks holda Telegram'da
+# (slug, content_key) -> lock -- bitta kontent uchun topic yaratish hech
+# qachon ikki marta parallel bajarilmasligi kerak, aks holda Telegram'da
 # DUBLIKAT topic yaratilib, biri "yetim" bo'lib qoladi (unga tashlangan
-# videolar bot xaritasidan chiqib ketadi).
-_ensure_topic_locks: dict[tuple[str, str], asyncio.Lock] = {}
+# videolar bot xaritasidan chiqib ketadi). KeyedLockMap ishlatilgani sababli
+# foydalanilmay qolgan lock'lar avtomatik tozalanadi (memory leak yo'q).
+_ensure_topic_locks = KeyedLockMap()
 
 
 async def ensure_topic(
@@ -125,8 +126,7 @@ async def ensure_topic(
         return chat_id, topic_id
 
     lock_key = (studio["slug"], key)
-    lock = _ensure_topic_locks.setdefault(lock_key, asyncio.Lock())
-    async with lock:
+    async with _ensure_topic_locks.acquire(lock_key):
         # Lock kutish paytida boshqa coroutine allaqachon topic yaratgan
         # bo'lishi mumkin -- shuning uchun qayta tekshiramiz (double-check).
         topic_id = get_topic_id(studio["slug"], key)

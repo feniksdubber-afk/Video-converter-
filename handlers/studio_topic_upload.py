@@ -30,6 +30,7 @@ from utils.studio_auth import get_bound_studio, bind_user
 from utils.studio_group import get_slug_by_chat_id, get_content_key_by_topic, set_topic_id
 from utils.studio_topic_queue import add_item, get_queue, remove_item
 from utils.ffmpeg_utils import prepare_for_telegram, _run_in_executor, make_temp_path
+from utils.keyed_lock import KeyedLockMap
 from handlers.studio_group import quality_label
 from handlers.studio_upload import _presign_and_put, _auth_headers
 from handlers.studio_backfill import _fetch_movie_detail
@@ -138,6 +139,15 @@ async def _run_with_retry(stage: str, coro_factory, *, on_retry=None):
             await asyncio.sleep(wait)
     assert last_exc is not None
     raise last_exc
+
+
+def _as_int(value) -> int | None:
+    """`value`ni `int`ga o'giradi, bo'lmasa `None` qaytaradi (backend'dan
+    kelgan fasl/qism raqamlari ba'zan string bo'lishi mumkin)."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _short_error(text: str, limit: int = 150) -> str:
@@ -505,7 +515,7 @@ async def on_topic_video_message(update: Update, context: ContextTypes.DEFAULT_T
                 )
                 return
 
-    ok, err = add_item(slug, topic_id, message.message_id, season, episode, file_id)
+    ok, err = await add_item(slug, topic_id, message.message_id, season, episode, file_id)
     if not ok:
         await message.reply_text(f"❌ {err}")
         return
@@ -513,6 +523,20 @@ async def on_topic_video_message(update: Update, context: ContextTypes.DEFAULT_T
     queued_count = len(get_queue(slug, topic_id))
     label = "video" if kind == "m" else f"{season}-fasl {episode}-qism"
     await message.reply_text(f"✅ Navbatga qo'shildi: {label} (jami: {queued_count} ta). Tugagach /joylash yuboring.")
+
+
+# (slug, topic_id) -> lock -- har bir kontent topic'i uchun alohida
+# bloklash, turli topic/studio'lar bir-biriga xalaqit bermasdan parallel
+# ishlashi mumkin bo'lishi uchun. KeyedLockMap ishlatilgani sababli
+# foydalanilmay qolgan lock'lar avtomatik tozalanadi (memory leak yo'q).
+_joylash_locks = KeyedLockMap()
+
+# Bitta /joylash jarayoni uchun umumiy vaqt chegarasi. Bu haqiqiy foydalanish
+# holatlarida (ko'p video, sekin tarmoq, ko'p retry) yetarlicha keng, lekin
+# nazariy jihatdan "abadiy osilib qolgan" jarayon lock'ni umrbod band qilib
+# qo'yishining oldini oladi -- aks holda o'sha topic butunlay qo'lga
+# tegmasdan qolib ketardi (bot qayta ishga tushirilmaguncha).
+_JOYLASH_TIMEOUT_SECONDS = 2 * 60 * 60  # 2 soat
 
 
 async def joylash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -531,8 +555,7 @@ async def joylash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ishlab qo'ymasligi uchun. Aks holda bitta video ikki marta R2'ga
     # yuklanishi va bazaga IKKI MARTA yozilishi (dublikat epizod) mumkin. ──
     lock_key = (slug, topic_id)
-    lock = _joylash_locks.setdefault(lock_key, asyncio.Lock())
-    if lock.locked():
+    if _joylash_locks.locked(lock_key):
         await update.effective_message.reply_text(
             "⏳ Bu kontent uchun joylash allaqachon boshqa jarayon tomonidan "
             "bajarilmoqda (ehtimol boshqa menejer /joylash yuborgan). "
@@ -540,21 +563,29 @@ async def joylash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    async with lock:
-        await _do_joylash(update, context, studio, slug, chat_id, topic_id, kind, content_id)
+    async def _guarded():
+        async with _joylash_locks.acquire(lock_key):
+            await _do_joylash(update, context, studio, slug, chat_id, topic_id, kind, content_id)
 
-
-# (slug, topic_id) -> asyncio.Lock -- har bir kontent topic'i uchun alohida
-# bloklash, turli topic/studio'lar bir-biriga xalaqit bermasdan parallel
-# ishlashi mumkin bo'lishi uchun.
-_joylash_locks: dict[tuple[str, int], asyncio.Lock] = {}
+    try:
+        await asyncio.wait_for(_guarded(), timeout=_JOYLASH_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        logger.error(
+            "/joylash vaqt chegarasidan oshdi (slug=%s, topic_id=%s) -- to'xtatildi.",
+            slug, topic_id,
+        )
+        await update.effective_message.reply_text(
+            "⏱️ Jarayon belgilangan vaqt chegarasidan oshib ketdi va xavfsizlik uchun "
+            "to'xtatildi. Allaqachon joylashtirilgan videolar navbatdan olib "
+            "tashlangan -- qolganlarini joylash uchun /joylash'ni qayta yuboring.",
+        )
 
 
 def active_joylash_count() -> int:
     """Hozirgi vaqtda /joylash jarayoni bajarilayotgan (slug, topic) juftlar
     soni -- /status kabi diagnostika uchun. Bo'shab qolgan (endi hech kim
     ishlatmayotgan) lock'lar hisoblanmaydi."""
-    return sum(1 for lock in _joylash_locks.values() if lock.locked())
+    return _joylash_locks.active_count()
 
 
 async def _do_joylash(
@@ -607,7 +638,7 @@ async def _do_joylash(
         if already_exists:
             painter.mark_skip(label, "Bazada allaqachon mavjud")
             await painter.update(current_item=None, stage=None)
-            remove_item(slug, topic_id, item["message_id"])
+            await remove_item(slug, topic_id, item["message_id"])
             continue
 
         error_text = await _process_one_item(
@@ -638,7 +669,7 @@ async def _do_joylash(
         # butun navbatni tozalamaymiz. Aks holda, /joylash ishlab turgan
         # paytda boshqa menejer topic'ga yangi video tashlasa, u navbatga
         # ulgurib qo'shilgan bo'lsa ham oxirida bekitdan yo'qolib ketadi.
-        remove_item(slug, topic_id, item["message_id"])
+        await remove_item(slug, topic_id, item["message_id"])
 
     await painter.finish()
 
@@ -652,6 +683,13 @@ async def _process_one_item(
     uchun ishlatadi)."""
     dl_path = None
     prepared_path = None
+    # Har bir yuklab olish URINISHIDA yaratilgan vaqtinchalik fayl shu yerga
+    # yig'iladi. `_run_with_retry` bir necha marta urinishi mumkin (masalan
+    # 1-urinish tarmoq uzilishi bilan yarim yo'lda to'xtaydi) -- muvaffaqiyatli
+    # BO'LMAGAN urinishlarning qisman yuklangan fayllari ham diskda qolib
+    # ketmasligi uchun bu ro'yxatni `finally`da to'liq tozalaymiz (faqat
+    # oxirgi muvaffaqiyatli `dl_path`ni emas).
+    attempted_dl_paths: list[str] = []
 
     async def _note_retry(attempt, max_attempts, exc, wait):
         await painter.update(
@@ -672,6 +710,7 @@ async def _process_one_item(
         async def _download():
             tg_file = await context.bot.get_file(item["file_id"], read_timeout=120, connect_timeout=30)
             path = make_temp_path("mp4")
+            attempted_dl_paths.append(path)
             await tg_file.download_to_drive(
                 path, read_timeout=1800, connect_timeout=30, write_timeout=1800,
             )
@@ -702,6 +741,17 @@ async def _process_one_item(
             return "R2 bulutiga yuklashda xato bo'ldi"
 
         # ── 4. Studiya bazasiga ro'yxatga olish ──────────────────────────
+        #
+        # DIQQAT (idempotentlik): oddiy retry bu yerda XAVFLI -- agar so'rov
+        # SERVERGA YETIB BORGAN, bazaga muvaffaqiyatli yozilgan, lekin
+        # javobni o'qishda tarmoq uzilsa, bot buni "xato" deb hisoblab
+        # qayta yuborishi mumkin. Natijada backend'da bitta epizod/film
+        # IKKI MARTA yaratilib qolishi (dublikat) xavfi bor. Shuning uchun
+        # bu yerda oddiy `_run_with_retry` o'rniga: har bir muvaffaqiyatsiz
+        # urinishdan KEYIN, qayta yuborishdan OLDIN backend'dan haqiqatan
+        # ham yozilganmi tekshiramiz (`_verify_registered`) -- agar
+        # tekshiruv "ha, allaqachon yozilgan" desa, qayta yubormasdan
+        # muvaffaqiyat sifatida davom etamiz. ──
         stage_now[0] = "register"
         await painter.update(current_item=item, stage="register")
 
@@ -719,13 +769,75 @@ async def _process_one_item(
                     json={"season": item["season"], "episode": item["episode"], "r2Url": public_url},
                 )
 
-        resp = await _run_with_retry("register", _register, on_retry=_note_retry)
+        async def _verify_registered() -> str | None:
+            """Backend'da ushbu aniq item (film yoki fasl+qism) uchun video
+            allaqachon yozilganmi tekshiradi. Yozilgan bo'lsa mavjud R2
+            URL'ni (topilmasa shu urinishda yuklangan `public_url`ni),
+            aks holda `None` qaytaradi. Tekshiruvning o'zi xato bersa ham
+            (masalan tarmoq yana uzilsa) xavfsiz tomonga -- `None` -- og'ib,
+            chaqiruvchini oddiy retry yo'liga qaytaradi."""
+            try:
+                if kind == "m":
+                    d = await _fetch_movie_detail(studio, content_id)
+                    if d and (d.get("hasVideo") or d.get("r2Url") or d.get("videoUrl")):
+                        return d.get("r2Url") or d.get("videoUrl") or public_url
+                    return None
+                eps = await _fetch_episodes(studio, content_id)
+                if not eps:
+                    return None
+                for ep in eps:
+                    if (_as_int(ep.get("season")) == item["season"]
+                            and _as_int(ep.get("episode")) == item["episode"]
+                            and ep.get("hasVideo")):
+                        return ep.get("r2Url") or ep.get("videoUrl") or public_url
+                return None
+            except Exception:
+                logger.warning(
+                    "Ro'yxatga olishni tasdiqlashda xato (message_id=%s)",
+                    item["message_id"], exc_info=True,
+                )
+                return None
 
-        if resp.status_code >= 300:
-            body_preview = _short_error(resp.text, limit=200) if resp.text else "(bo'sh javob)"
-            err = f"Bazaga yozishda xato: HTTP {resp.status_code} — {body_preview}"
-            logger.warning("Ro'yxatga olishda xato: %s %s", resp.status_code, body_preview)
-            return err
+        max_attempts, base_wait = _STAGE_RETRY_POLICY.get("register", (1, 0.0))
+        resp = None
+        already_confirmed_url: str | None = None
+        last_exc: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                resp = await _register()
+                break
+            except _RETRYABLE_EXC as e:
+                last_exc = e
+                # Qayta urinishdan OLDIN -- so'rov aslida yetib borganmi tekshiramiz.
+                already_confirmed_url = await _verify_registered()
+                if already_confirmed_url:
+                    logger.info(
+                        "Register tarmoq xatosidan keyin tasdiqlandi (message_id=%s) -- "
+                        "qayta yuborilmaydi, dublikatdan saqlanildi.",
+                        item["message_id"],
+                    )
+                    break
+                if attempt >= max_attempts:
+                    break
+                wait = base_wait * (2 ** (attempt - 1))
+                await _note_retry(attempt, max_attempts, e, wait)
+                await asyncio.sleep(wait)
+
+        if resp is None and not already_confirmed_url:
+            # Barcha urinishlar tugadi va tasdiqlash ham "yo'q" dedi --
+            # haqiqatan ham yozilmagan, xatoni tashqariga uzatamiz (u yerda
+            # umumiy _RETRYABLE_EXC handler ushlab, foydalanuvchiga ko'rsatadi).
+            assert last_exc is not None
+            raise last_exc
+
+        if not already_confirmed_url:
+            if resp.status_code >= 300:
+                body_preview = _short_error(resp.text, limit=200) if resp.text else "(bo'sh javob)"
+                err = f"Bazaga yozishda xato: HTTP {resp.status_code} — {body_preview}"
+                logger.warning("Ro'yxatga olishda xato: %s %s", resp.status_code, body_preview)
+                return err
+        else:
+            public_url = already_confirmed_url
 
         new_caption = caption_label + f"\n\n🔗 Video: {public_url}"
         try:
@@ -762,7 +874,12 @@ async def _process_one_item(
         logger.exception("Kutilmagan xato (message_id=%s)", item["message_id"])
         return f"Kutilmagan xato: {e!r}"
     finally:
-        for p in (dl_path, prepared_path):
+        # `dl_path`/`prepared_path` + har bir (muvaffaqiyatli bo'lmagan
+        # urinishlar ham) yaratilgan vaqtinchalik fayl -- barchasini
+        # tozalaymiz, aks holda diskda orphan fayllar to'planib boradi.
+        cleanup_paths = set(attempted_dl_paths)
+        cleanup_paths.update(p for p in (dl_path, prepared_path) if p)
+        for p in cleanup_paths:
             if p and os.path.exists(p):
                 try:
                     os.remove(p)
