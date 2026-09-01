@@ -14,6 +14,7 @@ Oqim:
 """
 
 import asyncio
+import html
 import logging
 import os
 import re
@@ -62,7 +63,13 @@ _STAGE_FRACTION = {
 def _progress_bar(fraction: float) -> str:
     filled = round(_BAR_LEN * fraction)
     filled = max(0, min(_BAR_LEN, filled))
-    return "🟩" * filled + "⬜️" * (_BAR_LEN - filled)
+    return "▰" * filled + "▱" * (_BAR_LEN - filled)
+
+
+def _e(text) -> str:
+    """HTML parse_mode uchun dinamik matnni xavfsizlashtiradi (film nomi,
+    xato matni va h.k. ichida `<`, `&`, `>` bo'lsa ham xabar sinmaydi)."""
+    return html.escape(str(text), quote=False)
 
 
 def _item_label(kind: str, title: str, item: dict) -> str:
@@ -172,81 +179,77 @@ def _render_progress(
     pct = int(round(100 * fraction))
 
     lines = [
-        "✨━━━━━━━━━━━━━━━━━━━━━✨",
-        "     🚀 *STUDIYAGA JOYLASH*",
-        "✨━━━━━━━━━━━━━━━━━━━━━✨",
+        "🚀 <b>STUDIYAGA JOYLASH</b>",
+        f"{icon} {_e(title)}",
         "",
-        f"{icon} *{title}*",
-        "",
-        f"{_progress_bar(fraction)}",
-        f"*{pct}%*   ·   {processed}/{total} video",
+        f"<code>{_progress_bar(fraction)}</code>  <b>{pct}%</b>",
+        f"{processed}/{total} video ishlandi",
         "",
     ]
 
     if current_item is not None and stage:
-        lines += [
-            "┌─ 🎯 *Joriy video* ─────────────",
-            f"│  ▶️ {_item_label(kind, title, current_item)}",
-            f"│  {_STAGE_LABEL.get(stage, stage)}...",
-        ]
+        lines.append(f"🎯 <b>Joriy:</b> {_e(_item_label(kind, title, current_item))}")
+        lines.append(f"   {_e(_STAGE_LABEL.get(stage, stage))}…")
         if retry_note:
-            lines.append(f"│  {retry_note}")
-        lines += [
-            "└─────────────────────────────────",
-            "",
-        ]
+            lines.append(f"   {_e(retry_note)}")
+        lines.append("")
 
     if recent:
-        lines.append("📋 *Oxirgi natijalar:*")
+        lines.append("📋 <b>Oxirgi natijalar:</b>")
         for label, ok, detail in recent[-5:]:
             icon_r = "✅" if ok else ("⏭️" if ok is None else "⚠️")
-            lines.append(f"  {icon_r} {label}")
+            lines.append(f"{icon_r} {_e(label)}")
             if detail:
-                lines.append(f"     └ {detail}")
+                lines.append(f"   └ <i>{_e(detail)}</i>")
         lines.append("")
 
     eta_text = ""
     if fractional > 0:
         avg_per_unit = elapsed / fractional
         eta = avg_per_unit * (total - fractional)
-        eta_text = f"   ·   ⏱ Qoldi: ~{_fmt_duration(eta)}"
-    lines.append(f"🕓 O'tgan: {_fmt_duration(elapsed)}{eta_text}")
-    skip_text = f"   ⏭️ O'tkazildi: *{skipped}*" if skipped else ""
-    lines.append(f"✔️ Joylandi: *{done}*   ⚠️ Xatolar: *{errors}*{skip_text}   ⏳ Navbatda: *{total - processed}*")
+        eta_text = f"  ·  ⏱ qoldi ~{_fmt_duration(eta)}"
+    lines.append(f"🕓 {_fmt_duration(elapsed)}{eta_text}")
+    skip_text = f"  ⏭️ {skipped}" if skipped else ""
+    lines.append(f"✔️ {done}   ⚠️ {errors}{skip_text}   ⏳ {total - processed}")
     return "\n".join(lines)
 
 
 def _render_finished(
     *, title: str, kind: str, total: int, done: int, errors: int, skipped: int = 0, elapsed: float,
+    error_details: list[tuple[str, str]] | None = None,
 ) -> str:
     icon = "🎬" if kind == "m" else "📺"
     all_ok = errors == 0
-    header = "🎉━━━━━━━━━━━━━━━━━━━━━🎉" if all_ok else "⚠️━━━━━━━━━━━━━━━━━━━━━⚠️"
-    title_line = "   ✅ *JOYLASH YAKUNLANDI!*" if all_ok else "   ☑️ *JOYLASH TUGADI (xatolar bilan)*"
+    title_line = "✅ <b>JOYLASH YAKUNLANDI!</b>" if all_ok else "☑️ <b>JOYLASH TUGADI (xatolar bilan)</b>"
     lines = [
-        header,
         title_line,
-        header,
+        f"{icon} {_e(title)}",
         "",
-        f"{icon} *{title}*",
+        f"<code>{_progress_bar(1.0)}</code>  <b>100%</b>",
         "",
-        _progress_bar(1.0),
-        "*100%*",
-        "",
-        f"✔️ Muvaffaqiyatli joylandi: *{done}*",
+        f"✔️ Muvaffaqiyatli joylandi: <b>{done}</b>",
     ]
     if skipped:
-        lines.append(f"⏭️ Bazada mavjud bo'lgani uchun o'tkazildi: *{skipped}*")
+        lines.append(f"⏭️ Bazada mavjud bo'lgani uchun o'tkazildi: <b>{skipped}</b>")
     lines += [
-        f"⚠️ Xatolar: *{errors}*",
+        f"⚠️ Xatolar: <b>{errors}</b>",
         f"🕓 Jami vaqt: {_fmt_duration(elapsed)}",
     ]
     if all_ok:
         lines.append("")
         lines.append("🥳 Barcha videolar studiyaga muvaffaqiyatli joylandi!")
     else:
+        # Har bir xatoni aniq sababi bilan ko'rsatamiz -- manejer nima uchun
+        # xato bo'lganini darrov ko'rsin, faqat sonini emas.
+        if error_details:
+            lines.append("")
+            lines.append("📋 <b>Xato tafsilotlari:</b>")
+            for label, detail in error_details:
+                lines.append(f"⚠️ {_e(label)}")
+                lines.append(f"   └ <i>{_e(_short_error(detail, limit=200))}</i>")
         lines.append("")
         lines.append("ℹ️ Xatolik bergan videolarni qayta navbatga qo'shib, /joylash ni qayta yuboring.")
+        lines.append("👨‍💻 Bosh admin xato tafsilotlari bilan alohida xabardor qilindi.")
     return "\n".join(lines)
 
 
@@ -269,6 +272,9 @@ class _ProgressPainter:
         self._errors = 0
         self._skipped = 0
         self._recent: list[tuple[str, bool | None, str | None]] = []
+        # To'liq (qisqartirilmagan) xato matnlari -- adminga yuboriladigan
+        # hisobotda aniq sababni ko'rsatish uchun.
+        self._error_details: list[tuple[str, str]] = []
         self._last_edit = 0.0
         self._last_text = ""
         self._started = time.monotonic()
@@ -290,8 +296,43 @@ class _ProgressPainter:
             title=self._title, kind=self._kind, total=self._total,
             done=self._done, errors=self._errors, skipped=self._skipped,
             elapsed=time.monotonic() - self._started,
+            error_details=self._error_details,
         )
         await self._send(text, force=True)
+        if self._error_details:
+            await self._notify_admins()
+
+    async def _notify_admins(self) -> None:
+        """Xato bo'lganda studiya menejeriga emas, to'g'ridan-to'g'ri bosh
+        adminlarga aniq xato sababini (qisqartirilmagan) yuboradi."""
+        from utils.auth import list_admins
+
+        admin_ids = list_admins()
+        if not admin_ids:
+            return
+
+        lines = [
+            "🚨 *STUDIYA JOYLASH XATOLARI*",
+            "",
+            f"🎬 Kontent: *{self._title}*",
+            f"💬 Chat: `{self._chat_id}`",
+            f"⚠️ Jami xatolar: *{self._errors}* / {self._total}",
+            "",
+        ]
+        for label, detail in self._error_details:
+            lines.append(f"▶️ {label}")
+            lines.append(f"   Sabab: {detail}")
+            lines.append("")
+        text = "\n".join(lines)
+
+        # Telegram xabar uzunligi limiti (~4096) -- kerak bo'lsa bo'lib yuboramiz.
+        chunks = [text[i:i + 3800] for i in range(0, len(text), 3800)] or [text]
+        for admin_id in admin_ids:
+            for chunk in chunks:
+                try:
+                    await self._context.bot.send_message(chat_id=admin_id, text=chunk)
+                except TelegramError:
+                    logger.warning("Adminga xato hisobotini yuborib bo'lmadi (admin_id=%s)", admin_id)
 
     async def _send(self, text: str, *, force: bool) -> None:
         if text == self._last_text:
@@ -303,19 +344,31 @@ class _ProgressPainter:
         self._last_text = text
         try:
             await self._context.bot.edit_message_text(
-                chat_id=self._chat_id, message_id=self._message_id, text=text, parse_mode="Markdown",
+                chat_id=self._chat_id, message_id=self._message_id, text=text, parse_mode="HTML",
             )
         except RetryAfter as e:
             wait = min(e.retry_after, 20) + 1
             await asyncio.sleep(wait)
             try:
                 await self._context.bot.edit_message_text(
-                    chat_id=self._chat_id, message_id=self._message_id, text=text, parse_mode="Markdown",
+                    chat_id=self._chat_id, message_id=self._message_id, text=text, parse_mode="HTML",
                 )
             except TelegramError:
-                pass
+                await self._send_plain_fallback(text)
         except TelegramError:
-            pass
+            # Format (HTML) sabab xabar rad etilsa ham -- masalan noma'lum
+            # tag/entity xatosi -- xabar HECH QACHON jimgina yo'qolib
+            # ketmasligi kerak: formatsiz (plain text) qilib qayta yuboramiz.
+            await self._send_plain_fallback(text)
+
+    async def _send_plain_fallback(self, text: str) -> None:
+        plain = re.sub(r"<[^>]+>", "", text)
+        try:
+            await self._context.bot.edit_message_text(
+                chat_id=self._chat_id, message_id=self._message_id, text=plain,
+            )
+        except TelegramError:
+            logger.warning("Progress xabarini formatsiz ham yangilab bo'lmadi (message_id=%s)", self._message_id)
 
     def mark_done(self, label: str) -> None:
         self._done += 1
@@ -324,6 +377,7 @@ class _ProgressPainter:
     def mark_error(self, label: str, detail: str | None = None) -> None:
         self._errors += 1
         self._recent.append((label, False, _short_error(detail) if detail else None))
+        self._error_details.append((label, detail or "noma'lum xato"))
 
     def mark_skip(self, label: str, detail: str | None = None) -> None:
         self._skipped += 1
@@ -621,11 +675,16 @@ async def _do_joylash(
                 if ep.get("hasVideo") and ep.get("season") is not None and ep.get("episode") is not None:
                     existing_episodes.add((int(ep["season"]), int(ep["episode"])))
 
-    status = await update.effective_message.reply_text(
-        _render_progress(title=title, kind=kind, total=len(queue), done=0, errors=0,
-                          current_item=None, stage=None, recent=[], elapsed=0),
-        parse_mode="Markdown",
+    initial_text = _render_progress(
+        title=title, kind=kind, total=len(queue), done=0, errors=0,
+        current_item=None, stage=None, recent=[], elapsed=0,
     )
+    try:
+        status = await update.effective_message.reply_text(initial_text, parse_mode="HTML")
+    except TelegramError:
+        # HTML formatida ham xato bo'lsa (kutilmagan), formatsiz urinamiz --
+        # boshlang'ich xabar hech qachon jimgina yo'qolib ketmasin.
+        status = await update.effective_message.reply_text(re.sub(r"<[^>]+>", "", initial_text))
     painter = _ProgressPainter(context, chat_id, status.message_id, title=title, kind=kind, total=len(queue))
 
     for item in queue:
@@ -650,7 +709,7 @@ async def _do_joylash(
             # ko'p xatolar vaqtinchalik tarmoq/flood muammolaridan bo'ladi.
             await painter.update(
                 current_item=item, stage="download", force=True,
-                retry_note=f"⚠️ Xato: {_short_error(error_text)}\n│  🔁 Qayta urinilmoqda...",
+                retry_note=f"⚠️ Xato: {_short_error(error_text)}\n🔁 Qayta urinilmoqda...",
             )
             await asyncio.sleep(3)
             error_text_2 = await _process_one_item(
