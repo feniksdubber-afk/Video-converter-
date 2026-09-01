@@ -502,6 +502,134 @@ def get_stream_info(input_path: str) -> dict:
     return info
 
 
+async def run_ffmpeg_progress(
+    args: list[str], *, duration_sec: float = 0.0, on_progress=None, timeout: int = 7200,
+) -> tuple[bool, str]:
+    """FFmpeg'ni asinxron ishga tushiradi va `-progress pipe:1` orqali olingan
+    foizni har o'zgarganda `on_progress(percent)` (async yoki sync) ga
+    yuboradi. `run_ffmpeg_async`dan farqli o'laroq bu funksiya task_manager/
+    task_queue/status_msg bilan bog'liq emas -- istalgan chaqiruvchi context
+    (masalan studiya /joylash oqimi) uchun mos, chaqiruvchining o'zi progress
+    xabarini qanday ko'rsatishni hal qiladi."""
+    cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-nostats"] + args
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stderr_chunks: list[str] = []
+
+        async def _read_stderr():
+            async for line in proc.stderr:
+                stderr_chunks.append(line.decode(errors="replace"))
+
+        stderr_task = asyncio.ensure_future(_read_stderr())
+        current_time = 0.0
+        last_percent = -1
+
+        async def _emit(percent: int) -> None:
+            if on_progress is None:
+                return
+            result = on_progress(percent)
+            if asyncio.iscoroutine(result):
+                await result
+
+        async def _read_stdout():
+            nonlocal current_time, last_percent
+            async for raw_line in proc.stdout:
+                line = raw_line.decode(errors="replace").strip()
+                m = re.search(r"out_time_ms=(\d+)", line)
+                if m:
+                    current_time = int(m.group(1)) / 1_000_000
+                else:
+                    mt = re.search(r"out_time=(\d+):(\d+):([\d.]+)", line)
+                    if mt:
+                        h, mn, s = mt.groups()
+                        current_time = int(h) * 3600 + int(mn) * 60 + float(s)
+                if duration_sec > 0:
+                    percent = min(int(current_time / duration_sec * 100), 99)
+                    if percent != last_percent:
+                        last_percent = percent
+                        try:
+                            await _emit(percent)
+                        except Exception:
+                            pass
+
+        try:
+            await asyncio.wait_for(_read_stdout(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return False, f"Vaqt tugadi ({timeout // 60} daqiqa)"
+
+        await asyncio.wait_for(proc.wait(), timeout=30)
+        await stderr_task
+        stderr_text = "".join(stderr_chunks)
+
+        if proc.returncode != 0:
+            return False, stderr_text[-2000:] if stderr_text else "Noma'lum xato"
+
+        try:
+            await _emit(100)
+        except Exception:
+            pass
+        return True, ""
+    except FileNotFoundError:
+        return False, "FFmpeg topilmadi."
+    except Exception as e:
+        if proc is not None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+        return False, str(e)
+
+
+async def prepare_for_telegram_async(input_path: str, on_progress=None) -> tuple[str, bool]:
+    """`prepare_for_telegram`ning asinxron, jonli progress bilan ishlaydigan
+    varianti -- event loop bloklanmaydi va `on_progress(percent)` orqali
+    chaqiruvchiga real ffmpeg foizini yetkazadi (masalan progress-bar
+    xabarini yangilash uchun)."""
+    ext = os.path.splitext(input_path)[1].lower().lstrip(".")
+    info = await _run_in_executor(get_stream_info, input_path)
+    duration_sec = await _run_in_executor(get_video_duration, input_path)
+
+    if ext == "mp4" and info["vcodec"] == "h264" and info["pixfmt"] in ("yuv420p", "yuvj420p") and info["acodec"] == "aac":
+        out_path = make_temp_path("mp4")
+        ok, err = await run_ffmpeg_progress(
+            ["-i", input_path, "-c", "copy", "-movflags", "+faststart", out_path],
+            duration_sec=duration_sec, on_progress=on_progress, timeout=600,
+        )
+        if ok:
+            return out_path, True
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+        return input_path, False
+
+    out_path = make_temp_path("mp4")
+    threads = _thread_count()
+    args = [
+        "-i", input_path,
+        "-threads", threads,
+        "-c:v", "libx264", "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p",
+        "-preset", "veryfast", "-crf", "23",
+        "-c:a", "aac", "-profile:a", "aac_low", "-b:a", "128k", "-ac", "2", "-ar", "48000",
+        "-movflags", "+faststart",
+        out_path,
+    ]
+    ok, err = await run_ffmpeg_progress(args, duration_sec=duration_sec, on_progress=on_progress, timeout=7200)
+    if ok:
+        return out_path, True
+    try:
+        os.remove(out_path)
+    except OSError:
+        pass
+    return input_path, False
+
+
 def prepare_for_telegram(input_path: str) -> tuple[str, bool]:
     """MiniApp'dagi Termux/Kompyuter yuklash skriptidagi `prepare_video()`
     bilan bir xil mantiq: agar fayl allaqachon universal mos bo'lsa
