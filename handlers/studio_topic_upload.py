@@ -161,6 +161,55 @@ async def _run_with_retry(stage: str, coro_factory, *, on_retry=None, retryable=
     raise last_exc
 
 
+async def _copy_local_file_with_progress(src_path: str, dest_path: str, *, on_progress=None) -> None:
+    """`src_path`ni (diskdagi mahalliy fayl -- masalan `telegram-bot-api
+    --local` bergan yo'l) `dest_path`ga bo'lak-bo'lak (chunk) nusxalaydi va
+    har bo'lakdan keyin `on_progress(percent)`ni chaqiradi -- xuddi HTTP
+    yuklashdagi kabi real, bayt-asosidagi progress berish uchun.
+
+    `shutil.copyfile`dan farqli o'laroq (u faylni bir yo'la ko'chirib,
+    faqat oxirida 100% deb xabar berardi), bu yerda o'qish/yozish alohida
+    threadda (`asyncio.to_thread` orqali emas, balki qo'lda ishga
+    tushirilgan background threadda) amalga oshiriladi, har bo'lakdan keyin
+    progress asosiy event loop'ga `call_soon_threadsafe` bilan xavfsiz
+    uzatiladi. Diskdan-diskka oddiy I/O bo'lgani uchun bu server yukiga
+    deyarli ta'sir qilmaydi -- faqat progress-bar to'g'ri, silliq ko'rinadi."""
+    chunk_size = 1024 * 1024  # 1 MB
+    total = os.path.getsize(src_path)
+    loop = asyncio.get_running_loop()
+    last_percent = -1
+
+    def _emit_progress(percent: int) -> None:
+        nonlocal last_percent
+        if on_progress is None or percent == last_percent:
+            return
+        last_percent = percent
+        result = on_progress(percent)
+        if asyncio.iscoroutine(result):
+            # Fire-and-forget: progress xabari UI'ni yangilaydi, xolos --
+            # nusxalash jarayonini unga bog'lab, sekinlashtirmaymiz.
+            asyncio.ensure_future(result)
+
+    def _copy_sync() -> None:
+        copied = 0
+        with open(src_path, "rb") as fsrc, open(dest_path, "wb") as fdst:
+            while True:
+                chunk = fsrc.read(chunk_size)
+                if not chunk:
+                    break
+                fdst.write(chunk)
+                copied += len(chunk)
+                if total > 0:
+                    percent = min(int(copied / total * 100), 99)
+                    loop.call_soon_threadsafe(_emit_progress, percent)
+
+    await asyncio.to_thread(_copy_sync)
+    if on_progress is not None:
+        result = on_progress(100)
+        if asyncio.iscoroutine(result):
+            await result
+
+
 async def _download_file_with_progress(url: str, dest_path: str, *, on_progress=None) -> None:
     """`tg_file.file_path`ni diskka strim qilib yuklaydi va `Content-Length`
     mavjud bo'lsa, real bayt-asosidagi foizni `on_progress(percent)`ga
@@ -180,12 +229,7 @@ async def _download_file_with_progress(url: str, dest_path: str, *, on_progress=
     fayl bo'lsa, tarmoq orqali yuklab olish o'rniga diskdan diskka nusxa
     olamiz (tezroq va ishonchli, chunki fayl allaqachon shu yerda)."""
     if os.path.isfile(url):
-        total = os.path.getsize(url)
-        await asyncio.to_thread(shutil.copyfile, url, dest_path)
-        if on_progress is not None:
-            result = on_progress(100)
-            if asyncio.iscoroutine(result):
-                await result
+        await _copy_local_file_with_progress(url, dest_path, on_progress=on_progress)
         return
 
     if not re.match(r"^https?://", url):
