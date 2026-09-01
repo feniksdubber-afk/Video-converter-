@@ -185,6 +185,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await save_confirm_callback(update, context)
         return
 
+    # ── /joylash (studiya bulk yuklash) bekor qilish ──────────────────────────
+    if data.startswith("studio_joylash_cancel_"):
+        await handle_joylash_cancel_callback(update, context)
+        return
+
     # ── Vazifa bekor qilish (FFmpeg, yuklash) ─────────────────────────────────
     if data == "task_cancel":
         uid = query.from_user.id
@@ -950,7 +955,9 @@ def main():
     app.add_handler(CommandHandler("kontent_toldirish", backfill_command))
     app.add_handler(CommandHandler("toldirish_toxtat", cancel_backfill_command))
 
-    from handlers.studio_topic_upload import on_topic_video_message, joylash_command, bogla_command
+    from handlers.studio_topic_upload import (
+        on_topic_video_message, joylash_command, bogla_command, handle_joylash_cancel_callback,
+    )
     app.add_handler(CommandHandler("joylash", joylash_command))
     app.add_handler(CommandHandler("bogla", bogla_command))
     # Studiya guruhi kontent topic'larida tashlangan xom videolarni navbatga
