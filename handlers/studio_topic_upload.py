@@ -30,7 +30,7 @@ from config import STUDIO_API_BASE
 from utils.shared_db import get_manager_studios
 from utils.studio_auth import get_bound_studio, bind_user
 from utils.studio_group import get_slug_by_chat_id, get_content_key_by_topic, set_topic_id
-from utils.studio_topic_queue import add_item, get_queue, remove_item
+from utils.studio_topic_queue import add_item, get_queue, remove_item, clear_queue
 from utils.orphan_uploads import record_orphan_upload
 from utils.ffmpeg_utils import prepare_for_telegram_async, make_temp_path, FaststartError
 from utils.keyed_lock import KeyedLockMap
@@ -890,6 +890,58 @@ async def navbat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             label = f"{it['season']}-fasl {it['episode']}-qism"
         lines.append(f"• {label} — xabar #{it['message_id']}")
     await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def navbat_tozalash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shu kontent topic'idagi BUTUN navbatni bir zumda bo'shatadi (bittalab
+    /navbatdan_ochir yozishga hojat qoldirmaydi). Tasodifan bosilib
+    ketmasligi uchun avval tasdiqlash tugmasi ko'rsatiladi.
+    Foydalanish: /navbat_tozalash"""
+    ctx = _resolve_topic_context(update)
+    if not ctx:
+        hint = _explain_unresolved(update) or (
+            "⚠️ Bu buyruq faqat studiyangizga bog'langan guruhning kontent topic'ida ishlaydi."
+        )
+        await update.effective_message.reply_text(hint, parse_mode="Markdown")
+        return
+    _studio, slug, _chat_id, topic_id, _kind, _content_id = ctx
+
+    queue = get_queue(slug, topic_id)
+    if not queue:
+        await update.effective_message.reply_text("ℹ️ Navbatda video yo'q.")
+        return
+
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            f"❌ Ha, {len(queue)} tasini o'chirish",
+            callback_data=f"navbat_tozalash_{slug}_{topic_id}",
+        ),
+    ]])
+    await update.effective_message.reply_text(
+        f"⚠️ Navbatdagi <b>{len(queue)}</b> ta video butunlay o'chiriladi "
+        "(video Telegram'da qoladi, faqat navbatdan chiqadi). Tasdiqlaysizmi?",
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
+
+
+async def handle_navbat_tozalash_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """navbat_tozalash_<slug>_<topic_id> callback tugmasi bosilganda navbatni
+    tozalaydi."""
+    query = update.callback_query
+    await query.answer()
+    # callback_data format: navbat_tozalash_<slug>_<topic_id>
+    payload = query.data[len("navbat_tozalash_"):]
+    slug, _, topic_id_s = payload.rpartition("_")
+    try:
+        topic_id = int(topic_id_s)
+    except ValueError:
+        await query.edit_message_text("❌ Xato: topic aniqlanmadi.")
+        return
+
+    count = len(get_queue(slug, topic_id))
+    clear_queue(slug, topic_id)
+    await query.edit_message_text(f"✅ Navbat tozalandi ({count} ta video olib tashlandi).")
 
 
 async def joylash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
