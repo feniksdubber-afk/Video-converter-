@@ -106,12 +106,15 @@ async def _aiter_file_with_progress(path: str, chunk_size: int, on_progress=None
                 percent = min(int(sent / total * 100), 99)
                 if percent != last_percent:
                     last_percent = percent
-                    result = on_progress(percent)
+                    # `sent`/`total` ham uzatiladi -- chaqiruvchi xohlasa
+                    # (masalan progress UI'da "340 MB / 1.2 GB" ko'rsatish
+                    # uchun) ishlatadi, xohlamasa e'tiborsiz qoldiradi.
+                    result = on_progress(percent, sent, total)
                     if asyncio.iscoroutine(result):
                         asyncio.ensure_future(result)
             yield chunk
     if on_progress is not None:
-        result = on_progress(100)
+        result = on_progress(100, total, total)
         if asyncio.iscoroutine(result):
             asyncio.ensure_future(result)
 

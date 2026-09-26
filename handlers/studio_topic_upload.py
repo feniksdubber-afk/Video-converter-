@@ -69,6 +69,74 @@ _STAGE_SPAN = {
     "upload":   _STAGE_FRACTION["register"] - _STAGE_FRACTION["upload"],
     "register": 1.0 - _STAGE_FRACTION["register"],
 }
+# Bosqichlarning ko'rsatiladigan tartibi -- "🔄 Yangilash" tugmasi
+# bosilganda joriy videoning qaysi bosqichda ekanini checklist shaklida
+# ko'rsatish uchun (foiz emas, faqat qaysi bosqich o'tildi/o'tilmoqda/hali).
+_STAGE_ORDER = ["download", "prepare", "upload", "register"]
+_STAGE_STEP_LABEL = {
+    "download": "Telegram'dan yuklab olish",
+    "prepare":  "Formatga tayyorlash (ffmpeg)",
+    "upload":   "R2 bulutiga yuklash",
+    "register": "Studiya bazasiga ro'yxatga olish",
+}
+
+
+def _fmt_size(num_bytes: int) -> str:
+    """Baytni o'qish uchun qulay birlikka (MB/GB) o'giradi."""
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit in ("B", "KB") else f"{size:.2f} {unit}"
+        size /= 1024
+    return f"{size:.2f} GB"
+
+
+def _render_stage_steps(
+    current_stage: str | None, *,
+    stage_durations: dict[str, float] | None = None,
+    current_stage_started: float | None = None,
+    stage_bytes: tuple[int, int] | None = None,
+) -> list[str]:
+    """Joriy videoning bosqichlarini checklist qilib chizadi -- foizsiz,
+    faqat qaysi bosqich tugagan (✅, qancha vaqt ketgani bilan), qaysi
+    bosqichda hozir turibmiz (▶️, shu bosqichda qancha vaqtdan beri turgani
+    bilan), va qaysilari hali navbatda (⏳). `_STAGE_ORDER` asosida.
+
+    `stage_durations` -- shu videoning ALLAQACHON tugagan bosqichlari uchun
+    {stage: soniya} (faqat "🔄 Yangilash" bosilganda ko'rsatish uchun,
+    hisoblash arzon -- painter ichida allaqachon saqlangan).
+    `current_stage_started` -- joriy bosqich boshlangan `time.monotonic()`
+    qiymati; berilsa "N daqiqadan beri" ko'rsatiladi.
+    `stage_bytes` -- (yuborilgan/yuklangan bayt, jami bayt) -- faqat
+    "download"/"upload" bosqichlari uchun mazmunli (haqiqiy fayl hajmi
+    asosida, oxirgi ma'lum qiymat -- yangi tarmoq so'rovi qilinmaydi)."""
+    lines: list[str] = []
+    if current_stage not in _STAGE_ORDER:
+        return lines
+    stage_durations = stage_durations or {}
+    current_idx = _STAGE_ORDER.index(current_stage)
+    for idx, stage_key in enumerate(_STAGE_ORDER):
+        label = _STAGE_STEP_LABEL[stage_key]
+        suffix = ""
+        if idx < current_idx:
+            icon = "✅"
+            done_in = stage_durations.get(stage_key)
+            if done_in is not None:
+                suffix = f"  <i>({_fmt_duration(done_in)})</i>"
+        elif idx == current_idx:
+            icon = "▶️"
+            label = f"<b>{label}</b>"
+            if current_stage_started is not None:
+                running_for = time.monotonic() - current_stage_started
+                suffix = f"  <i>({_fmt_duration(running_for)} dan beri)</i>"
+            if stage_bytes and stage_key in ("download", "upload"):
+                done_b, total_b = stage_bytes
+                if total_b > 0:
+                    suffix += f"\n      💾 {_fmt_size(done_b)} / ~{_fmt_size(total_b)}"
+        else:
+            icon = "⏳"
+        lines.append(f"   {icon} {label}{suffix}")
+    return lines
 
 
 def _progress_bar(fraction: float) -> str:
@@ -179,12 +247,14 @@ async def _copy_local_file_with_progress(src_path: str, dest_path: str, *, on_pr
     loop = asyncio.get_running_loop()
     last_percent = -1
 
-    def _emit_progress(percent: int) -> None:
+    def _emit_progress(percent: int, copied: int) -> None:
         nonlocal last_percent
         if on_progress is None or percent == last_percent:
             return
         last_percent = percent
-        result = on_progress(percent)
+        # `copied`/`total` ham uzatiladi -- chaqiruvchi (progress UI) xohlasa
+        # "340 MB / 1.2 GB" kabi haqiqiy hajm ko'rsatish uchun ishlatadi.
+        result = on_progress(percent, copied, total)
         if asyncio.iscoroutine(result):
             # Fire-and-forget: progress xabari UI'ni yangilaydi, xolos --
             # nusxalash jarayonini unga bog'lab, sekinlashtirmaymiz.
@@ -201,11 +271,11 @@ async def _copy_local_file_with_progress(src_path: str, dest_path: str, *, on_pr
                 copied += len(chunk)
                 if total > 0:
                     percent = min(int(copied / total * 100), 99)
-                    loop.call_soon_threadsafe(_emit_progress, percent)
+                    loop.call_soon_threadsafe(_emit_progress, percent, copied)
 
     await asyncio.to_thread(_copy_sync)
     if on_progress is not None:
-        result = on_progress(100)
+        result = on_progress(100, total, total)
         if asyncio.iscoroutine(result):
             await result
 
@@ -259,14 +329,14 @@ async def _download_file_with_progress(url: str, dest_path: str, *, on_progress=
                         percent = min(int(downloaded / total * 100), 99)
                         if percent != last_percent:
                             last_percent = percent
-                            result = on_progress(percent)
+                            result = on_progress(percent, downloaded, total)
                             if asyncio.iscoroutine(result):
                                 # Fire-and-forget: Telegram progress-xabarini
                                 # kutish oqimni to'xtatib qo'ymasligi kerak
                                 # (aks holda R2'dagi kabi ReadError xavfi bor).
                                 asyncio.ensure_future(result)
     if on_progress is not None:
-        result = on_progress(100)
+        result = on_progress(100, total, total)
         if asyncio.iscoroutine(result):
             asyncio.ensure_future(result)
 
@@ -301,6 +371,9 @@ def _render_progress(
     current_item: dict | None, stage: str | None,
     recent: list[tuple[str, bool | None, str | None]], elapsed: float,
     retry_note: str | None = None, stage_percent: int | None = None,
+    stage_durations: dict[str, float] | None = None,
+    current_stage_started: float | None = None,
+    stage_bytes: tuple[int, int] | None = None,
 ) -> str:
     icon = "🎬" if kind == "m" else "📺"
     processed = done + errors + skipped
@@ -328,13 +401,17 @@ def _render_progress(
 
     if current_item is not None and stage:
         lines.append(f"🎯 <b>Joriy:</b> {_e(_item_label(kind, title, current_item))}")
-        lines.append(f"   ⏳ {_e(_STAGE_LABEL.get(stage, stage))}…")
+        lines.extend(_render_stage_steps(
+            stage, stage_durations=stage_durations,
+            current_stage_started=current_stage_started, stage_bytes=stage_bytes,
+        ))
         if retry_note:
             lines.append(f"   {_e(retry_note)}")
         lines.append("")
-        lines.append("<i>ℹ️ Jonli foiz endi ko'rsatilmaydi (flood-limitga tegmaslik uchun) --</i>")
-        lines.append("<i>bu video tugagach holat avtomatik yangilanadi, yoki pastdagi</i>")
-        lines.append("<i>\"🔄 Yangilash\" tugmasini bosing.</i>")
+        lines.append(
+            "<i>ℹ️ Jonli foiz ko'rsatilmaydi (flood-limitga tegmaslik uchun) -- "
+            "yuqoridagi bosqichlar holati \"🔄 Yangilash\" bosilganda yangilanadi.</i>"
+        )
         lines.append("")
 
     if recent:
@@ -441,17 +518,40 @@ class _ProgressPainter:
         self._last_text = ""
         self._last_markup = "__unset__"
         self._started = time.monotonic()
+        # Joriy videoning "jonli" holati -- Telegramga yuborilmagan bo'lsa
+        # ham har bir `update()` chaqiruvida shu yerda yangilanadi, "🔄
+        # Yangilash" tugmasi bosilganda darhol (qayta hisoblamasdan) qaysi
+        # bosqichda ekanini ko'rsatish uchun.
+        self._live_current_item: dict | None = None
+        self._live_stage: str | None = None
+        self._live_retry_note: str | None = None
+        self._live_bytes: tuple[int, int] | None = None
+        # Joriy item ichida: qaysi bosqich qachon boshlangani (monotonic) va
+        # ALLAQACHON tugagan bosqichlar qancha davom etgani -- checklist'da
+        # "(0:34)" / "(1:12 dan beri)" kabi vaqt ko'rsatish uchun. Yangi
+        # item boshlanganda (yoki jarayon "bo'sh" holatga qaytganda) reset
+        # qilinadi.
+        self._cur_item_key: object = None
+        self._stage_started_at: dict[str, float] = {}
+        self._stage_durations: dict[str, float] = {}
         _active_painters[message_id] = self
 
     async def update(
         self, *, current_item: dict | None, stage: str | None, force: bool = False,
         retry_note: str | None = None, stage_percent: int | None = None,
+        stage_bytes: tuple[int, int] | None = None,
     ) -> None:
         # Bosqich ICHIDAGI foiz (masalan "45% yuklandi") endi Telegram'ga
         # UMUMAN yuborilmaydi -- flood-control xavfini yo'qotish uchun.
         # Bunday tez-tez keladigan chaqiruvlar shu yerda jimgina tashlab
         # yuboriladi; faqat bosqich/video TUGAGANDA (force=True, odatda
         # stage_percent berilmagan chaqiruvda) haqiqiy xabar yuboriladi.
+        self._track_stage_timing(current_item=current_item, stage=stage)
+        self._live_current_item = current_item
+        self._live_stage = stage
+        self._live_retry_note = retry_note
+        if stage_bytes is not None:
+            self._live_bytes = stage_bytes
         if stage_percent is not None and not force:
             return
         text = _render_progress(
@@ -460,8 +560,36 @@ class _ProgressPainter:
             current_item=current_item, stage=stage, recent=self._recent,
             elapsed=time.monotonic() - self._started, retry_note=retry_note,
             stage_percent=stage_percent,
+            stage_durations=dict(self._stage_durations),
+            current_stage_started=self._stage_started_at.get(stage),
+            stage_bytes=self._live_bytes,
         )
         await self._send(text, force=force, reply_markup=_cancel_keyboard(self._message_id))
+
+    def _track_stage_timing(self, *, current_item: dict | None, stage: str | None) -> None:
+        """Joriy item/bosqich vaqtini kuzatib boradi -- checklist'da
+        "(0:34)" kabi davomiylikni ko'rsatish uchun. Yangi hisob-kitob yoki
+        tarmoq so'rovi qilmaydi, faqat `time.monotonic()` bilan ichki
+        holatni yangilaydi."""
+        item_key = current_item.get("message_id") if current_item else None
+        if item_key != self._cur_item_key:
+            # Yangi video boshlandi (yoki jarayon bo'sh holatga qaytdi) --
+            # eski bosqich vaqtlarini saqlashning ma'nosi yo'q.
+            self._cur_item_key = item_key
+            self._stage_started_at = {}
+            self._stage_durations = {}
+            self._live_bytes = None
+        prev_stage = self._live_stage
+        now = time.monotonic()
+        if stage != prev_stage:
+            if prev_stage is not None and prev_stage in self._stage_started_at:
+                self._stage_durations[prev_stage] = now - self._stage_started_at[prev_stage]
+            if stage is not None and stage not in self._stage_started_at:
+                self._stage_started_at[stage] = now
+            if stage is not None:
+                # Bosqich almashdi -- avvalgi bosqichning bayt-hisobi endi
+                # mazmunsiz (yangisiga tegishli emas).
+                self._live_bytes = None
 
     async def finish(self, *, cancelled: bool = False) -> None:
         if cancelled:
@@ -555,6 +683,38 @@ class _ProgressPainter:
             )
         except TelegramError:
             logger.warning("Progress xabarini formatsiz ham yangilab bo'lmadi (message_id=%s)", self._message_id)
+
+    async def refresh(self) -> str:
+        """`🔄 Yangilash` tugmasi bosilganda chaqiriladi -- yangi tarmoq
+        so'rovi/hisoblash (yuklab olish %, R2 %) YO'Q, faqat oxirgi saqlangan
+        hisoblagichlar (`done`/`errors`/...) + joriy videoning bosqich
+        checklist'ini qayta chizib xabarni tahrirlaydi.
+        Qaytaradi: foydalanuvchiga ko'rsatiladigan qisqa javob matni
+        (query.answer uchun)."""
+        text = _render_progress(
+            title=self._title, kind=self._kind, total=self._total,
+            done=self._done, errors=self._errors, skipped=self._skipped,
+            current_item=self._live_current_item, stage=self._live_stage,
+            recent=self._recent, elapsed=time.monotonic() - self._started,
+            retry_note=self._live_retry_note,
+            stage_durations=dict(self._stage_durations),
+            current_stage_started=self._stage_started_at.get(self._live_stage),
+            stage_bytes=self._live_bytes,
+        )
+        if text == self._last_text:
+            return "ℹ️ Holat hozircha o'zgarmagan"
+        self._last_text = text
+        try:
+            await self._context.bot.edit_message_text(
+                chat_id=self._chat_id, message_id=self._message_id, text=text,
+                parse_mode="HTML", reply_markup=_cancel_keyboard(self._message_id),
+            )
+            return "✅ Yangilandi"
+        except TelegramError as e:
+            if "not modified" in str(e).lower():
+                return "ℹ️ Holat hozircha o'zgarmagan"
+            logger.warning("Progress refresh muvaffaqiyatsiz (message_id=%s): %s", self._message_id, e)
+            return "⚠️ Yangilab bo'lmadi"
 
     def mark_done(self, label: str) -> None:
         self._done += 1
@@ -755,12 +915,16 @@ async def on_topic_video_message(update: Update, context: ContextTypes.DEFAULT_T
                 )
                 return
 
-    ok, err = await add_item(slug, topic_id, message.message_id, season, episode, file_id)
+    ok, err, queued_count = await add_item(slug, topic_id, message.message_id, season, episode, file_id)
     if not ok:
         await message.reply_text(f"❌ {err}")
         return
 
-    queued_count = len(get_queue(slug, topic_id))
+    # ESLATMA: `queued_count` `add_item()`dan to'g'ridan-to'g'ri, shu video
+    # qo'shilgan ANIQ lahzada olinadi -- bir nechta video juda tez ketma-ket
+    # (albom) tashlanganda ham har biri O'ZINING to'g'ri, bir-biridan farqli
+    # sonini ko'rsatadi (avval bo'lgani kabi hammasi bir xil oxirgi son bilan
+    # chiqib qolmaydi).
     label = "video" if kind == "m" else f"{season}-fasl {episode}-qism"
     await message.reply_text(f"✅ Navbatga qo'shildi: {label} (jami: {queued_count} ta). Tugagach /joylash yuboring.")
 
@@ -818,11 +982,9 @@ def _cancel_keyboard(status_message_id: int) -> InlineKeyboardMarkup:
 
 async def handle_joylash_refresh_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """`studio_joylash_refresh_<message_id>` tugmasi bosilganda -- yangi
-    hisoblash yo'q, faqat painter ichida saqlangan OXIRGI holatni qaytadan
-    chizib xabarni tahrirlaydi. Matn o'zgarmagan bo'lsa (kutilgan holat,
-    chunki hech narsa hisoblanmadi) Telegram "message is not modified" xato
-    qaytaradi -- buni oddiy holat deb hisoblab, foydalanuvchiga shunchaki
-    tasdiq ko'rsatamiz."""
+    tarmoq so'rovi/foiz hisoblash YO'Q, faqat painter ichida saqlangan
+    hisoblagichlar + joriy videoning bosqich checklist'i qayta chizib
+    xabarga qo'yiladi (`_ProgressPainter.refresh()`)."""
     query = update.callback_query
     data = query.data
     try:
@@ -834,17 +996,8 @@ async def handle_joylash_refresh_callback(update: Update, context: ContextTypes.
     if painter is None:
         await query.answer("ℹ️ Bu jarayon allaqachon tugagan.")
         return
-    try:
-        await context.bot.edit_message_text(
-            chat_id=painter._chat_id, message_id=painter._message_id, text=painter._last_text,
-            parse_mode="HTML", reply_markup=painter._last_markup,
-        )
-        await query.answer("✅ Yangilandi")
-    except TelegramError as e:
-        if "not modified" in str(e).lower():
-            await query.answer("ℹ️ Holat hozircha o'zgarmagan")
-        else:
-            await query.answer("⚠️ Yangilab bo'lmadi")
+    answer_text = await painter.refresh()
+    await query.answer(answer_text)
 
 
 async def handle_joylash_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1192,8 +1345,11 @@ async def _process_one_item(
         stage_now[0] = "download"
         await painter.update(current_item=item, stage="download", stage_percent=0)
 
-        async def _on_download_progress(percent: int) -> None:
-            await painter.update(current_item=item, stage="download", stage_percent=percent)
+        async def _on_download_progress(percent: int, done_bytes: int = 0, total_bytes: int = 0) -> None:
+            await painter.update(
+                current_item=item, stage="download", stage_percent=percent,
+                stage_bytes=(done_bytes, total_bytes) if total_bytes else None,
+            )
 
         async def _download():
             tg_file = await context.bot.get_file(item["file_id"], read_timeout=120, connect_timeout=30)
@@ -1249,8 +1405,11 @@ async def _process_one_item(
             kind_path = "series"
             caption_label = f"📺 {title}\n{item['season']}-fasl {item['episode']}-qism"
 
-        async def _on_upload_progress(percent: int) -> None:
-            await painter.update(current_item=item, stage="upload", stage_percent=percent)
+        async def _on_upload_progress(percent: int, sent_bytes: int = 0, total_bytes: int = 0) -> None:
+            await painter.update(
+                current_item=item, stage="upload", stage_percent=percent,
+                stage_bytes=(sent_bytes, total_bytes) if total_bytes else None,
+            )
 
         async def _upload():
             return await _presign_and_put(
