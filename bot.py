@@ -192,6 +192,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_joylash_cancel_callback(update, context)
         return
 
+    # ── /joylash progressini qo'lda yangilash ────────────────────────────────
+    if data.startswith("studio_joylash_refresh_"):
+        from handlers.studio_topic_upload import handle_joylash_refresh_callback
+        await handle_joylash_refresh_callback(update, context)
+        return
+
     # ── Yetim R2 fayllarni tozalash (faqat bosh admin) ────────────────────────
     if data.startswith("orphan_"):
         from handlers.orphan_files import orphanfiles_callback
@@ -946,7 +952,16 @@ def main():
 
     # Watchdog: har 60 soniyada Telegram bilan aloqani tekshiradi;
     # aloqa uzilib qolsa jarayonni qayta ishga tushirtiradi.
-    app.job_queue.run_repeating(_watchdog_job, interval=60, first=60)
+    # `JobQueue` faqat `python-telegram-bot[job-queue]` o'rnatilganda mavjud
+    # bo'ladi -- extra qandaydir sabab bilan yo'q bo'lib qolsa ham bot butunlay
+    # ishga tushmay qolmasligi uchun himoya qilib qo'yamiz.
+    if app.job_queue is not None:
+        app.job_queue.run_repeating(_watchdog_job, interval=60, first=60)
+    else:
+        logger.warning(
+            "⚠️ JobQueue mavjud emas (python-telegram-bot[job-queue] o'rnatilmagan) -- "
+            "watchdog o'chirilgan, lekin bot ishga tushishda davom etadi."
+        )
 
     # Ruxsat tekshiruvi — barcha handlerlardan oldin (group -1)
     from telegram.ext import TypeHandler
