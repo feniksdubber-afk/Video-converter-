@@ -328,11 +328,13 @@ def _render_progress(
 
     if current_item is not None and stage:
         lines.append(f"🎯 <b>Joriy:</b> {_e(_item_label(kind, title, current_item))}")
-        lines.append(f"   {_e(_STAGE_LABEL.get(stage, stage))}…")
-        if stage_percent is not None:
-            lines.append(f"   <code>{_sub_progress_bar(stage_percent)}</code>  {stage_percent}%  <i>(bosqich)</i>")
+        lines.append(f"   ⏳ {_e(_STAGE_LABEL.get(stage, stage))}…")
         if retry_note:
             lines.append(f"   {_e(retry_note)}")
+        lines.append("")
+        lines.append("<i>ℹ️ Jonli foiz endi ko'rsatilmaydi (flood-limitga tegmaslik uchun) --</i>")
+        lines.append("<i>bu video tugagach holat avtomatik yangilanadi, yoki pastdagi</i>")
+        lines.append("<i>\"🔄 Yangilash\" tugmasini bosing.</i>")
         lines.append("")
 
     if recent:
@@ -439,11 +441,19 @@ class _ProgressPainter:
         self._last_text = ""
         self._last_markup = "__unset__"
         self._started = time.monotonic()
+        _active_painters[message_id] = self
 
     async def update(
         self, *, current_item: dict | None, stage: str | None, force: bool = False,
         retry_note: str | None = None, stage_percent: int | None = None,
     ) -> None:
+        # Bosqich ICHIDAGI foiz (masalan "45% yuklandi") endi Telegram'ga
+        # UMUMAN yuborilmaydi -- flood-control xavfini yo'qotish uchun.
+        # Bunday tez-tez keladigan chaqiruvlar shu yerda jimgina tashlab
+        # yuboriladi; faqat bosqich/video TUGAGANDA (force=True, odatda
+        # stage_percent berilmagan chaqiruvda) haqiqiy xabar yuboriladi.
+        if stage_percent is not None and not force:
+            return
         text = _render_progress(
             title=self._title, kind=self._kind, total=self._total,
             done=self._done, errors=self._errors, skipped=self._skipped,
@@ -470,6 +480,7 @@ class _ProgressPainter:
         # Tugash bilan "❌ Bekor qilish" tugmasi olib tashlanadi -- endi bekor
         # qilinadigan hech narsa qolmadi.
         await self._send(text, force=True, reply_markup=None)
+        _active_painters.pop(self._message_id, None)
         if self._error_details:
             await self._notify_admins()
 
@@ -792,10 +803,48 @@ def _clear_cancel(status_message_id: int) -> None:
     _cancel_flags.pop(status_message_id, None)
 
 
+# message_id -> shu joriy `/joylash` jarayonining _ProgressPainter'i.
+# "🔄 Yangilash" tugmasi bosilganda saqlangan oxirgi holatni qayta chizib
+# yuborish uchun ishlatiladi (yangi hisoblash/tarmoq so'rovi kerak emas).
+_active_painters: dict[int, "_ProgressPainter"] = {}
+
+
 def _cancel_keyboard(status_message_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔄 Yangilash", callback_data=f"studio_joylash_refresh_{status_message_id}"),
         InlineKeyboardButton("❌ Bekor qilish", callback_data=f"studio_joylash_cancel_{status_message_id}"),
     ]])
+
+
+async def handle_joylash_refresh_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """`studio_joylash_refresh_<message_id>` tugmasi bosilganda -- yangi
+    hisoblash yo'q, faqat painter ichida saqlangan OXIRGI holatni qaytadan
+    chizib xabarni tahrirlaydi. Matn o'zgarmagan bo'lsa (kutilgan holat,
+    chunki hech narsa hisoblanmadi) Telegram "message is not modified" xato
+    qaytaradi -- buni oddiy holat deb hisoblab, foydalanuvchiga shunchaki
+    tasdiq ko'rsatamiz."""
+    query = update.callback_query
+    data = query.data
+    try:
+        message_id = int(data.rsplit("_", 1)[1])
+    except (ValueError, IndexError):
+        await query.answer()
+        return
+    painter = _active_painters.get(message_id)
+    if painter is None:
+        await query.answer("ℹ️ Bu jarayon allaqachon tugagan.")
+        return
+    try:
+        await context.bot.edit_message_text(
+            chat_id=painter._chat_id, message_id=painter._message_id, text=painter._last_text,
+            parse_mode="HTML", reply_markup=painter._last_markup,
+        )
+        await query.answer("✅ Yangilandi")
+    except TelegramError as e:
+        if "not modified" in str(e).lower():
+            await query.answer("ℹ️ Holat hozircha o'zgarmagan")
+        else:
+            await query.answer("⚠️ Yangilab bo'lmadi")
 
 
 async def handle_joylash_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1054,7 +1103,7 @@ async def _do_joylash(
             )
             if already_exists:
                 painter.mark_skip(label, "Bazada allaqachon mavjud")
-                await painter.update(current_item=None, stage=None)
+                await painter.update(current_item=None, stage=None, force=True)
                 await remove_item(slug, topic_id, item["message_id"])
                 continue
 
@@ -1092,7 +1141,9 @@ async def _do_joylash(
                     painter.mark_done(label)
             else:
                 painter.mark_done(label)
-            await painter.update(current_item=None, stage=None)
+            # Video TO'LIQ tugadi -- shu holat har doim (force) darhol
+            # yuboriladi, oraliq foizlardan farqli o'laroq.
+            await painter.update(current_item=None, stage=None, force=True)
 
             # Faqat hozir qayta ishlangan itemni navbatdan olib tashlaymiz --
             # butun navbatni tozalamaymiz. Aks holda, /joylash ishlab turgan
