@@ -64,12 +64,23 @@ async def _save_async() -> None:
 
 async def add_item(
     slug: str, topic_id: int, message_id: int, season: int, episode: int, file_id: str,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, int]:
     """Navbatga bitta video qo'shadi.
-    Qaytaradi: (muvaffaqiyatli, xato_matni_yoki_bosh_satr).
+    Qaytaradi: (muvaffaqiyatli, xato_matni_yoki_bosh_satr, qo'shilgan_paytdagi_soni).
     Bir xil fasl+qism allaqachon navbatda bo'lsa -- rad etiladi (xato bilan).
     Navbat `_MAX_QUEUE_SIZE`dan oshsa ham rad etiladi (nazoratsiz yukdan
-    himoya)."""
+    himoya).
+
+    ESLATMA: uchinchi qiymat (queued_count) shu video qo'shilgan ANIQ
+    lahzada (append qilingan zahoti, diskka saqlashni kutishdan OLDIN)
+    hisoblanadi va chaqiruvchiga qaytariladi -- keyinroq `get_queue()` bilan
+    qayta hisoblash SHART EMAS. Agar bir nechta video juda tez ketma-ket
+    (masalan albom) tashlansa, `_save_async()`dagi `await` paytida boshqa
+    video ham navbatga ulgurib qo'shilib ketishi mumkin -- shu payt keyin
+    `get_queue()` chaqirilsa, u ALLAQACHON kattalashgan umumiy sonni
+    qaytaradi, va bir nechta video bir xil (oxirgi) sonni ko'rsatib
+    qo'yishiga olib keladi. Shu sababli sonni shu yerda, append'dan keyin
+    darhol, hech qanday `await`dan oldin qotirib olamiz."""
     _ensure_loaded()
     tkey = str(topic_id)
     items = _queue.setdefault(slug, {}).setdefault(tkey, [])
@@ -79,12 +90,12 @@ async def add_item(
                 f"{season}-fasl {episode}-qism allaqachon navbatda "
                 f"(xabar #{it['message_id']}). Avval o'shani /navbat orqali "
                 f"tekshiring yoki to'g'ri raqamni yozing."
-            )
+            ), len(items)
     if len(items) >= _MAX_QUEUE_SIZE:
         return False, (
             f"Navbat to'lib qoldi (limit: {_MAX_QUEUE_SIZE} ta). Avval "
             f"/joylash yuborib mavjud navbatni bo'shating, keyin qolganini tashlang."
-        )
+        ), len(items)
     items.append({
         "message_id": message_id,
         "season": season,
@@ -92,8 +103,9 @@ async def add_item(
         "file_id": file_id,
         "added_at": int(time.time()),
     })
+    queued_count = len(items)  # <-- shu lahzadagi son, await'dan OLDIN qotiriladi
     await _save_async()
-    return True, ""
+    return True, "", queued_count
 
 
 def get_queue(slug: str, topic_id: int) -> list[dict]:

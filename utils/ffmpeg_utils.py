@@ -621,7 +621,20 @@ async def prepare_for_telegram_async(input_path: str, on_progress=None, check_ca
     if ext == "mp4" and info["vcodec"] == "h264" and info["pixfmt"] in ("yuv420p", "yuvj420p") and info["acodec"] == "aac":
         out_path = make_temp_path("mp4")
         ok, err = await run_ffmpeg_progress(
-            ["-i", input_path, "-c", "copy", "-movflags", "+faststart", out_path],
+            [
+                "-i", input_path,
+                # DIQQAT: `-map` ATAYLAB faqat video+audio'ni tanlaydi.
+                # `-map` berilmasa ffmpeg avtomatik ravishda faylda mavjud
+                # subtitle/data streamlarni ham (masalan ichki "subrip"
+                # subtitle) qo'shib olishga urinadi -- lekin MP4 konteyneri
+                # `subrip` kodekni qo'llab-quvvatlamaydi (faqat `mov_text`),
+                # shu sabab `-c copy` bilan mux qilishda "Subtitle codec ...
+                # not supported in MP4" xatosi chiqadi. Telegram/studiyaga
+                # subtitle umuman kerak emas, shuning uchun uni butunlay
+                # olib tashlaymiz -- eng oddiy va ishonchli yechim.
+                "-map", "0:v:0", "-map", "0:a:0?",
+                "-c", "copy", "-movflags", "+faststart", out_path,
+            ],
             duration_sec=duration_sec, on_progress=on_progress, check_cancelled=check_cancelled, timeout=600,
         )
         if ok:
@@ -641,6 +654,9 @@ async def prepare_for_telegram_async(input_path: str, on_progress=None, check_ca
     threads = _thread_count()
     args = [
         "-i", input_path,
+        # Bu yerda ham subtitle/data streamlarni tashlab, faqat video+audio
+        # qayta kodlanadi -- sabab yuqoridagi izohdagi bilan bir xil.
+        "-map", "0:v:0", "-map", "0:a:0?",
         "-threads", threads,
         "-c:v", "libx264", "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p",
         "-preset", "veryfast", "-crf", "23",
@@ -679,7 +695,17 @@ def prepare_for_telegram(input_path: str) -> tuple[str, bool]:
 
     if ext == "mp4" and info["vcodec"] == "h264" and info["pixfmt"] in ("yuv420p", "yuvj420p") and info["acodec"] == "aac":
         out_path = make_temp_path("mp4")
-        ok, err = run_ffmpeg(["-i", input_path, "-c", "copy", "-movflags", "+faststart", out_path], timeout=600)
+        ok, err = run_ffmpeg(
+            [
+                "-i", input_path,
+                # Subtitle/data streamlarni tashlab yuboramiz (yuqoridagi
+                # async variantdagi izohga qarang) -- MP4 `subrip`ni
+                # qo'llab-quvvatlamaydi.
+                "-map", "0:v:0", "-map", "0:a:0?",
+                "-c", "copy", "-movflags", "+faststart", out_path,
+            ],
+            timeout=600,
+        )
         if ok:
             return out_path, True
         try:
@@ -692,6 +718,7 @@ def prepare_for_telegram(input_path: str) -> tuple[str, bool]:
     threads = _thread_count()
     args = [
         "-i", input_path,
+        "-map", "0:v:0", "-map", "0:a:0?",
         "-threads", threads,
         "-c:v", "libx264", "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p",
         "-preset", "veryfast", "-crf", "23",
