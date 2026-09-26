@@ -1,5 +1,6 @@
 import logging
 import os
+import signal
 import asyncio
 import uuid
 from telegram import Update
@@ -905,6 +906,21 @@ async def _post_init(app):
     asyncio.create_task(_cleanup_loop())
 
 
+async def _watchdog_job(context: ContextTypes.DEFAULT_TYPE):
+    """Bot Telegram bilan aloqani yo'qotib qo'ysa (masalan local Bot API
+    qisqa vaqt qulab tushib, keyin tiklanganda ulanish 'osilib qolsa'),
+    buni aniqlab jarayonni o'zini to'xtatadi -- supervisord uni avtomatik
+    qayta ishga tushiradi (autorestart=true)."""
+    try:
+        await asyncio.wait_for(context.bot.get_me(), timeout=15)
+    except Exception as e:
+        logger.critical(
+            "🐕 WATCHDOG: Bot Telegram bilan aloqa qila olmayapti (%s). "
+            "Jarayon qayta ishga tushirish uchun to'xtatilmoqda...", e
+        )
+        os.kill(os.getpid(), signal.SIGTERM)
+
+
 def main():
     if not BOT_TOKEN:
         raise ValueError("TELEGRAM_BOT_TOKEN topilmadi!")
@@ -927,6 +943,10 @@ def main():
         logger.info("🌐 Standart Telegram API ishlatilmoqda")
 
     app = builder.build()
+
+    # Watchdog: har 60 soniyada Telegram bilan aloqani tekshiradi;
+    # aloqa uzilib qolsa jarayonni qayta ishga tushirtiradi.
+    app.job_queue.run_repeating(_watchdog_job, interval=60, first=60)
 
     # Ruxsat tekshiruvi — barcha handlerlardan oldin (group -1)
     from telegram.ext import TypeHandler
@@ -964,12 +984,14 @@ def main():
 
     from handlers.studio_topic_upload import (
         on_topic_video_message, joylash_command, bogla_command, handle_joylash_cancel_callback,
-        navbat_command, navbatdan_ochir_command,
+        navbat_command, navbatdan_ochir_command, navbat_tozalash_command, handle_navbat_tozalash_callback,
     )
     app.add_handler(CommandHandler("joylash", joylash_command))
     app.add_handler(CommandHandler("bogla", bogla_command))
     app.add_handler(CommandHandler("navbat", navbat_command))
     app.add_handler(CommandHandler("navbatdan_ochir", navbatdan_ochir_command))
+    app.add_handler(CommandHandler("navbat_tozalash", navbat_tozalash_command))
+    app.add_handler(CallbackQueryHandler(handle_navbat_tozalash_callback, pattern=r"^navbat_tozalash_"))
 
     from handlers.orphan_files import orphanfiles_command
     app.add_handler(CommandHandler("orphanfiles", orphanfiles_command))
