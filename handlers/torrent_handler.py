@@ -522,6 +522,7 @@ def _ih(magnet: str) -> Optional[str]:
 async def _search_yts(query: str, limit: int = 4) -> list:
     results = []
     data = None
+    tried = []
     async with httpx.AsyncClient(headers=HEADERS, timeout=SEARCH_TIMEOUT, follow_redirects=True) as c:
         for base in _YTS_MIRRORS:
             try:
@@ -531,10 +532,10 @@ async def _search_yts(query: str, limit: int = 4) -> list:
                 )
                 data = r.json()
                 break
-            except Exception:
-                continue
+            except Exception as e:
+                tried.append(f"{base.split('//')[1]}:{type(e).__name__}")
     if data is None:
-        raise RuntimeError("YTS mirrorlari javob bermadi")
+        raise RuntimeError("YTS: " + ", ".join(tried))
     for movie in (data.get("data", {}).get("movies") or []):
         title = movie.get("title", "?")
         year = movie.get("year", "")
@@ -565,17 +566,25 @@ async def _get_magnet_1337x(c: httpx.AsyncClient, info_url: str) -> str:
 
 async def _search_1337x(query: str, limit: int = 5) -> list:
     async with httpx.AsyncClient(headers=HEADERS, timeout=SEARCH_TIMEOUT, follow_redirects=True) as c:
-        html_text, base = None, None
+        html_text, base, tried = None, None, []
         for b in _1337X_MIRRORS:
             try:
                 r = await c.get(f"{b}/search/{quote_plus(query)}/1/")
-            except Exception:
+            except Exception as e:
+                tried.append(f"{b.split('//')[1]}:{type(e).__name__}")
                 continue
-            if r.status_code == 200 and "<tr" in r.text:
+            if r.status_code == 200 and 'class="name"' in r.text:
                 html_text, base = r.text, b
                 break
+            if r.status_code == 200 and re.search(r"Just a moment|cf-chl|challenge-platform", r.text):
+                tried.append(f"{b.split('//')[1]}:Cloudflare")
+            elif r.status_code == 200:
+                # sahifa ochildi, lekin natija yo'q — bu xato emas
+                return []
+            else:
+                tried.append(f"{b.split('//')[1]}:{r.status_code}")
         if not html_text:
-            raise RuntimeError("1337x mirrorlari javob bermadi")
+            raise RuntimeError("1337x: " + ", ".join(tried))
 
         rows = re.findall(r"<tr>(.*?)</tr>", html_text, re.DOTALL)
         parsed = []
@@ -608,45 +617,76 @@ async def _search_1337x(query: str, limit: int = 5) -> list:
         return [g for g in got if isinstance(g, TorrentResult)]
 
 
+_RUTOR_SIZE_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(KB|MB|GB|TB|КБ|МБ|ГБ|ТБ)", re.I)
+
+
+def _plain(fragment: str) -> str:
+    """HTML bo'lagini oddiy matnga aylantiradi (&nbsp; → bo'shliq)."""
+    t = html.unescape(re.sub(r"<[^>]+>", " ", fragment)).replace("\xa0", " ")
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _parse_rutor_row(row: str):
+    """→ (magnet, title, size, seeds, leeches) | None. Turli markup variantlariga bardoshli."""
+    magnet_m = re.search(r'href="(magnet:\?[^"]+)"', row)
+    name_m = re.search(r'<a[^>]+href="/torrent/[^"]*"[^>]*>(.*?)</a>', row, re.DOTALL)
+    if not magnet_m or not name_m:
+        return None
+    title = _plain(name_m.group(1))
+    if not title:
+        return None
+    after = _plain(row[name_m.end():])
+    size_m = _RUTOR_SIZE_RE.search(after)
+    size = f"{size_m.group(1)} {size_m.group(2)}" if size_m else "?"
+    seeds = leeches = 0
+    g = re.search(r'class="green"[^>]*>(.*?)</span>', row, re.DOTALL)
+    r_ = re.search(r'class="red"[^>]*>(.*?)</span>', row, re.DOTALL)
+    gn = re.findall(r"\d+", _plain(g.group(1))) if g else []
+    rn = re.findall(r"\d+", _plain(r_.group(1))) if r_ else []
+    if gn:
+        seeds = int(gn[-1])
+    if rn:
+        leeches = int(rn[-1])
+    if not gn and size_m:      # zaxira: hajmdan keyingi birinchi ikki son = seed, leech
+        nums = re.findall(r"\b\d+\b", after[size_m.end():])
+        if nums:
+            seeds = int(nums[0])
+        if len(nums) > 1:
+            leeches = int(nums[1])
+    return html.unescape(magnet_m.group(1)), title, size, seeds, leeches
+
+
 async def _search_rutor(query: str, limit: int = 4) -> list:
     html_text = None
+    tried = []
     async with httpx.AsyncClient(headers=HEADERS, timeout=SEARCH_TIMEOUT, follow_redirects=True) as c:
         for base in _RUTOR_MIRRORS:
             try:
                 r = await c.get(f"{base}/search/0/0/100/0/{quote_plus(query)}")
+                tried.append(f"{base.split('//')[1]}:{r.status_code}")
                 if r.status_code == 200:
                     html_text = r.text
                     break
-            except Exception:
-                continue
+            except Exception as e:
+                tried.append(f"{base.split('//')[1]}:{type(e).__name__}")
     if html_text is None:
-        raise RuntimeError("Rutor mirrorlari javob bermadi")
+        raise RuntimeError("Rutor: " + ", ".join(tried))
 
     results, seen = [], set()
     for row in re.findall(r"<tr[^>]*>(.*?)</tr>", html_text, re.DOTALL):
         if len(results) >= limit:
             break
-        magnet_m = re.search(r'href="(magnet:\?[^"]+)"', row)
-        name_m = re.search(r'<a[^>]+href="/torrent/[^"]*"[^>]*>(.*?)</a>', row, re.DOTALL)
-        if not magnet_m or not name_m:
+        parsed = _parse_rutor_row(row)
+        if not parsed:
             continue
-        magnet = html.unescape(magnet_m.group(1))
+        magnet, title, size, seeds, leeches = parsed
         ih = _ih(magnet) or magnet[:60]
         if ih in seen:
             continue
         seen.add(ih)
-        title = re.sub(r"<[^>]+>", "", name_m.group(1)).strip()
-        if not title:
-            continue
-        size_m = re.search(r"(\d+[\d.,]*\s*(?:KB|MB|GB|TB))", row, re.I)
-        seeds_m = re.search(r"<span[^>]*green[^>]*>(\d+)</span>", row)
-        leeches_m = re.search(r"<span[^>]*red[^>]*>(\d+)</span>", row)
         results.append(TorrentResult(
-            title=title[:80], magnet=magnet,
-            size=size_m.group(1) if size_m else "?",
-            seeds=int(seeds_m.group(1)) if seeds_m else 0,
-            leeches=int(leeches_m.group(1)) if leeches_m else 0,
-            source="Rutor",
+            title=title[:80], magnet=magnet, size=size,
+            seeds=seeds, leeches=leeches, source="Rutor",
         ))
     return results
 
@@ -655,6 +695,8 @@ async def _search_tpb(query: str, limit: int = 5) -> list:
     """The Pirate Bay — apibay.org JSON API (HTML parse shart emas)."""
     async with httpx.AsyncClient(headers=HEADERS, timeout=SEARCH_TIMEOUT, follow_redirects=True) as c:
         r = await c.get("https://apibay.org/q.php", params={"q": query, "cat": 0})
+        if r.status_code != 200:
+            raise RuntimeError(f"apibay HTTP {r.status_code}")
         data = r.json()
     if not isinstance(data, list):
         raise RuntimeError("apibay noto'g'ri javob")
@@ -734,14 +776,9 @@ async def _search_tcsv(query: str, limit: int = 5) -> list:
     return out
 
 
-async def _search_all(query: str):
-    """→ (natijalar_havzasi, javob_bermagan_asosiy_manbalar)"""
-    key = query.lower().strip()
-    cached = _search_cache.get(key)
-    if cached and time.monotonic() - cached[0] < SEARCH_CACHE_TTL:
-        return cached[1], cached[2]
-
-    sources = [  # (nom, coro, asosiy_manba)
+def _source_list(query: str) -> list:
+    """(nom, coro, asosiy_manba)"""
+    return [
         ("YTS", _search_yts(query, 4), True),
         ("1337x", _search_1337x(query, 5), True),
         ("Rutor", _search_rutor(query, 4), True),
@@ -749,6 +786,31 @@ async def _search_all(query: str):
         ("Nyaa", _search_nyaa(query, 5), True),
         ("TCSV", _search_tcsv(query, 5), False),
     ]
+
+
+async def _debug_sources(query: str) -> str:
+    """Admin uchun: har bir manba nima qaytardi (son, vaqt, xato matni)."""
+    async def run(name, coro):
+        t0 = time.monotonic()
+        try:
+            res = await coro
+            seeds = ",".join(str(r.seeds) for r in res[:4])
+            sizes = ",".join(r.size for r in res[:3])
+            return f"✅ {name}: {len(res)} ta  ⏱{time.monotonic() - t0:.1f}s" + (f"\n    seed[{seeds}] hajm[{sizes}]" if res else "")
+        except Exception as e:
+            return f"❌ {name}: {type(e).__name__}: {str(e)[:110]}  ⏱{time.monotonic() - t0:.1f}s"
+    lines = await asyncio.gather(*(run(n, c) for n, c, _ in _source_list(query)))
+    return "\n".join(lines)
+
+
+async def _search_all(query: str):
+    """→ (natijalar_havzasi, javob_bermagan_asosiy_manbalar)"""
+    key = query.lower().strip()
+    cached = _search_cache.get(key)
+    if cached and time.monotonic() - cached[0] < SEARCH_CACHE_TTL:
+        return cached[1], cached[2]
+
+    sources = _source_list(query)
     raw = await asyncio.gather(*(s_[1] for s_ in sources), return_exceptions=True)
 
     merged, failed, seen = [], [], set()
@@ -1682,6 +1744,16 @@ async def torrent_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not query:
         await msg.reply_text(_HELP, parse_mode="Markdown")
+        return
+
+    if query.lower().startswith("debug ") and _is_admin(user.id):
+        q = query[6:].strip()
+        wait = await msg.reply_text("🔧 Manbalar tekshirilmoqda...")
+        report = await _debug_sources(q)
+        try:
+            await wait.edit_text(f"🔧 Debug: {q}\n\n{report}"[:4000])
+        except Exception:
+            pass
         return
 
     if query.lower() in ("status", "holat"):
