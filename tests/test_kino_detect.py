@@ -94,6 +94,31 @@ def test_timeout_fills_diag():
     kind, m, _ = asyncio.run(go())
     assert kind is None and "diag" in ans
 
+def test_opaque_message_detected_as_raw():
+    """Pyrogram parse qilolmagan xabar (media/matn/tugma yo'q) -> kind == 'raw'."""
+    opaque = msg(101)                      # video=False, caption=None, buttons=0
+    c = FakeClient(history=[opaque], videos_before=[], videos_after=[])
+    kind, m, _ = asyncio.run(run(c, timeout=6))
+    assert kind == "raw" and m.id == 101, (kind, m)
+
+def test_photo_only_new_message_is_not_raw():
+    p = msg(101); p.photo = NS(file_id="p")
+    c = FakeClient(history=[p], videos_before=[], videos_after=[])
+    kind, m, _ = asyncio.run(run(c, timeout=1.5))
+    assert kind is None, (kind, m)
+
+def test_deliver_raw_forwards_without_parsing():
+    calls = {}
+    class RC:
+        async def invoke(self, req): calls["req"] = req; return NS(messages=[NS()])
+        async def resolve_peer(self, x): return ("peer", x)
+        async def get_chat(self, x): return NS()
+        def rnd_id(self): return 1
+    async def _noop(*a, **k): return True
+    ks._edit = _noop
+    asyncio.run(ks._deliver_raw(RC(), 7, msg(101), -100123, "1-qism", MagicMock()))
+    assert "req" in calls
+
 if __name__ == "__main__":
     import traceback
     ok = True
