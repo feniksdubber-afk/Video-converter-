@@ -286,6 +286,20 @@ def _media_of(m):
     return None
 
 
+def _msg_brief(m) -> str:
+    """Diagnostika uchun xabarning qisqa tavsifi (id, media turi, tugmalar soni)."""
+    try:
+        kind = getattr(m, "media", None)
+        kind = getattr(kind, "name", kind)
+        attrs = [a for a in ("video", "document", "audio", "animation", "video_note", "photo")
+                 if getattr(m, a, None)]
+        return (f"#{m.id} media={kind} attrs={','.join(attrs) or '-'} "
+                f"btn={len(_flatten_buttons(m))} out={bool(getattr(m, 'outgoing', False))} "
+                f"empty={bool(getattr(m, 'empty', False))}")
+    except Exception as e:  # diagnostika hech qachon oqimni buzmasin
+        return f"#? brief-xato:{type(e).__name__}"
+
+
 def _is_meaningful(m) -> bool:
     return bool(
         (m.text and m.text.strip())
@@ -551,6 +565,26 @@ async def _collect_new_messages(client, bot_id: int, after_id: int, timeout: flo
         _remove_handlers(client, h_new, h_edit)
 
 
+async def _latest_media(client, chat_id: int):
+    """Serverdagi filtr bilan chatdagi ENG OXIRGI video/fayl xabarini qaytaradi (yoki None).
+    Event'lar va chat tarixiga bog'liq emas: Telegram o'zi filtrlab beradi."""
+    from pyrogram import enums
+    best = None
+    for name in ("VIDEO", "DOCUMENT"):
+        flt = getattr(enums.MessagesFilter, name, None)
+        if flt is None:
+            continue
+        try:
+            async for m in client.search_messages(chat_id, filter=flt, limit=1):
+                if best is None or m.id > best.id:
+                    best = m
+        except FloodWait:
+            raise
+        except Exception as e:
+            logger.warning("Media qidiruvi (%s) xato: %s: %s", name, type(e).__name__, e)
+    return best
+
+
 async def _wait_for_response(client, bot_id: int, btn_msg, timeout: float,
                              trigger_fn, status_msg, answer: dict):
     """
@@ -601,9 +635,17 @@ async def _wait_for_response(client, bot_id: int, btn_msg, timeout: float,
                     texts.append(t)
         arrival.set()
 
+    seen: list[str] = []
+
     async def _on_msg(c, m):
         if _ok_chat(m):
+            brief = _msg_brief(m)
+            seen.append(brief)
+            logger.info("kino event (bosilgan=%s, after=%s): %s", pressed_id, after_id, brief)
             _see(m)
+        else:
+            logger.debug("kino event e'tiborsiz (boshqa chat/outgoing): chat=%s",
+                         getattr(getattr(m, "chat", None), "id", None))
 
     async def _poll_pressed() -> None:
         try:
@@ -615,15 +657,54 @@ async def _wait_for_response(client, bot_id: int, btn_msg, timeout: float,
         except Exception as e:
             logger.debug("Bosilgan xabarni tekshirib bo'lmadi: %s", e)
 
+    base_media_id = 0                      # bosishdan OLDIN chatdagi oxirgi media id'si
+
+    async def _poll_search() -> None:
+        """Ground truth: serverdan oxirgi video so'raladi; id'si snapshot'dan katta bo'lsa — bizniki."""
+        try:
+            m = await _latest_media(client, bot_id)
+        except FloodWait:
+            raise
+        except Exception as e:
+            logger.warning("Media qidiruvi xato: %s: %s", type(e).__name__, e)
+            return
+        if m is not None and m.id > base_media_id and not getattr(m, "outgoing", False):
+            brief = _msg_brief(m)
+            if brief not in seen:
+                seen.append(brief)
+                logger.info("kino search topdi (snapshot=%s): %s", base_media_id, brief)
+            media.append(m)
+            arrival.set()
+
+    async def _poll_new() -> None:
+        """Event'larga bog'liq bo'lmagan zaxira: chat tarixidan yangi xabarlarni o'qiydi."""
+        try:
+            async for m in client.get_chat_history(bot_id, limit=6):
+                if m.id <= after_id:
+                    break
+                if getattr(m, "outgoing", False) or getattr(m, "empty", False):
+                    continue
+                if _msg_brief(m) not in seen:
+                    seen.append(_msg_brief(m))
+                    logger.info("kino poll topdi (bosilgan=%s): %s", pressed_id, _msg_brief(m))
+                _see(m)
+        except FloodWait:
+            raise
+        except Exception as e:
+            logger.warning("Yangi xabarlarni tekshirib bo'lmadi: %s: %s", type(e).__name__, e)
+
     flt = filters.incoming & filters.private
     h_new = client.add_handler(MessageHandler(_on_msg, flt), group=_HANDLER_GROUP)
     h_edit = client.add_handler(EditedMessageHandler(_on_msg, flt), group=_HANDLER_GROUP)
 
     try:
+        _snap = await _latest_media(client, bot_id)
+        base_media_id = _snap.id if _snap is not None else 0
+        logger.info("kino snapshot: oxirgi media id=%s, bosilgan=%s", base_media_id, pressed_id)
         await trigger_fn()
         start = loop.time()
         deadline = start + timeout
-        next_poll = start + POLL_INTERVAL
+        next_poll = start          # trigger tugagach darhol bir marta tekshiramiz
         th = _Throttle(STATUS_INTERVAL)
         while not media and loop.time() < deadline:
             if menu and loop.time() - menu_at[0] >= MENU_SETTLE:
@@ -636,6 +717,9 @@ async def _wait_for_response(client, bot_id: int, btn_msg, timeout: float,
             if not media and loop.time() >= next_poll:
                 next_poll = loop.time() + POLL_INTERVAL
                 await _poll_pressed()
+                await _poll_new()
+                if not media:
+                    await _poll_search()
             if not media and not menu and th.ready():
                 note = ""
                 if answer.get("message"):
@@ -649,6 +733,7 @@ async def _wait_for_response(client, bot_id: int, btn_msg, timeout: float,
                 )
 
         if not media and not menu:                 # oxirgi urinish: qo'lda tekshirish
+            await _poll_search()
             await _poll_pressed()
             try:
                 async for m in client.get_chat_history(bot_id, limit=8):
@@ -665,6 +750,12 @@ async def _wait_for_response(client, bot_id: int, btn_msg, timeout: float,
             return "media", media[0], texts
         if menu:
             return "menu", menu[-1], texts
+        try:                                       # timeout: nima bo'layotganini ko'rsatish uchun
+            last = [_msg_brief(m) async for m in client.get_chat_history(bot_id, limit=5)]
+        except Exception as e:
+            last = [f"history-xato:{type(e).__name__}"]
+        answer["diag"] = f"bosilgan=#{pressed_id} events={len(seen)} | " + " || ".join(last)
+        logger.warning("kino timeout diag: %s", answer["diag"])
         return None, None, texts
     finally:
         _remove_handlers(client, h_new, h_edit)
@@ -1044,6 +1135,8 @@ async def _press_and_deliver(client, bot, btn_msg, chosen, dest_chat, status, re
         notes.append(f"🔗 {_h(answer['url'])}")
     if texts:
         notes.append(f"💬 Bot xabari: <i>{_h(_clip(texts[-1], 200))}</i>")
+    if answer.get("diag"):
+        notes.append(f"🧪 <code>{_h(_clip(answer['diag'], 700))}</code>")
     extra = ("\n\n" + "\n".join(notes)) if notes else ""
     await _fail(status, reply,
                 f"❌ Bot javob bermadi (timeout {BUTTON_WAIT_TIMEOUT}s){extra}\n\nQaytadan urinib ko'ring.")
