@@ -39,6 +39,7 @@ import shutil
 import time
 import uuid
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Callable
 
 from pyrogram.enums import ParseMode as PyroParseMode
@@ -59,7 +60,14 @@ logger = logging.getLogger(__name__)
 WAIT_TIMEOUT = 90          # botdan birinchi mazmunli javobni kutish (soniya)
 COLLECT_DELAY = 3.0        # oxirgi xabardan keyingi "jimlik" oynasi (soniya)
 VIDEO_GRACE = 30.0         # faqat matn kelganda video/tugma uchun qo'shimcha kutish
-BUTTON_WAIT_TIMEOUT = 90   # tugma bosilgach media kutish
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(int(os.environ.get(name, "") or default), 10)
+    except ValueError:
+        return default
+
+
+BUTTON_WAIT_TIMEOUT = _env_int("KINO_BUTTON_TIMEOUT", 90)   # tugma bosilgach media kutish (sekin botlar uchun .env da oshirish mumkin)
 CALLBACK_ANSWER_TIMEOUT = 15
 MENU_SETTLE = 1.5          # menyu paydo bo'lgach, ortidan video kelishini kutish (soniya)
 OPAQUE_SETTLE = 2.5         # Pyrogram parse qilolmagan xabar paydo bo'lgach, kutish (soniya)
@@ -568,73 +576,174 @@ async def _collect_new_messages(client, bot_id: int, after_id: int, timeout: flo
 
 async def _latest_media(client, chat_id: int):
     """Serverdagi filtr bilan chatdagi ENG OXIRGI video/fayl xabarini qaytaradi (yoki None).
-    Event'lar va chat tarixiga bog'liq emas: Telegram o'zi filtrlab beradi."""
+    Event'lar va chat tarixiga bog'liq emas. Xatolar chaqiruvchiga ko'tariladi:
+    snapshot olinmasa, qidiruv o'chiriladi (eski videoni yangi deb adashtirmaslik uchun)."""
     from pyrogram import enums
     best = None
     for name in ("VIDEO", "DOCUMENT"):
         flt = getattr(enums.MessagesFilter, name, None)
         if flt is None:
             continue
-        try:
-            async for m in client.search_messages(chat_id, filter=flt, limit=1):
-                if best is None or m.id > best.id:
-                    best = m
-        except FloodWait:
-            raise
-        except Exception as e:
-            logger.warning("Media qidiruvi (%s) xato: %s: %s", name, type(e).__name__, e)
+        async for m in client.search_messages(chat_id, filter=flt, limit=1):
+            if best is None or m.id > best.id:
+                best = m
     return best
 
 
+async def _flood_pause(e) -> None:
+    """Polling paytida FloodWait butun jarayonni o'ldirmasin: qisqa pauza qilib davom etamiz."""
+    wait = min(int(getattr(e, "value", 3) or 3), 15)
+    logger.warning("FloodWait %ss — polling pauza qilindi", wait)
+    await asyncio.sleep(wait)
+
+
+async def _get_raw_messages(client, chat_id: int, ids: list[int]) -> dict:
+    """Xabarlarni XOM (MTProto) ko'rinishda oladi — Pyrogram parse qilolmagan holatlar uchun."""
+    from pyrogram.raw import functions, types as rtypes
+    res = await client.invoke(functions.messages.GetMessages(
+        id=[rtypes.InputMessageID(id=i) for i in ids]))
+    out = {}
+    for m in (getattr(res, "messages", None) or []):
+        mid = getattr(m, "id", None)
+        if mid is not None:
+            out[mid] = m
+    return out
+
+
+def _raw_document(raw):
+    """Xom xabardan Document (video/fayl) ni oladi: to'g'ridan media yoki web-preview ichidan."""
+    media = getattr(raw, "media", None)
+    for cand in (getattr(media, "document", None),
+                 getattr(getattr(media, "webpage", None), "document", None)):
+        if cand is not None and getattr(cand, "access_hash", None) is not None:
+            return cand
+    return None
+
+
+def _describe_raw(raw) -> str:
+    media = getattr(raw, "media", None)
+    parts = [f"raw={type(raw).__name__}",
+             f"media={type(media).__name__ if media is not None else None}",
+             f"text_len={len(getattr(raw, 'message', '') or '')}",
+             f"noforwards={bool(getattr(raw, 'noforwards', False))}",
+             f"markup={type(getattr(raw, 'reply_markup', None)).__name__}"]
+    doc = getattr(media, "document", None) or getattr(getattr(media, "webpage", None), "document", None)
+    if doc is not None:
+        parts.append(f"doc={type(doc).__name__}")
+        attrs = getattr(doc, "attributes", None) or []
+        parts.append("attrs=" + ",".join(type(a).__name__ for a in attrs))
+        parts.append(f"size={getattr(doc, 'size', None)} mime={getattr(doc, 'mime_type', None)}")
+    return " ".join(parts)
+
+
 async def _raw_info(client, chat_id: int, msg_id: int) -> str:
-    """Xabarning XOM (MTProto) turi — Pyrogram parse qilolmagan holatlarni tushunish uchun."""
     try:
-        from pyrogram.raw import functions, types as rtypes
-        res = await client.invoke(functions.messages.GetMessages(
-            id=[rtypes.InputMessageID(id=msg_id)]))
-        raw = (getattr(res, "messages", None) or [None])[0]
-        if raw is None:
-            return "raw=None"
-        media = getattr(raw, "media", None)
-        parts = [f"raw={type(raw).__name__}",
-                 f"media={type(media).__name__ if media is not None else None}",
-                 f"text_len={len(getattr(raw, 'message', '') or '')}",
-                 f"noforwards={bool(getattr(raw, 'noforwards', False))}",
-                 f"markup={type(getattr(raw, 'reply_markup', None)).__name__}"]
-        doc = getattr(media, "document", None)
-        if doc is not None:
-            parts.append(f"doc={type(doc).__name__}")
-            attrs = getattr(doc, "attributes", None) or []
-            parts.append("attrs=" + ",".join(type(a).__name__ for a in attrs))
-            parts.append(f"size={getattr(doc, 'size', None)} mime={getattr(doc, 'mime_type', None)}")
-        return " ".join(parts)
+        raws = await _get_raw_messages(client, chat_id, [msg_id])
+        raw = raws.get(msg_id)
+        return _describe_raw(raw) if raw is not None else "raw=None"
     except Exception as e:
         return f"raw-xato:{type(e).__name__}:{str(e)[:80]}"
 
 
-async def _deliver_raw(client, bot_id: int, msg, dest_chat, title: str, status) -> None:
-    """Pyrogram parse qilolmagan xabarni Telegram serverida arxiv guruhiga ko'chiradi
-    (messages.ForwardMessages, drop_author=True) — xabarni tushunish shart emas."""
+def _synth_from_raw(raw, chat_id: int):
+    """Xom Document'dan Pyrogram-xabarga o'xshash obyekt yasaydi (yuklab olish uchun).
+    Document topilmasa — None."""
+    from pyrogram.file_id import FileId, FileType
+    doc = _raw_document(raw)
+    if doc is None:
+        return None
+    attrs = {type(a).__name__: a for a in (getattr(doc, "attributes", None) or [])}
+    mime = getattr(doc, "mime_type", "") or ""
+    vid = attrs.get("DocumentAttributeVideo")
+    aud = attrs.get("DocumentAttributeAudio")
+    fn = attrs.get("DocumentAttributeFilename")
+    is_video = vid is not None or mime.startswith("video/")
+    is_audio = (not is_video) and (aud is not None or mime.startswith("audio/"))
+    ftype = FileType.VIDEO if is_video else (FileType.AUDIO if is_audio else FileType.DOCUMENT)
+    file_id = FileId(file_type=ftype, dc_id=doc.dc_id, media_id=doc.id,
+                     access_hash=doc.access_hash, file_reference=doc.file_reference).encode()
+    mobj = SimpleNamespace(
+        file_id=file_id, file_name=getattr(fn, "file_name", None) or "",
+        file_size=int(getattr(doc, "size", 0) or 0), mime_type=mime, date=0,
+        duration=int(getattr(vid or aud, "duration", 0) or 0),
+        width=int(getattr(vid, "w", 0) or 0), height=int(getattr(vid, "h", 0) or 0),
+        supports_streaming=bool(getattr(vid, "supports_streaming", False)))
+    return SimpleNamespace(
+        id=raw.id, chat=SimpleNamespace(id=chat_id), caption=(getattr(raw, "message", "") or None),
+        text=None, photo=None, animation=None, video_note=None,
+        video=mobj if is_video else None, audio=mobj if is_audio else None,
+        document=mobj if not (is_video or is_audio) else None,
+        is_synthetic=True, dl_target=mobj)
+
+
+async def _deliver_raw(client, bot_id: int, msgs: list, dest_chat, title: str, status) -> None:
+    """Pyrogram parse qilolmagan xabar(lar)ni yetkazadi:
+       1) serverda nusxalash (messages.ForwardMessages, drop_author) — eng tez;
+       2) bo'lmasa (himoyalangan va h.k.) — xom Document'dan fayl ma'lumotini olib, yuklab-yuborish;
+       3) bo'lmasa — sababini aniq tushuntirib xato."""
     from pyrogram.raw import functions
-    info = await _raw_info(client, bot_id, msg.id)
-    logger.warning("kino RAW xabar #%s: %s", msg.id, info)
-    await _edit(status, f"🎬 <b>{_h(title)}</b>\n\n⚡ Xom nusxalash (server orqali)...")
+    ids = sorted({m.id for m in msgs})
+    infos, raws = [], {}
+    try:
+        raws = await _get_raw_messages(client, bot_id, ids)
+        infos = [f"#{i}: {_describe_raw(raws[i])}" for i in ids if i in raws]
+    except FloodWait:
+        raise
+    except Exception as e:
+        infos = [f"raw-xato:{type(e).__name__}:{str(e)[:80]}"]
+    info = " || ".join(infos) or "raw=None"
+    logger.warning("kino RAW xabarlar %s: %s", ids, info)
+
     try:
         await client.get_chat(dest_chat)
     except Exception as e:
         logger.warning("dest_chat get_chat xato (normal): %s", e)
-    try:
-        from_peer = await client.resolve_peer(bot_id)
-        to_peer = await client.resolve_peer(dest_chat)
-        await client.invoke(functions.messages.ForwardMessages(
-            from_peer=from_peer, id=[msg.id], random_id=[client.rnd_id()],
-            to_peer=to_peer, drop_author=True))
-    except FloodWait:
-        raise
-    except Exception as e:
-        raise KinoError(f"Xom nusxalash ishlamadi ({type(e).__name__}).\n🧪 {info}") from e
-    await _edit(status, f"✅ <b>{_h(title)}</b>\n\n🗂 Guruhga yuborildi! (⚡ xom server nusxasi)\n"
-                        f"<code>{_h(_clip(info, 300))}</code>")
+
+    # 1) server nusxasi
+    fwd_err = None
+    if KINO_TRY_COPY:
+        await _edit(status, f"🎬 <b>{_h(title)}</b>\n\n⚡ Xom nusxalash (server orqali)...")
+        try:
+            from_peer = await client.resolve_peer(bot_id)
+            to_peer = await client.resolve_peer(dest_chat)
+            await client.invoke(functions.messages.ForwardMessages(
+                from_peer=from_peer, id=ids, random_id=[client.rnd_id() for _ in ids],
+                to_peer=to_peer, drop_author=True))
+            await _edit(status, f"✅ <b>{_h(title)}</b>\n\n🗂 Guruhga yuborildi! (⚡ xom server nusxasi)\n"
+                                f"<code>{_h(_clip(info, 300))}</code>")
+            return
+        except FloodWait:
+            raise
+        except Exception as e:
+            fwd_err = f"{type(e).__name__}"
+            logger.info("Xom forward ishlamadi (%s) — yuklab-yuborishga o'tamiz", fwd_err)
+
+    # 2) xom Document -> yuklab olish va yuborish
+    delivered = 0
+    last_problem = None
+    for i in ids:
+        raw = raws.get(i)
+        if raw is None:
+            last_problem = f"#{i} xabar topilmadi (bot o'chirib yuborgan bo'lishi mumkin)"
+            continue
+        synth = _synth_from_raw(raw, bot_id)
+        if synth is None:
+            mname = type(getattr(raw, "media", None)).__name__
+            if mname == "MessageMediaUnsupported":
+                last_problem = ("Telegram bu media turini eski Pyrogram versiyasiga \"qo'llab-quvvatlanmaydi\" "
+                                "deb yubormoqda. requirements.txt dagi pyrogram ni yangi fork'ga "
+                                "(pyrofork yoki kurigram) almashtirish kerak.")
+            else:
+                last_problem = f"#{i} da yuklab olinadigan fayl yo'q ({mname})"
+            continue
+        await _deliver_media(client, synth, dest_chat, title, status)
+        delivered += 1
+
+    if delivered:
+        return
+    raise KinoError(f"Xom xabarni yetkazib bo'lmadi"
+                    f"{f' (nusxalash: {fwd_err})' if fwd_err else ''}.\n"
+                    f"{last_problem or ''}\n🧪 {info}")
 
 
 async def _wait_for_response(client, bot_id: int, btn_msg, timeout: float,
@@ -688,7 +797,8 @@ async def _wait_for_response(client, bot_id: int, btn_msg, timeout: float,
                 if t:
                     if t not in texts:
                         texts.append(t)
-                elif not getattr(m, "photo", None) and all(o.id != m.id for o in opaque):
+                elif (getattr(m, "media", None) is None and not getattr(m, "service", None)
+                      and not getattr(m, "empty", False) and all(o.id != m.id for o in opaque)):
                     opaque.append(m)               # matn ham, media ham, tugma ham yo'q — parse qilinmagan
                     if opaque_at[0] is None:
                         opaque_at[0] = loop.time()
@@ -711,19 +821,23 @@ async def _wait_for_response(client, bot_id: int, btn_msg, timeout: float,
             m = await client.get_messages(bot_id, pressed_id)
             if m and not getattr(m, "empty", False):
                 _see(m)
-        except FloodWait:
-            raise
+        except FloodWait as e:
+            await _flood_pause(e)
         except Exception as e:
             logger.debug("Bosilgan xabarni tekshirib bo'lmadi: %s", e)
 
     base_media_id = 0                      # bosishdan OLDIN chatdagi oxirgi media id'si
+    search_ok = True                       # snapshot olinmasa False: eski videoni yangi deb adashtirmaslik
 
     async def _poll_search() -> None:
         """Ground truth: serverdan oxirgi video so'raladi; id'si snapshot'dan katta bo'lsa — bizniki."""
+        if not search_ok:
+            return
         try:
             m = await _latest_media(client, bot_id)
-        except FloodWait:
-            raise
+        except FloodWait as e:
+            await _flood_pause(e)
+            return
         except Exception as e:
             logger.warning("Media qidiruvi xato: %s: %s", type(e).__name__, e)
             return
@@ -747,8 +861,8 @@ async def _wait_for_response(client, bot_id: int, btn_msg, timeout: float,
                     seen.append(_msg_brief(m))
                     logger.info("kino poll topdi (bosilgan=%s): %s", pressed_id, _msg_brief(m))
                 _see(m)
-        except FloodWait:
-            raise
+        except FloodWait as e:
+            await _flood_pause(e)
         except Exception as e:
             logger.warning("Yangi xabarlarni tekshirib bo'lmadi: %s: %s", type(e).__name__, e)
 
@@ -757,9 +871,16 @@ async def _wait_for_response(client, bot_id: int, btn_msg, timeout: float,
     h_edit = client.add_handler(EditedMessageHandler(_on_msg, flt), group=_HANDLER_GROUP)
 
     try:
-        _snap = await _latest_media(client, bot_id)
-        base_media_id = _snap.id if _snap is not None else 0
-        logger.info("kino snapshot: oxirgi media id=%s, bosilgan=%s", base_media_id, pressed_id)
+        try:
+            _snap = await _latest_media(client, bot_id)
+            base_media_id = _snap.id if _snap is not None else 0
+            logger.info("kino snapshot: oxirgi media id=%s, bosilgan=%s", base_media_id, pressed_id)
+        except FloodWait as e:
+            await _flood_pause(e)
+            search_ok = False
+        except Exception as e:
+            logger.warning("Snapshot olinmadi (%s) — server qidiruvi o'chirildi", type(e).__name__)
+            search_ok = False
         await trigger_fn()
         start = loop.time()
         deadline = start + timeout
@@ -812,7 +933,7 @@ async def _wait_for_response(client, bot_id: int, btn_msg, timeout: float,
         if menu:
             return "menu", menu[-1], texts
         if opaque:
-            return "raw", opaque[-1], texts
+            return "raw", list(opaque), texts
         try:                                       # timeout: nima bo'layotganini ko'rsatish uchun
             last = [_msg_brief(m) async for m in client.get_chat_history(bot_id, limit=5)]
         except Exception as e:
@@ -1127,9 +1248,10 @@ async def kino_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             raise KinoError("Xabar topilmadi (bot o'chirib yuborgan bo'lishi mumkin). /kino ni qayta yuboring.")
 
         if action == "dl":
-            if not _media_of(pyro_msg):
-                raise KinoError("Bu xabarda video/fayl yo'q.")
-            await _deliver_media(client, pyro_msg, ARCHIVE_GROUP_ID, bot_username, status)
+            if not _media_of(pyro_msg):                    # parse qilinmagan bo'lishi mumkin — xom yo'l
+                await _deliver_raw(client, bot.id, [pyro_msg], ARCHIVE_GROUP_ID, bot_username, status)
+            else:
+                await _deliver_media(client, pyro_msg, ARCHIVE_GROUP_ID, bot_username, status)
             return
 
         if action == "btn":
@@ -1187,7 +1309,10 @@ async def _press_and_deliver(client, bot, btn_msg, chosen, dest_chat, status, re
         client, bot.id, btn_msg, BUTTON_WAIT_TIMEOUT, _press, status, answer)
 
     if kind == "media":
-        await _deliver_media(client, found, dest_chat, btn_text, status)
+        if _media_of(found) is None:                       # xabar bor, lekin Pyrogram media'ni ko'rmayapti
+            await _deliver_raw(client, bot.id, [found], dest_chat, btn_text, status)
+        else:
+            await _deliver_media(client, found, dest_chat, btn_text, status)
         return
 
     if kind == "raw":
@@ -1269,6 +1394,7 @@ async def _deliver_media(client, media_msg, dest_chat, title: str, status) -> No
     media = _media_of(media_msg)
     if media is None:
         raise KinoError("Xabarda video/fayl yo'q.")
+    synthetic = bool(getattr(media_msg, "is_synthetic", False))   # xom xabardan yasalgan (parse qilinmagan)
 
     size = int(getattr(media, "file_size", 0) or 0)
     size_str = _fmt_size(size) if size else "?"
@@ -1292,7 +1418,7 @@ async def _deliver_media(client, media_msg, dest_chat, title: str, status) -> No
         logger.warning("dest_chat get_chat xato (normal): %s", e)
 
     # 1) Tezkor nusxalash: yuklamasdan, Telegram serverining o'zida (himoyalangan bo'lsa ishlamaydi)
-    if KINO_TRY_COPY:
+    if KINO_TRY_COPY and not synthetic:
         await _edit(status, f"🎬 <b>{_h(title)}</b>\n\n⚡ Tezkor nusxalash urinilmoqda...")
         try:
             await client.copy_message(
@@ -1323,7 +1449,7 @@ async def _deliver_media(client, media_msg, dest_chat, title: str, status) -> No
         await _edit(status, f"🎬 <b>{_h(title)}</b>\n\n⬇️ Yuklab olinmoqda...\n"
                             f"<code>{_progress_bar(0)}</code> <code>0%</code>\n<code>0.0 MB</code> / <code>{size_str}</code>")
         dl = await client.download_media(
-            media_msg, file_name=tmp_path,
+            media_msg.dl_target if synthetic else media_msg, file_name=tmp_path,
             progress=_make_progress(status, title, "⬇️ <b>Yuklab olinmoqda...</b>"),
         )
         path = dl if isinstance(dl, str) and os.path.exists(dl) else tmp_path
