@@ -94,6 +94,7 @@ from handlers.save_restricted import (
     audio_link_handler, save_audio_topic_handler, save_series_handler,
 )
 from handlers.kino_sender import kino_sender_handler, kino_callback_handler
+from handlers.post_test import post_test_handler, fileid_handler
 from handlers.netfilm_handler import netfilm_handler, netfilm_callback_handler
 from handlers.url_downloader import dl_handler, dl_callback_handler
 from handlers.torrent_handler import torrent_handler, torrent_callback_handler
@@ -978,6 +979,8 @@ def main():
     app.add_handler(CommandHandler("savea", save_audio_topic_handler))
     app.add_handler(CommandHandler("a", audio_link_handler))
     app.add_handler(CommandHandler("kino", kino_sender_handler))
+    app.add_handler(CommandHandler("testpost", post_test_handler))
+    app.add_handler(CommandHandler("fileid", fileid_handler))
     app.add_handler(CommandHandler("netfilm", netfilm_handler))
     app.add_handler(CommandHandler("dl", dl_handler))
     app.add_handler(CommandHandler("torrent", torrent_handler))
