@@ -20,6 +20,8 @@ Asosiy yaxshilanishlar (eski versiyaga nisbatan):
   * Callback ma'lumotlari endi stateless va indeksga asoslangan (split xatosi, 64 bayt
     limiti, binary callback_data buzilishi yo'q).
   * URL tugmalar (majburiy obuna havolalari) ham ko'rsatiladi; rasm (poster) ko'rsatiladi.
+  * Tugma bosilgach bot VIDEO emas, yangi tugmalar (fasl -> qismlar) ko'rsatsa — bu menyu
+    darhol sizga ko'rsatiladi (90s osilib qolmaydi, lock tez bo'shaydi).
   * Barcha dinamik matn HTML-escape qilinadi; asl caption formatlashi saqlanadi.
   * Himoyalangan bo'lmasa — yuklamasdan tezkor nusxalash (copy_message), aks holda
     yuklab-yuborish; disk/limit tekshiruvi; ext tozalanadi; MKV -> MP4 remux.
@@ -59,6 +61,8 @@ COLLECT_DELAY = 3.0        # oxirgi xabardan keyingi "jimlik" oynasi (soniya)
 VIDEO_GRACE = 30.0         # faqat matn kelganda video/tugma uchun qo'shimcha kutish
 BUTTON_WAIT_TIMEOUT = 90   # tugma bosilgach media kutish
 CALLBACK_ANSWER_TIMEOUT = 15
+MENU_SETTLE = 1.5          # menyu paydo bo'lgach, ortidan video kelishini kutish (soniya)
+POLL_INTERVAL = 4.0        # bosilgan xabarni qo'lda tekshirish oralig'i (event o'tkazib yuborsa)
 STATUS_INTERVAL = 3.0      # status xabarini yangilash oralig'i (flood'dan saqlanish)
 PROGRESS_INTERVAL = 3.0
 MAX_MIRROR = 8             # bir so'rovda ko'rsatiladigan maksimal xabar soni
@@ -315,6 +319,15 @@ def _has_any_buttons(m) -> bool:
     )
 
 
+def _kb_signature(m) -> tuple:
+    """Klaviatura "barmoq izi" — bot tugmalarni o'zgartirganini aniqlash uchun."""
+    return tuple(
+        tuple((getattr(b, "text", "") or "", getattr(b, "callback_data", None), getattr(b, "url", None))
+              for b in row)
+        for row in _rows(m)
+    )
+
+
 def _extract_links(m) -> list[str]:
     """Yashirin (text_link) havolalarni ajratib oladi — oddiy matnda ko'rinmaydi."""
     out: list[str] = []
@@ -538,14 +551,26 @@ async def _collect_new_messages(client, bot_id: int, after_id: int, timeout: flo
         _remove_handlers(client, h_new, h_edit)
 
 
-async def _wait_for_media(client, bot_id: int, after_id: int, pressed_id: int,
-                          allow_edit_media: bool, timeout: float, trigger_fn, status_msg):
-    """Tugma bosilgach media xabarini kutadi. (media_msg | None, bot_matnlari) qaytaradi."""
+async def _wait_for_response(client, bot_id: int, btn_msg, timeout: float,
+                             trigger_fn, status_msg, answer: dict):
+    """
+    Tugma bosilgach botning javobini kutadi. Qaytaradi: (kind, msg, bot_matnlari)
+      kind == "media" — video/fayl keldi (yetkazib berish kerak)
+      kind == "menu"  — bot yangi tugmalar ko'rsatdi (masalan fasl -> qismlar)
+      kind is None    — hech narsa (timeout)
+    Bot javobi yo'q xabarni TAHRIRLASH (edit) yoki YANGI xabar yuborish bilan berishi mumkin;
+    event o'tkazib yuborsa — bosilgan xabar vaqti-vaqti bilan qo'lda tekshiriladi.
+    """
     from pyrogram import filters
     from pyrogram.handlers import EditedMessageHandler, MessageHandler
 
     loop = asyncio.get_running_loop()
-    found: list = []
+    after_id = pressed_id = btn_msg.id
+    had_media = bool(_media_of(btn_msg))
+    base_sig = _kb_signature(btn_msg)
+    media: list = []
+    menu: list = []
+    menu_at: list = [None]
     texts: list[str] = []
     arrival = asyncio.Event()
 
@@ -553,72 +578,94 @@ async def _wait_for_media(client, bot_id: int, after_id: int, pressed_id: int,
         return (not getattr(m, "outgoing", False)
                 and getattr(m, "chat", None) is not None and m.chat.id == bot_id)
 
-    async def _on_new(c, m):
-        if not _ok_chat(m) or m.id <= after_id:
-            return
-        if _media_of(m):
-            found.append(m)
-            arrival.set()
-        else:
-            t = (m.text or m.caption or "").strip()
-            if t:
-                texts.append(t)
-                arrival.set()
+    def _mark_menu(m) -> None:
+        menu[:] = [m]
+        if menu_at[0] is None:
+            menu_at[0] = loop.time()
 
-    async def _on_edit(c, m):
-        if not _ok_chat(m):
-            return
-        if allow_edit_media and m.id == pressed_id and _media_of(m):
-            found.append(m)
-            arrival.set()
-        elif m.id > after_id and _media_of(m):
-            found.append(m)
-            arrival.set()
+    def _see(m) -> None:
+        """Bitta xabar holatini baholaydi (yangi yoki tahrirlangan)."""
+        if m.id == pressed_id:
+            if not had_media and _media_of(m):
+                media.append(m)
+            elif _kb_signature(m) != base_sig and _has_any_buttons(m):
+                _mark_menu(m)                      # bot shu xabarni yangi tugmalar bilan tahrirladi
+        elif m.id > after_id:
+            if _media_of(m):
+                media.append(m)
+            elif _has_any_buttons(m):
+                _mark_menu(m)                      # bot yangi menyu xabarini yubordi
+            else:
+                t = (m.text or m.caption or "").strip()
+                if t and t not in texts:
+                    texts.append(t)
+        arrival.set()
+
+    async def _on_msg(c, m):
+        if _ok_chat(m):
+            _see(m)
+
+    async def _poll_pressed() -> None:
+        try:
+            m = await client.get_messages(bot_id, pressed_id)
+            if m and not getattr(m, "empty", False):
+                _see(m)
+        except FloodWait:
+            raise
+        except Exception as e:
+            logger.debug("Bosilgan xabarni tekshirib bo'lmadi: %s", e)
 
     flt = filters.incoming & filters.private
-    h_new = client.add_handler(MessageHandler(_on_new, flt), group=_HANDLER_GROUP)
-    h_edit = client.add_handler(EditedMessageHandler(_on_edit, flt), group=_HANDLER_GROUP)
+    h_new = client.add_handler(MessageHandler(_on_msg, flt), group=_HANDLER_GROUP)
+    h_edit = client.add_handler(EditedMessageHandler(_on_msg, flt), group=_HANDLER_GROUP)
 
     try:
         await trigger_fn()
         start = loop.time()
         deadline = start + timeout
+        next_poll = start + POLL_INTERVAL
         th = _Throttle(STATUS_INTERVAL)
-        while not found and loop.time() < deadline:
+        while not media and loop.time() < deadline:
+            if menu and loop.time() - menu_at[0] >= MENU_SETTLE:
+                break                              # menyu paydo bo'ldi, ortidan video kelmadi
             arrival.clear()
             try:
-                await asyncio.wait_for(arrival.wait(), timeout=1.0)
+                await asyncio.wait_for(arrival.wait(), timeout=0.5)
             except asyncio.TimeoutError:
                 pass
-            if not found and th.ready():
-                extra = f"\n💬 <i>{_h(_clip(texts[-1], 120))}</i>" if texts else ""
+            if not media and loop.time() >= next_poll:
+                next_poll = loop.time() + POLL_INTERVAL
+                await _poll_pressed()
+            if not media and not menu and th.ready():
+                note = ""
+                if answer.get("message"):
+                    note = f"\n🔔 <i>{_h(_clip(answer['message'], 120))}</i>"
+                elif texts:
+                    note = f"\n💬 <i>{_h(_clip(texts[-1], 120))}</i>"
                 await _edit(
                     status_msg,
-                    f"⏳ Video yuborilishi kutilmoqda...{extra}\n"
+                    f"⏳ Bot javobi kutilmoqda...{note}\n"
                     f"<code>{int(loop.time() - start)}s</code> / <code>{int(timeout)}s</code>",
                 )
-        if found:
-            return found[0], texts
 
-        # Polling zaxirasi
-        try:
-            async for m in client.get_chat_history(bot_id, limit=8):
-                if m.id <= after_id:
-                    break
-                if not getattr(m, "outgoing", False) and _media_of(m):
-                    return m, texts
-        except FloodWait:
-            raise
-        except Exception as e:
-            logger.warning("Media polling fallback xato: %s", e)
-        if allow_edit_media:
+        if not media and not menu:                 # oxirgi urinish: qo'lda tekshirish
+            await _poll_pressed()
             try:
-                m = await client.get_messages(bot_id, pressed_id)
-                if m and not getattr(m, "empty", False) and _media_of(m):
-                    return m, texts
-            except Exception:
-                pass
-        return None, texts
+                async for m in client.get_chat_history(bot_id, limit=8):
+                    if m.id <= after_id:
+                        break
+                    if not getattr(m, "outgoing", False) and not getattr(m, "empty", False):
+                        _see(m)
+            except FloodWait:
+                raise
+            except Exception as e:
+                logger.warning("Javob polling zaxirasi xato: %s", e)
+
+        if media:
+            return "media", media[0], texts
+        if menu:
+            return "menu", menu[-1], texts
+        return None, None, texts
     finally:
         _remove_handlers(client, h_new, h_edit)
 
@@ -685,7 +732,11 @@ async def _run_flow(client, req: _Request, dest_chat, status, reply, user_msg) -
                 f"Masalan: <code>/kino @{uname} {_h(req.payload)} 1</code>",
             )
             return
-        await _press_and_deliver(client, bot, btn_msg, buttons[req.button_index], dest_chat, status, reply)
+        async def on_menu(menu_msg):
+            await _mirror_message(client, menu_msg, req.bot_username, user_msg)
+
+        await _press_and_deliver(client, bot, btn_msg, buttons[req.button_index],
+                                 dest_chat, status, reply, on_menu)
         return
 
     # ── Mirror rejimi ──
@@ -718,6 +769,21 @@ async def _safe_reply(reply, text: str) -> None:
 
 
 # ── Xabarni mirror qilish ─────────────────────────────────────────────────────
+
+def _mirror_body(pyro_msg, total_limit: int = 3000) -> str:
+    """Xabar matni (HTML-escape) + yashirin havolalar; total_limit — oddiy matn uzunligi chegarasi."""
+    text = str(pyro_msg.text or pyro_msg.caption or "").strip()
+    keep: list[str] = []
+    link_len = 0
+    for u in _extract_links(pyro_msg)[:5]:
+        if link_len + len(u) + 3 <= min(total_limit // 3, 600):
+            keep.append(u)
+            link_len += len(u) + 3
+    body = _h(_clip(text, max(total_limit - link_len - 2, 100))) if text else ""
+    if keep:
+        body += ("\n\n" if body else "") + "\n".join(f"🔗 {_h(u)}" for u in keep)
+    return body
+
 
 def _build_markup(pyro_msg, bot_username: str, include_urls: bool = True,
                   with_download: bool = True) -> InlineKeyboardMarkup | None:
@@ -766,16 +832,12 @@ async def _reply_html(user_msg, html_text: str, markup_factory):
 
 async def _mirror_message(client, pyro_msg, bot_username: str, user_msg) -> None:
     """Pyrogram xabarini PTB orqali foydalanuvchiga mirror qiladi."""
-    text = str(pyro_msg.text or pyro_msg.caption or "").strip()
-    links = _extract_links(pyro_msg)
     media = _media_of(pyro_msg)
 
     def factory(include_urls: bool):
         return _build_markup(pyro_msg, bot_username, include_urls=include_urls)
 
-    body = _h(_clip(text, 2800)) if text else ""
-    if links:
-        body += ("\n\n" if body else "") + "\n".join(f"🔗 {_h(u)}" for u in links[:5])
+    body = _mirror_body(pyro_msg, 2800)
 
     if media:
         size = int(getattr(media, "file_size", 0) or 0)
@@ -802,7 +864,7 @@ async def _mirror_message(client, pyro_msg, bot_username: str, user_msg) -> None
             bio = await client.download_media(pyro_msg, in_memory=True)
             data = bio.getvalue() if hasattr(bio, "getvalue") else None
             if data:
-                cap = _h(_clip(text, 900)) if text else None
+                cap = _mirror_body(pyro_msg, 900) or None
                 await user_msg.reply_photo(
                     photo=data, caption=cap, parse_mode=ParseMode.HTML,
                     reply_markup=factory(True),
@@ -815,6 +877,31 @@ async def _mirror_message(client, pyro_msg, bot_username: str, user_msg) -> None
         body = body or "🖼 (rasm)"
 
     await _reply_html(user_msg, body or "📨 (Bo'sh xabar)", factory)
+
+
+async def _update_mirror(client, menu_msg, bot_username: str, target, reply) -> None:
+    """Bot yangi menyu (masalan fasl -> qismlar) ko'rsatganda: foydalanuvchi bosgan mirror
+    xabarini joyida yangilaydi; bo'lmasa yangi xabar yuboradi."""
+    markup = _build_markup(menu_msg, bot_username)
+    if target is not None:
+        try:
+            if getattr(target, "photo", None):
+                await target.edit_caption(caption=_mirror_body(menu_msg, 900) or None,
+                                          parse_mode=ParseMode.HTML, reply_markup=markup)
+            else:
+                await target.edit_text(_mirror_body(menu_msg, 3500) or "📨", parse_mode=ParseMode.HTML,
+                                       reply_markup=markup,
+                                       link_preview_options=LinkPreviewOptions(is_disabled=True))
+            return
+        except BadRequest as e:
+            if "not modified" in str(e).lower():
+                return
+            logger.warning("Mirror'ni joyida yangilab bo'lmadi (%s) — yangi xabar yuboriladi", e)
+        except TelegramError as e:
+            logger.warning("Mirror yangilash xato (%s) — yangi xabar yuboriladi", e)
+        await _mirror_message(client, menu_msg, bot_username, target)
+    else:
+        await _safe_reply(reply, _mirror_body(menu_msg, 3500) or "📨")
 
 
 # ── Callback (tugma bosilganda) ───────────────────────────────────────────────
@@ -892,7 +979,12 @@ async def kino_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         else:  # legacy
             chosen = _RawBtn(extra, extra)
 
-        await _press_and_deliver(client, bot, pyro_msg, chosen, ARCHIVE_GROUP_ID, status, reply)
+        target = query.message if hasattr(query.message, "edit_text") else None
+
+        async def on_menu(menu_msg):
+            await _update_mirror(client, menu_msg, bot_username, target, reply)
+
+        await _press_and_deliver(client, bot, pyro_msg, chosen, ARCHIVE_GROUP_ID, status, reply, on_menu)
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -904,7 +996,7 @@ async def kino_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
 # ── Tugmani bosib video kutish ────────────────────────────────────────────────
 
-async def _press_and_deliver(client, bot, btn_msg, chosen, dest_chat, status, reply) -> None:
+async def _press_and_deliver(client, bot, btn_msg, chosen, dest_chat, status, reply, on_menu) -> None:
     from pyrogram.raw import functions
 
     cb_data = chosen.callback_data
@@ -930,26 +1022,31 @@ async def _press_and_deliver(client, bot, btn_msg, chosen, dest_chat, status, re
         except Exception as e:                             # BotResponseTimeout va h.k. — odatiy holat
             logger.info("GetBotCallbackAnswer: %s (odatiy)", type(e).__name__)
 
-    media_msg, texts = await _wait_for_media(
-        client=client, bot_id=bot.id, after_id=btn_msg.id, pressed_id=btn_msg.id,
-        allow_edit_media=not _media_of(btn_msg), timeout=BUTTON_WAIT_TIMEOUT,
-        trigger_fn=_press, status_msg=status,
-    )
+    kind, found, texts = await _wait_for_response(
+        client, bot.id, btn_msg, BUTTON_WAIT_TIMEOUT, _press, status, answer)
 
-    if media_msg is None:
-        notes = []
-        if answer.get("message"):
-            notes.append(f"🔔 Bot ogohlantirishi: <i>{_h(_clip(answer['message'], 200))}</i>")
-        if answer.get("url"):
-            notes.append(f"🔗 {_h(answer['url'])}")
-        if texts:
-            notes.append(f"💬 Bot xabari: <i>{_h(_clip(texts[-1], 200))}</i>")
-        extra = ("\n\n" + "\n".join(notes)) if notes else ""
-        await _fail(status, reply,
-                    f"❌ Bot video yubormadi (timeout {BUTTON_WAIT_TIMEOUT}s){extra}\n\nQaytadan urinib ko'ring.")
+    if kind == "media":
+        await _deliver_media(client, found, dest_chat, btn_text, status)
         return
 
-    await _deliver_media(client, media_msg, dest_chat, btn_text, status)
+    if kind == "menu":
+        await on_menu(found)                               # yangi tugmalar (fasl -> qismlar)
+        try:
+            await status.delete()
+        except TelegramError:
+            pass
+        return
+
+    notes = []
+    if answer.get("message"):
+        notes.append(f"🔔 Bot ogohlantirishi: <i>{_h(_clip(answer['message'], 200))}</i>")
+    if answer.get("url"):
+        notes.append(f"🔗 {_h(answer['url'])}")
+    if texts:
+        notes.append(f"💬 Bot xabari: <i>{_h(_clip(texts[-1], 200))}</i>")
+    extra = ("\n\n" + "\n".join(notes)) if notes else ""
+    await _fail(status, reply,
+                f"❌ Bot javob bermadi (timeout {BUTTON_WAIT_TIMEOUT}s){extra}\n\nQaytadan urinib ko'ring.")
 
 
 # ── Yetkazish: nusxalash yoki yuklab-yuborish ─────────────────────────────────
