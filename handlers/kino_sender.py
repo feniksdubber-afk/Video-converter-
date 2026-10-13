@@ -62,6 +62,7 @@ VIDEO_GRACE = 30.0         # faqat matn kelganda video/tugma uchun qo'shimcha ku
 BUTTON_WAIT_TIMEOUT = 90   # tugma bosilgach media kutish
 CALLBACK_ANSWER_TIMEOUT = 15
 MENU_SETTLE = 1.5          # menyu paydo bo'lgach, ortidan video kelishini kutish (soniya)
+OPAQUE_SETTLE = 2.5         # Pyrogram parse qilolmagan xabar paydo bo'lgach, kutish (soniya)
 POLL_INTERVAL = 4.0        # bosilgan xabarni qo'lda tekshirish oralig'i (event o'tkazib yuborsa)
 STATUS_INTERVAL = 3.0      # status xabarini yangilash oralig'i (flood'dan saqlanish)
 PROGRESS_INTERVAL = 3.0
@@ -585,6 +586,57 @@ async def _latest_media(client, chat_id: int):
     return best
 
 
+async def _raw_info(client, chat_id: int, msg_id: int) -> str:
+    """Xabarning XOM (MTProto) turi — Pyrogram parse qilolmagan holatlarni tushunish uchun."""
+    try:
+        from pyrogram.raw import functions, types as rtypes
+        res = await client.invoke(functions.messages.GetMessages(
+            id=[rtypes.InputMessageID(id=msg_id)]))
+        raw = (getattr(res, "messages", None) or [None])[0]
+        if raw is None:
+            return "raw=None"
+        media = getattr(raw, "media", None)
+        parts = [f"raw={type(raw).__name__}",
+                 f"media={type(media).__name__ if media is not None else None}",
+                 f"text_len={len(getattr(raw, 'message', '') or '')}",
+                 f"noforwards={bool(getattr(raw, 'noforwards', False))}",
+                 f"markup={type(getattr(raw, 'reply_markup', None)).__name__}"]
+        doc = getattr(media, "document", None)
+        if doc is not None:
+            parts.append(f"doc={type(doc).__name__}")
+            attrs = getattr(doc, "attributes", None) or []
+            parts.append("attrs=" + ",".join(type(a).__name__ for a in attrs))
+            parts.append(f"size={getattr(doc, 'size', None)} mime={getattr(doc, 'mime_type', None)}")
+        return " ".join(parts)
+    except Exception as e:
+        return f"raw-xato:{type(e).__name__}:{str(e)[:80]}"
+
+
+async def _deliver_raw(client, bot_id: int, msg, dest_chat, title: str, status) -> None:
+    """Pyrogram parse qilolmagan xabarni Telegram serverida arxiv guruhiga ko'chiradi
+    (messages.ForwardMessages, drop_author=True) — xabarni tushunish shart emas."""
+    from pyrogram.raw import functions
+    info = await _raw_info(client, bot_id, msg.id)
+    logger.warning("kino RAW xabar #%s: %s", msg.id, info)
+    await _edit(status, f"🎬 <b>{_h(title)}</b>\n\n⚡ Xom nusxalash (server orqali)...")
+    try:
+        await client.get_chat(dest_chat)
+    except Exception as e:
+        logger.warning("dest_chat get_chat xato (normal): %s", e)
+    try:
+        from_peer = await client.resolve_peer(bot_id)
+        to_peer = await client.resolve_peer(dest_chat)
+        await client.invoke(functions.messages.ForwardMessages(
+            from_peer=from_peer, id=[msg.id], random_id=[client.rnd_id()],
+            to_peer=to_peer, drop_author=True))
+    except FloodWait:
+        raise
+    except Exception as e:
+        raise KinoError(f"Xom nusxalash ishlamadi ({type(e).__name__}).\n🧪 {info}") from e
+    await _edit(status, f"✅ <b>{_h(title)}</b>\n\n🗂 Guruhga yuborildi! (⚡ xom server nusxasi)\n"
+                        f"<code>{_h(_clip(info, 300))}</code>")
+
+
 async def _wait_for_response(client, bot_id: int, btn_msg, timeout: float,
                              trigger_fn, status_msg, answer: dict):
     """
@@ -605,6 +657,8 @@ async def _wait_for_response(client, bot_id: int, btn_msg, timeout: float,
     media: list = []
     menu: list = []
     menu_at: list = [None]
+    opaque: list = []                      # Pyrogram tushunmagan (bo'sh ko'rinadigan) yangi xabarlar
+    opaque_at: list = [None]
     texts: list[str] = []
     arrival = asyncio.Event()
 
@@ -631,8 +685,13 @@ async def _wait_for_response(client, bot_id: int, btn_msg, timeout: float,
                 _mark_menu(m)                      # bot yangi menyu xabarini yubordi
             else:
                 t = (m.text or m.caption or "").strip()
-                if t and t not in texts:
-                    texts.append(t)
+                if t:
+                    if t not in texts:
+                        texts.append(t)
+                elif not getattr(m, "photo", None) and all(o.id != m.id for o in opaque):
+                    opaque.append(m)               # matn ham, media ham, tugma ham yo'q — parse qilinmagan
+                    if opaque_at[0] is None:
+                        opaque_at[0] = loop.time()
         arrival.set()
 
     seen: list[str] = []
@@ -709,6 +768,8 @@ async def _wait_for_response(client, bot_id: int, btn_msg, timeout: float,
         while not media and loop.time() < deadline:
             if menu and loop.time() - menu_at[0] >= MENU_SETTLE:
                 break                              # menyu paydo bo'ldi, ortidan video kelmadi
+            if opaque and not menu and loop.time() - opaque_at[0] >= OPAQUE_SETTLE:
+                break                              # tushunilmagan xabar keldi — xom nusxalaymiz
             arrival.clear()
             try:
                 await asyncio.wait_for(arrival.wait(), timeout=0.5)
@@ -750,11 +811,20 @@ async def _wait_for_response(client, bot_id: int, btn_msg, timeout: float,
             return "media", media[0], texts
         if menu:
             return "menu", menu[-1], texts
+        if opaque:
+            return "raw", opaque[-1], texts
         try:                                       # timeout: nima bo'layotganini ko'rsatish uchun
             last = [_msg_brief(m) async for m in client.get_chat_history(bot_id, limit=5)]
         except Exception as e:
             last = [f"history-xato:{type(e).__name__}"]
-        answer["diag"] = f"bosilgan=#{pressed_id} events={len(seen)} | " + " || ".join(last)
+        newest_raw = ""
+        try:
+            async for _m in client.get_chat_history(bot_id, limit=1):
+                if _m.id > after_id:
+                    newest_raw = " || " + await _raw_info(client, bot_id, _m.id)
+        except Exception:
+            pass
+        answer["diag"] = f"bosilgan=#{pressed_id} events={len(seen)} | " + " || ".join(last) + newest_raw
         logger.warning("kino timeout diag: %s", answer["diag"])
         return None, None, texts
     finally:
@@ -1118,6 +1188,10 @@ async def _press_and_deliver(client, bot, btn_msg, chosen, dest_chat, status, re
 
     if kind == "media":
         await _deliver_media(client, found, dest_chat, btn_text, status)
+        return
+
+    if kind == "raw":
+        await _deliver_raw(client, bot.id, found, dest_chat, btn_text, status)
         return
 
     if kind == "menu":
