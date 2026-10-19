@@ -5,7 +5,10 @@ import asyncio
 import re
 import time
 import functools
+import logging
 from config import TEMP_DIR
+
+logger = logging.getLogger(__name__)
 
 
 def sanitize_filename(name: str) -> str:
@@ -502,21 +505,44 @@ def get_stream_info(input_path: str) -> dict:
     return info
 
 
+async def _kill_proc(proc) -> None:
+    """ffmpeg'ni ishonchli o'ldiradi. `await proc.wait()` hech qachon
+    cheksiz kutmaydi (disk to'lganda jarayon D-holatda qolib, oddiy
+    `kill()+wait()` abadiy osilib qolardi -- 4 soatlik qotishning sababi)."""
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        return
+    except Exception:
+        pass
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=10)
+    except Exception:
+        logger.warning("ffmpeg (pid=%s) kill'dan keyin ham tugamadi -- kutmasdan davom etamiz", getattr(proc, "pid", "?"))
+
+
+_STALL_SECONDS = int(os.environ.get("FFMPEG_STALL_SECONDS", "300"))
+
+
 async def run_ffmpeg_progress(
     args: list[str], *, duration_sec: float = 0.0, on_progress=None, check_cancelled=None,
-    timeout: int = 7200,
+    timeout: int = 7200, stall_seconds: int = _STALL_SECONDS,
 ) -> tuple[bool, str]:
-    """FFmpeg'ni asinxron ishga tushiradi va `-progress pipe:1` orqali olingan
-    foizni har o'zgarganda `on_progress(percent)` (async yoki sync) ga
-    yuboradi. `check_cancelled()` berilsa, har progress qatorida tekshiriladi
-    -- True qaytarsa ffmpeg jarayoni DARHOL o'ldiriladi (bekor qilingandan
-    keyin daqiqalab kutib o'tirilmasin deb). `run_ffmpeg_async`dan farqli
-    o'laroq bu funksiya task_manager/task_queue/status_msg bilan bog'liq
-    emas -- istalgan chaqiruvchi context (masalan studiya /joylash oqimi)
-    uchun mos, chaqiruvchining o'zi progress xabarini qanday ko'rsatishni
-    hal qiladi."""
+    """FFmpeg'ni asinxron ishga tushiradi, `-progress pipe:1` orqali foizni
+    `on_progress(percent)`ga yuboradi, `check_cancelled()` True bo'lsa darhol
+    o'ldiradi.
+
+    HIMOYALAR (qotib qolmaslik uchun):
+      * STALL watchdog: `stall_seconds` davomida ffmpeg'dan umuman progress
+        qatori kelmasa (disk to'la / I/O osilgan) jarayon o'ldiriladi.
+      * Umumiy `timeout`.
+      * kill'dan keyingi kutish cheklangan (`_kill_proc`).
+      * "No space left on device" -> `DiskFullError` (qayta urinilmaydi).
+    """
+    from utils.disk_guard import DiskFullError
     cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-nostats"] + args
     proc = None
+    stderr_task = None
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -526,10 +552,13 @@ async def run_ffmpeg_progress(
         async def _read_stderr():
             async for line in proc.stderr:
                 stderr_chunks.append(line.decode(errors="replace"))
+                if len(stderr_chunks) > 400:
+                    del stderr_chunks[:200]
 
         stderr_task = asyncio.ensure_future(_read_stderr())
         current_time = 0.0
         last_percent = -1
+        state = {"cancelled": False, "stalled": False}
 
         async def _emit(percent: int) -> None:
             if on_progress is None:
@@ -538,15 +567,21 @@ async def run_ffmpeg_progress(
             if asyncio.iscoroutine(result):
                 await result
 
-        cancelled = False
-
         async def _read_stdout():
-            nonlocal current_time, last_percent, cancelled
-            async for raw_line in proc.stdout:
+            nonlocal current_time, last_percent
+            while True:
+                try:
+                    raw_line = await asyncio.wait_for(proc.stdout.readline(), timeout=stall_seconds)
+                except asyncio.TimeoutError:
+                    state["stalled"] = True
+                    await _kill_proc(proc)
+                    return
+                if not raw_line:
+                    return
                 if check_cancelled is not None and check_cancelled():
-                    cancelled = True
-                    proc.kill()
-                    break
+                    state["cancelled"] = True
+                    await _kill_proc(proc)
+                    return
                 line = raw_line.decode(errors="replace").strip()
                 m = re.search(r"out_time_ms=(\d+)", line)
                 if m:
@@ -568,17 +603,28 @@ async def run_ffmpeg_progress(
         try:
             await asyncio.wait_for(_read_stdout(), timeout=timeout)
         except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+            await _kill_proc(proc)
             return False, f"Vaqt tugadi ({timeout // 60} daqiqa)"
 
-        await asyncio.wait_for(proc.wait(), timeout=30)
-        await stderr_task
-
-        if cancelled:
-            return False, "Bekor qilindi"
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=30)
+        except asyncio.TimeoutError:
+            await _kill_proc(proc)
+        try:
+            await asyncio.wait_for(stderr_task, timeout=5)
+        except Exception:
+            stderr_task.cancel()
 
         stderr_text = "".join(stderr_chunks)
+        if state["cancelled"]:
+            return False, "Bekor qilindi"
+        if "No space left on device" in stderr_text:
+            raise DiskFullError("ffmpeg: diskda joy qolmadi (No space left on device)")
+        if state["stalled"]:
+            return False, (
+                f"ffmpeg {stall_seconds // 60} daqiqa davomida javob bermadi "
+                "(ehtimol disk to'lgan yoki I/O osilgan) -- o'ldirildi"
+            )
         if proc.returncode != 0:
             return False, stderr_text[-2000:] if stderr_text else "Noma'lum xato"
 
@@ -589,13 +635,19 @@ async def run_ffmpeg_progress(
         return True, ""
     except FileNotFoundError:
         return False, "FFmpeg topilmadi."
+    except asyncio.CancelledError:
+        # Tashqi taymaut/bekor qilish: ffmpeg yetim bo'lib diskni yeb
+        # turmasligi uchun albatta o'ldiramiz.
+        if proc is not None:
+            await _kill_proc(proc)
+        raise
+    except DiskFullError:
+        if proc is not None:
+            await _kill_proc(proc)
+        raise
     except Exception as e:
         if proc is not None:
-            try:
-                proc.kill()
-                await proc.wait()
-            except Exception:
-                pass
+            await _kill_proc(proc)
         return False, str(e)
 
 
@@ -608,19 +660,33 @@ class FaststartError(Exception):
     foydalanuvchiga ochiq xabar beradi."""
 
 
+def _safe_remove(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 async def prepare_for_telegram_async(input_path: str, on_progress=None, check_cancelled=None) -> tuple[str, bool]:
     """`prepare_for_telegram`ning asinxron, jonli progress bilan ishlaydigan
     varianti -- event loop bloklanmaydi, `on_progress(percent)` orqali
     chaqiruvchiga real ffmpeg foizini yetkazadi, `check_cancelled()` True
     bo'lsa esa ffmpeg jarayonini darhol to'xtatadi (masalan progress-bar
     xabarini yangilash va bekor qilish tugmasi uchun)."""
+    from utils.disk_guard import DiskFullError, ensure_free_space
     ext = os.path.splitext(input_path)[1].lower().lstrip(".")
+    try:
+        # chiqish fayli ~ kirish fayli hajmida bo'ladi
+        ensure_free_space(os.path.getsize(input_path))
+    except OSError:
+        pass
     info = await _run_in_executor(get_stream_info, input_path)
     duration_sec = await _run_in_executor(get_video_duration, input_path)
 
     if ext == "mp4" and info["vcodec"] == "h264" and info["pixfmt"] in ("yuv420p", "yuvj420p") and info["acodec"] == "aac":
         out_path = make_temp_path("mp4")
-        ok, err = await run_ffmpeg_progress(
+        try:
+          ok, err = await run_ffmpeg_progress(
             [
                 "-i", input_path,
                 # DIQQAT: `-map` ATAYLAB faqat video+audio'ni tanlaydi.
@@ -635,8 +701,11 @@ async def prepare_for_telegram_async(input_path: str, on_progress=None, check_ca
                 "-map", "0:v:0", "-map", "0:a:0?",
                 "-c", "copy", "-movflags", "+faststart", out_path,
             ],
-            duration_sec=duration_sec, on_progress=on_progress, check_cancelled=check_cancelled, timeout=600,
-        )
+            duration_sec=duration_sec, on_progress=on_progress, check_cancelled=check_cancelled, timeout=1800,
+          )
+        except DiskFullError:
+            _safe_remove(out_path)
+            raise
         if ok:
             return out_path, True
         try:
@@ -664,9 +733,13 @@ async def prepare_for_telegram_async(input_path: str, on_progress=None, check_ca
         "-movflags", "+faststart",
         out_path,
     ]
-    ok, err = await run_ffmpeg_progress(
-        args, duration_sec=duration_sec, on_progress=on_progress, check_cancelled=check_cancelled, timeout=7200,
-    )
+    try:
+        ok, err = await run_ffmpeg_progress(
+            args, duration_sec=duration_sec, on_progress=on_progress, check_cancelled=check_cancelled, timeout=7200,
+        )
+    except DiskFullError:
+        _safe_remove(out_path)
+        raise
     if ok:
         return out_path, True
     try:
