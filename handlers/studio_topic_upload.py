@@ -33,6 +33,7 @@ from utils.studio_group import get_slug_by_chat_id, get_content_key_by_topic, se
 from utils.studio_topic_queue import add_item, get_queue, remove_item, clear_queue
 from utils.orphan_uploads import record_orphan_upload
 from utils.ffmpeg_utils import prepare_for_telegram_async, make_temp_path, FaststartError
+from utils.disk_guard import DiskFullError, ensure_free_space, remove_local_botapi_source
 from utils.keyed_lock import KeyedLockMap
 from handlers.studio_group import quality_label
 from handlers.studio_upload import _presign_and_put, _auth_headers
@@ -300,6 +301,9 @@ async def _download_file_with_progress(url: str, dest_path: str, *, on_progress=
     olamiz (tezroq va ishonchli, chunki fayl allaqachon shu yerda)."""
     if os.path.isfile(url):
         await _copy_local_file_with_progress(url, dest_path, on_progress=on_progress)
+        # Nusxa olindi -- local Bot API'ning ASL fayli endi kerak emas va uni
+        # hech kim o'chirmaydi (disk to'lishining asosiy sababi edi).
+        remove_local_botapi_source(url)
         return
 
     if not re.match(r"^https?://", url):
@@ -1353,6 +1357,8 @@ async def _process_one_item(
 
         async def _download():
             tg_file = await context.bot.get_file(item["file_id"], read_timeout=120, connect_timeout=30)
+            # Nusxa + ffmpeg chiqishi uchun ~2x joy kerak.
+            ensure_free_space(int(getattr(tg_file, "file_size", 0) or 0) * 2)
             path = make_temp_path("mp4")
             attempted_dl_paths.append(path)
             await _download_file_with_progress(
@@ -1545,6 +1551,9 @@ async def _process_one_item(
             logger.warning("Caption tahrirlashda xato (message_id=%s): %s", item["message_id"], e)
 
         return None
+    except DiskFullError as e:
+        logger.error("Disk to'lgan (message_id=%s): %s", item["message_id"], e)
+        return f"💽 Disk to'lgan: {_short_error(str(e))}"
     except FaststartError as e:
         # Faststart/format tayyorlash bosqichi (retry'lardan keyin ham)
         # muvaffaqiyatsiz tugadi -- bu TARMOQ xatosi emas (ffmpeg/disk

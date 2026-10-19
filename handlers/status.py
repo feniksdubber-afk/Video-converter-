@@ -66,6 +66,18 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
+    extra_lines = ""
+    try:
+        from utils.disk_guard import dir_size, TGBOTAPI_DIR, DUBBING_TEMP_DIR
+        tg_n, tg_b = dir_size(TGBOTAPI_DIR)
+        du_n, du_b = dir_size(DUBBING_TEMP_DIR)
+        extra_lines = (
+            f"\n  • Local Bot API ({tg_n} fayl): {_fmt_size(tg_b)}"
+            f"\n  • Dubbing temp ({du_n} fayl): {_fmt_size(du_b)}"
+        )
+    except Exception:
+        pass
+
     allowed = list_allowed()
     admins = list_admins()
 
@@ -106,6 +118,7 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🗂 *Vaqtinchalik fayllar (TEMP_DIR):*\n"
         f"  • Fayllar: {temp_count}\n"
         f"  • Hajm: {_fmt_size(temp_bytes)}"
+        f"{extra_lines}"
         f"{disk_line}\n\n"
         f"👥 *Foydalanuvchilar:*\n"
         f"  • Ruxsatli: {len(allowed)}\n"
@@ -115,3 +128,20 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await update.message.reply_text(text, parse_mode="Markdown")
+
+
+async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/tozalash -- admin: diskni shoshilinch tozalaydi (20 daqiqadan eski
+    vaqtinchalik, dubbing va local Bot API fayllari)."""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Faqat admin.")
+        return
+    import asyncio
+    from utils.disk_guard import emergency_cleanup, free_bytes
+    before = free_bytes()
+    n, freed = await asyncio.to_thread(emergency_cleanup)
+    after = free_bytes()
+    await update.message.reply_text(
+        f"🧹 {n} ta fayl o'chirildi, {_fmt_size(freed)} bo'shatildi.\n"
+        f"💽 Bo'sh joy: {_fmt_size(before)} → {_fmt_size(after)}"
+    )
