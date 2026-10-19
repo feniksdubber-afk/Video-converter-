@@ -98,7 +98,7 @@ from handlers.post_test import post_test_handler, fileid_handler
 from handlers.netfilm_handler import netfilm_handler, netfilm_callback_handler
 from handlers.url_downloader import dl_handler, dl_callback_handler
 from handlers.torrent_handler import torrent_handler, torrent_callback_handler
-from handlers.status import status_handler
+from handlers.status import status_handler, cleanup_command
 from utils.auth_handlers import (
     auth_gate, allow_handler, deny_handler, users_handler,
     studios_list_handler, studio_unbind_handler, studio_token_handler, handle_studio_pick,
@@ -882,6 +882,12 @@ async def _post_init(app):
     logger.info("✅ SQLite DB tayyor.")
     logger.info("✅ Auth whitelist yuklandi.")
     _cleanup_temp_dir()
+    try:
+        from utils.disk_guard import cleanup_all
+        # Restartda hech narsa ishlamayapti -- 1 soatdan eski hamma narsa chiqit.
+        cleanup_all(temp_age=3600, tgapi_age=3600)
+    except Exception as e:
+        logger.warning("disk_guard start tozalash xatosi: %s", e)
 
     async def _autotopic_loop():
         from utils.studio_autotopic import sync_all_studio_topics
@@ -903,12 +909,21 @@ async def _post_init(app):
         # emas. Har 1 soatda TEMP_DIR dagi 6 soatdan eski vaqtinchalik
         # fayllarni o'chiramiz, disk to'lib qolmasligi uchun.
         await asyncio.sleep(60)
+        from utils.disk_guard import cleanup_all, emergency_cleanup, free_bytes, MIN_FREE_BYTES
+        tick = 0
         while True:
             try:
-                _cleanup_temp_dir(max_age_seconds=6 * 3600)
+                if tick % 12 == 0:  # har 1 soatda
+                    _cleanup_temp_dir(max_age_seconds=6 * 3600)
+                    cleanup_all(temp_age=6 * 3600, tgapi_age=2 * 3600)
+                # har 5 daqiqada: joy kam qolsa shoshilinch tozalash
+                if free_bytes() < MIN_FREE_BYTES:
+                    logger.warning("💽 Disk to'lay deb qoldi -- shoshilinch tozalash")
+                    emergency_cleanup()
             except Exception as e:
-                logger.warning("TEMP_DIR tozalash tsiklida xato: %s", e)
-            await asyncio.sleep(3600)
+                logger.warning("Disk tozalash tsiklida xato: %s", e)
+            tick += 1
+            await asyncio.sleep(300)
 
     asyncio.create_task(_cleanup_loop())
 
@@ -988,6 +1003,7 @@ def main():
     app.add_handler(CommandHandler("deny", deny_handler))
     app.add_handler(CommandHandler("users", users_handler))
     app.add_handler(CommandHandler("status", status_handler))
+    app.add_handler(CommandHandler("tozalash", cleanup_command))
     app.add_handler(CommandHandler("studiyalar", studios_list_handler))
     app.add_handler(CommandHandler("studiya_chiqar", studio_unbind_handler))
     app.add_handler(CommandHandler("studiya_token", studio_token_handler))
