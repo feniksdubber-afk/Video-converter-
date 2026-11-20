@@ -37,6 +37,27 @@ CODEC_EXT = {
 }
 
 
+# rasmli (image-based) subtitrlar — matnga o'tkazib bo'lmaydi, faqat copy qilinadi
+IMAGE_CODECS = {"hdmv_pgs_subtitle": "sup", "dvd_subtitle": "mks",
+                "dvb_subtitle": "mks", "xsub": "mks"}
+
+SUB_TIMEOUT = 900  # katta fayllarda 120s yetmasdi
+
+
+def _build_cmd(video_path: str, stream_idx: int, codec: str, fmt: str, out: str):
+    """(cmd, real_fmt) qaytaradi. Rasmli subtitrlar uchun -c copy ishlatiladi."""
+    if codec in IMAGE_CODECS:
+        return ([
+            "ffmpeg", "-y", "-i", video_path,
+            "-map", f"0:{stream_idx}", "-c:s", "copy", out,
+        ], IMAGE_CODECS[codec])
+    codec_opt = {"srt": "srt", "ass": "ass", "vtt": "webvtt"}.get(fmt, "srt")
+    return ([
+        "ffmpeg", "-y", "-i", video_path,
+        "-map", f"0:{stream_idx}", "-c:s", codec_opt, out,
+    ], fmt)
+
+
 def _sub_streams(streams: list[dict]) -> list[dict]:
     return [s for s in streams if s.get("codec_type") == "subtitle"]
 
@@ -100,7 +121,7 @@ async def show_subtitle_extractor_menu(update: Update, context: ContextTypes.DEF
     context.user_data["streams"] = streams
     context.user_data["state"] = "subtitle_extractor"
 
-    sub_info = "\n".join(f"  • {_stream_label(s)}" for s in subs)
+    sub_info = "\n".join(f"  • {_md_escape(_stream_label(s))}" for s in subs)
     await query.edit_message_text(
         f"📝 *Subtitr Extractor*\n\n"
         f"Topilgan subtitrlar:\n{sub_info}\n\n"
@@ -127,7 +148,7 @@ async def handle_subext_pick(update: Update, context: ContextTypes.DEFAULT_TYPE,
     label = _stream_label(target)
     await query.edit_message_text(
         f"📝 *Subtitr Extractor*\n\n"
-        f"Tanlangan: `{label}`\n\n"
+        f"Tanlangan: {_md_escape(label)}\n\n"
         f"Qaysi formatda saqlash?",
         reply_markup=_fmt_keyboard(stream_idx),
         parse_mode="Markdown",
@@ -150,12 +171,11 @@ async def handle_subext_format(
         await query.edit_message_text("❌ Video topilmadi.")
         return
 
-    output_path = make_temp_path(fmt)
-    cmd = [
-        "ffmpeg", "-y", "-i", video_path,
-        "-map", f"0:{stream_idx}",
-        output_path,
-    ]
+    _streams = context.user_data.get("streams", [])
+    _t = next((x for x in _streams if x.get("index") == stream_idx), {})
+    codec = _t.get("codec_name", "")
+    output_path = make_temp_path(IMAGE_CODECS.get(codec, fmt))
+    cmd, fmt = _build_cmd(video_path, stream_idx, codec, fmt, output_path)
 
     status_msg = await query.message.reply_text(
         f"⏳ *#{stream_idx} subtitr → {fmt.upper()} formatiga o'tkazilmoqda...*",
@@ -169,7 +189,7 @@ async def handle_subext_format(
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             None,
-            lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=120),
+            lambda c=cmd: subprocess.run(c, capture_output=True, text=True, timeout=SUB_TIMEOUT),
         )
         if result.returncode != 0:
             raise RuntimeError(result.stderr[-1500:])
@@ -233,18 +253,10 @@ async def handle_subext_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
         codec = s.get("codec_name", "")
         lang  = s.get("tags", {}).get("language", "")
 
-        # native extraction format; SUP can't be re-encoded to text
-        fmt = CODEC_EXT.get(codec, "srt")
-        # image-based subs (PGS/DVD) stay as-is; text subs → srt by default
-        if fmt not in ("sup", "sub"):
-            fmt = "srt"
-
-        output_path = make_temp_path(fmt)
-        cmd = [
-            "ffmpeg", "-y", "-i", video_path,
-            "-map", f"0:{idx}",
-            output_path,
-        ]
+        # rasmli subtitrlar copy, matnlilar → srt
+        fmt = "srt"
+        output_path = make_temp_path(IMAGE_CODECS.get(codec, fmt))
+        cmd, fmt = _build_cmd(video_path, idx, codec, fmt, output_path)
 
         try:
             await status_msg.edit_text(
@@ -259,7 +271,7 @@ async def handle_subext_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _loop = asyncio.get_running_loop()
             result = await _loop.run_in_executor(
                 None,
-                lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=120),
+                lambda c=cmd: subprocess.run(c, capture_output=True, text=True, timeout=SUB_TIMEOUT),
             )
             if result.returncode != 0:
                 raise RuntimeError(result.stderr[-500:])
