@@ -19,12 +19,14 @@ from handlers.studio_content import _fetch_list
 
 logger = logging.getLogger(__name__)
 
+SYNC_PAGE_SIZE = 50  # API maksimumi
+
 
 async def _sync_one_kind(context: ContextTypes.DEFAULT_TYPE, studio: dict, kind: str) -> None:
     page = 1
     key = "movies" if kind == "m" else "series"
     while True:
-        data = await _fetch_list(studio, kind, page, "")
+        data = await _fetch_list(studio, kind, page, "", limit=SYNC_PAGE_SIZE)
         if not data:
             return
         items = data.get(key) or []
@@ -42,7 +44,7 @@ async def _sync_one_kind(context: ContextTypes.DEFAULT_TYPE, studio: dict, kind:
             if dest:
                 logger.info("Avtomatik topic ochildi: %s / %s (#%s)", studio["slug"], title, content_id)
         total = data.get("total", 0)
-        if page * 6 >= total:
+        if page * SYNC_PAGE_SIZE >= total:
             return
         page += 1
 
