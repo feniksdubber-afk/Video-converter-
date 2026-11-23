@@ -41,9 +41,9 @@ def _kind_name(kind: str) -> str:
     return "Filmlar" if kind == "m" else "Seriallar"
 
 
-async def _fetch_list(studio: dict, kind: str, page: int, search: str) -> dict | None:
+async def _fetch_list(studio: dict, kind: str, page: int, search: str, limit: int = PAGE_SIZE) -> dict | None:
     endpoint = "movies" if kind == "m" else "series"
-    params = {"page": page, "limit": PAGE_SIZE}
+    params = {"page": page, "limit": limit}
     if search:
         params["search"] = search
 
